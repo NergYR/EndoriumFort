@@ -1,0 +1,2 @@
+{"id":1,"type":"session.create","actor":"admin","role":"admin","createdAt":"2026-02-13T12:54:32Z","payload":{"sessionId":1,"target":"192.168.0.31","user":"admin","protocol":"ssh"}}
+{"id":2,"type":"session.terminate","actor":"admin","role":"admin","createdAt":"2026-02-13T12:55:45Z","payload":{"sessionId":1,"target":"192.168.0.31","user":"admin","protocol":"ssh"}}
