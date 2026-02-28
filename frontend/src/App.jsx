@@ -1064,13 +1064,15 @@ export default function App() {
   const renderLogin = () => (
     <div className="login-page">
       <div className="login-card">
+        <div className="login-logo-wrapper">
+          <img src="/assets/logo-full-blue.png" alt="EndoriumFort" className="login-logo" />
+        </div>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-          <span className="badge">EndoriumFort</span>
+          <h1>Sign in</h1>
           <button type="button" className="ghost icon-btn" title={darkMode ? 'Light mode' : 'Dark mode'} onClick={toggleDarkMode}>
             {darkMode ? '☀️' : '🌙'}
           </button>
         </div>
-        <h1>Sign in</h1>
         <p className="muted">
           Access the WebBastion console to launch remote sessions.
         </p>
@@ -1133,7 +1135,7 @@ export default function App() {
     <div className="page compact">
       <header className="topbar">
         <div className="brand">
-          <span className="badge">EndoriumFort</span>
+          <img src="/assets/logo-icon-dark.png" alt="EndoriumFort" className="brand-logo" />
           <div>
             <h1>Admin Console</h1>
             <p>Manage resources available for operators.</p>
@@ -1618,7 +1620,7 @@ export default function App() {
     <div className="page compact">
       <header className="topbar">
         <div className="brand">
-          <span className="badge">EndoriumFort</span>
+          <img src="/assets/logo-icon-dark.png" alt="EndoriumFort" className="brand-logo" />
           <div>
             <h1>WebBastion Console</h1>
             <p>Minimal access console for SSH sessions and live supervision.</p>
