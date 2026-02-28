@@ -1,0 +1,3990 @@
+#include "crow.h"
+
+#include <sqlite3.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cctype>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <cstring>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <random>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+#include "version.h"
+
+#ifdef ENDORIUMFORT_SSH_ENABLED
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <libssh2.h>
+#endif
+#endif
+
+// For HTTP client requests via ASIO
+#ifdef _WIN32
+  // Windows socket headers
+#else
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/tcp.h>
+#endif
+
+struct Session {
+  int id = 0;
+  std::string target;
+  std::string user;
+  std::string protocol;
+  std::string status;
+  std::string createdAt;
+  std::string terminatedAt;
+  int port = 22;
+};
+
+struct Resource {
+  int id = 0;
+  std::string name;
+  std::string target;
+  std::string protocol;
+  int port = 22;
+  std::string description;
+  std::string imageUrl;
+  std::string httpUsername;
+  std::string httpPassword;
+  std::string createdAt;
+  std::string updatedAt;
+};
+
+struct UserAccount {
+  int id = 0;
+  std::string username;
+  std::string password;
+  std::string role;
+  std::string createdAt;
+  std::string updatedAt;
+};
+
+struct AuthSession {
+  int userId = 0;
+  std::string user;
+  std::string role;
+  std::string token;
+  std::string issuedAt;
+};
+
+struct AuditEvent {
+  int id = 0;
+  std::string type;
+  std::string actor;
+  std::string role;
+  std::string createdAt;
+  std::string payloadJson;
+  bool payloadIsJson = false;
+};
+
+struct SessionEvent {
+  int id = 0;
+  std::string type;
+  std::string createdAt;
+  std::string payloadJson;
+};
+
+struct SqliteDb {
+  sqlite3 *db = nullptr;
+  std::mutex mutex;
+
+  bool open(const std::string &path, std::string &error) {
+    if (sqlite3_open(path.c_str(), &db) != SQLITE_OK) {
+      error = sqlite3_errmsg(db ? db : nullptr);
+      return false;
+    }
+    return true;
+  }
+
+  bool exec(const std::string &sql, std::string &error) {
+    char *errmsg = nullptr;
+    if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &errmsg) !=
+        SQLITE_OK) {
+      if (errmsg) {
+        error = errmsg;
+        sqlite3_free(errmsg);
+      } else {
+        error = "SQLite exec failed";
+      }
+      return false;
+    }
+    return true;
+  }
+
+  ~SqliteDb() {
+    if (db) {
+      sqlite3_close(db);
+    }
+  }
+};
+
+#ifdef ENDORIUMFORT_SSH_ENABLED
+#ifndef _WIN32
+struct SshConnection {
+  int socket_fd = -1;
+  LIBSSH2_SESSION *session = nullptr;
+  LIBSSH2_CHANNEL *channel = nullptr;
+  std::thread reader;
+  std::atomic<bool> running{false};
+  std::mutex write_mutex;
+  int session_id = 0;
+};
+
+void ssh_disconnect(SshConnection &connection);
+
+int open_tcp_socket(const std::string &host, int port, std::string &error) {
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_protocol = IPPROTO_TCP;
+
+  addrinfo *result = nullptr;
+  const std::string port_str = std::to_string(port);
+  int rc = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result);
+  if (rc != 0 || !result) {
+    error = "Unable to resolve host";
+    return -1;
+  }
+
+  int sock = -1;
+  for (addrinfo *ptr = result; ptr != nullptr; ptr = ptr->ai_next) {
+    sock = static_cast<int>(socket(ptr->ai_family, ptr->ai_socktype,
+                                   ptr->ai_protocol));
+    if (sock < 0) {
+      continue;
+    }
+    if (connect(sock, ptr->ai_addr, ptr->ai_addrlen) == 0) {
+      break;
+    }
+    close(sock);
+    sock = -1;
+  }
+
+  freeaddrinfo(result);
+  if (sock < 0) {
+    error = "Unable to connect";
+  }
+  return sock;
+}
+
+bool ssh_connect(SshConnection &connection, const Session &session,
+                 const std::string &password, int cols, int rows,
+                 std::string &error) {
+  connection.socket_fd = open_tcp_socket(session.target, session.port, error);
+  if (connection.socket_fd < 0) {
+    return false;
+  }
+
+  connection.session = libssh2_session_init();
+  if (!connection.session) {
+    error = "libssh2 init failed";
+    close(connection.socket_fd);
+    connection.socket_fd = -1;
+    return false;
+  }
+
+  libssh2_session_set_blocking(connection.session, 1);
+  if (libssh2_session_handshake(connection.session, connection.socket_fd) != 0) {
+    error = "SSH handshake failed";
+    ssh_disconnect(connection);
+    return false;
+  }
+
+  if (libssh2_userauth_password(connection.session, session.user.c_str(),
+                                password.c_str()) != 0) {
+    error = "SSH authentication failed";
+    ssh_disconnect(connection);
+    return false;
+  }
+
+  connection.channel = libssh2_channel_open_session(connection.session);
+  if (!connection.channel) {
+    error = "SSH channel open failed";
+    ssh_disconnect(connection);
+    return false;
+  }
+
+  if (libssh2_channel_request_pty_ex(connection.channel, "xterm-256color", 13,
+                                    nullptr, 0, cols, rows, 0, 0) != 0) {
+    error = "SSH pty request failed";
+    ssh_disconnect(connection);
+    return false;
+  }
+
+  if (libssh2_channel_shell(connection.channel) != 0) {
+    error = "SSH shell request failed";
+    ssh_disconnect(connection);
+    return false;
+  }
+
+  libssh2_session_set_blocking(connection.session, 0);
+  connection.running = true;
+  return true;
+}
+
+void ssh_disconnect(SshConnection &connection) {
+  connection.running = false;
+  if (connection.reader.joinable()) {
+    connection.reader.join();
+  }
+  if (connection.channel) {
+    libssh2_channel_close(connection.channel);
+    libssh2_channel_free(connection.channel);
+    connection.channel = nullptr;
+  }
+  if (connection.session) {
+    libssh2_session_disconnect(connection.session, "Session closed");
+    libssh2_session_free(connection.session);
+    connection.session = nullptr;
+  }
+  if (connection.socket_fd >= 0) {
+    close(connection.socket_fd);
+    connection.socket_fd = -1;
+  }
+}
+#endif
+#endif
+
+std::string now_utc() {
+  auto now = std::chrono::system_clock::now();
+  std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+  std::tm utc_tm{};
+#ifdef _WIN32
+  gmtime_s(&utc_tm, &now_time);
+#else
+  gmtime_r(&now_time, &utc_tm);
+#endif
+  std::ostringstream oss;
+  oss << std::put_time(&utc_tm, "%Y-%m-%dT%H:%M:%SZ");
+  return oss.str();
+}
+
+std::string json_escape(const std::string &value) {
+  std::ostringstream oss;
+  for (char ch : value) {
+    switch (ch) {
+      case '\\':
+        oss << "\\\\";
+        break;
+      case '"':
+        oss << "\\\"";
+        break;
+      case '\n':
+        oss << "\\n";
+        break;
+      case '\r':
+        oss << "\\r";
+        break;
+      case '\t':
+        oss << "\\t";
+        break;
+      default:
+        oss << ch;
+        break;
+    }
+  }
+  return oss.str();
+}
+
+std::string build_session_payload_json(const Session &session) {
+  std::ostringstream oss;
+  oss << '{';
+  oss << "\"sessionId\":" << session.id << ',';
+  oss << "\"target\":\"" << json_escape(session.target) << "\",";
+  oss << "\"user\":\"" << json_escape(session.user) << "\",";
+  oss << "\"protocol\":\"" << json_escape(session.protocol) << "\",";
+  oss << "\"port\":" << session.port << ',';
+  oss << "\"status\":\"" << json_escape(session.status) << "\",";
+  oss << "\"createdAt\":\"" << json_escape(session.createdAt) << "\"";
+  if (!session.terminatedAt.empty()) {
+    oss << ",\"terminatedAt\":\"" << json_escape(session.terminatedAt)
+        << "\"";
+  }
+  oss << '}';
+  return oss.str();
+}
+
+std::string build_resource_payload_json(const Resource &resource) {
+  std::ostringstream oss;
+  oss << '{';
+  oss << "\"resourceId\":" << resource.id << ',';
+  oss << "\"name\":\"" << json_escape(resource.name) << "\",";
+  oss << "\"target\":\"" << json_escape(resource.target) << "\",";
+  oss << "\"protocol\":\"" << json_escape(resource.protocol) << "\",";
+  oss << "\"port\":" << resource.port;
+  if (!resource.description.empty()) {
+    oss << ",\"description\":\"" << json_escape(resource.description)
+        << "\"";
+  }
+  if (!resource.imageUrl.empty()) {
+    oss << ",\"imageUrl\":\"" << json_escape(resource.imageUrl) << "\"";
+  }
+  if (!resource.createdAt.empty()) {
+    oss << ",\"createdAt\":\"" << json_escape(resource.createdAt)
+        << "\"";
+  }
+  if (!resource.updatedAt.empty()) {
+    oss << ",\"updatedAt\":\"" << json_escape(resource.updatedAt)
+        << "\"";
+  }
+  oss << '}';
+  return oss.str();
+}
+
+bool is_allowed_role(const std::string &role,
+                     const std::vector<std::string> &allowed) {
+  for (const auto &item : allowed) {
+    if (item == role) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<std::string> extract_bearer_token(
+    const crow::request &request) {
+  auto header = request.get_header_value("Authorization");
+  const std::string prefix = "Bearer ";
+  if (header.rfind(prefix, 0) == 0 && header.size() > prefix.size()) {
+    return header.substr(prefix.size());
+  }
+  return std::nullopt;
+}
+
+std::string base64_encode(const std::string &input) {
+  static const char base64_chars[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string result;
+  int i = 0;
+  unsigned char array_3[3];
+  unsigned char array_4[4];
+
+  for (unsigned char c : input) {
+    array_3[i++] = c;
+    if (i == 3) {
+      array_4[0] = (array_3[0] & 0xfc) >> 2;
+      array_4[1] = ((array_3[0] & 0x03) << 4) + ((array_3[1] & 0xf0) >> 4);
+      array_4[2] = ((array_3[1] & 0x0f) << 2) + ((array_3[2] & 0xc0) >> 6);
+      array_4[3] = array_3[2] & 0x3f;
+
+      for (i = 0; i < 4; i++) {
+        result += base64_chars[array_4[i]];
+      }
+      i = 0;
+    }
+  }
+
+  if (i) {
+    for (int j = i; j < 3; j++) {
+      array_3[j] = '\0';
+    }
+
+    array_4[0] = (array_3[0] & 0xfc) >> 2;
+    array_4[1] = ((array_3[0] & 0x03) << 4) + ((array_3[1] & 0xf0) >> 4);
+    array_4[2] = ((array_3[1] & 0x0f) << 2) + ((array_3[2] & 0xc0) >> 6);
+
+    for (int j = 0; j < i + 1; j++) {
+      result += base64_chars[array_4[j]];
+    }
+
+    while (i++ < 3) {
+      result += '=';
+    }
+  }
+
+  return result;
+}
+
+crow::json::wvalue session_to_json(const Session &session) {
+  crow::json::wvalue payload;
+  payload["id"] = session.id;
+  payload["target"] = session.target;
+  payload["user"] = session.user;
+  payload["protocol"] = session.protocol;
+  payload["port"] = session.port;
+  payload["status"] = session.status;
+  payload["createdAt"] = session.createdAt;
+  if (!session.terminatedAt.empty()) {
+    payload["terminatedAt"] = session.terminatedAt;
+  }
+  return payload;
+}
+
+crow::json::wvalue resource_to_json(const Resource &resource) {
+  crow::json::wvalue payload;
+  payload["id"] = resource.id;
+  payload["name"] = resource.name;
+  payload["target"] = resource.target;
+  payload["protocol"] = resource.protocol;
+  payload["port"] = resource.port;
+  payload["description"] = resource.description;
+  payload["imageUrl"] = resource.imageUrl;
+  payload["httpUsername"] = resource.httpUsername;
+  // Ne pas exposer httpPassword pour des raisons de sécurité
+  payload["createdAt"] = resource.createdAt;
+  payload["updatedAt"] = resource.updatedAt;
+  return payload;
+}
+
+std::string build_user_payload_json(const UserAccount &user) {
+  std::ostringstream oss;
+  oss << '{';
+  oss << "\"userId\":" << user.id << ',';
+  oss << "\"username\":\"" << json_escape(user.username) << "\",";
+  oss << "\"role\":\"" << json_escape(user.role) << "\"";
+  if (!user.createdAt.empty()) {
+    oss << ",\"createdAt\":\"" << json_escape(user.createdAt) << "\"";
+  }
+  if (!user.updatedAt.empty()) {
+    oss << ",\"updatedAt\":\"" << json_escape(user.updatedAt) << "\"";
+  }
+  oss << '}';
+  return oss.str();
+}
+
+crow::json::wvalue user_to_json(const UserAccount &user) {
+  crow::json::wvalue payload;
+  payload["id"] = user.id;
+  payload["username"] = user.username;
+  payload["role"] = user.role;
+  payload["createdAt"] = user.createdAt;
+  payload["updatedAt"] = user.updatedAt;
+  return payload;
+}
+
+std::string to_lower(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return value;
+}
+
+std::optional<int> parse_int_param(const char *value) {
+  if (!value) {
+    return std::nullopt;
+  }
+  try {
+    return std::stoi(value);
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
+// Simple HTTP client to proxy requests
+struct HttpProxyResponse {
+  int status_code = 0;
+  std::string body;
+  std::unordered_map<std::string, std::string> headers;
+  std::vector<std::string> set_cookie_headers;
+};
+
+HttpProxyResponse http_proxy_request(const std::string &method,
+                                     const std::string &host, int port,
+                                     const std::string &path,
+                                     const std::string &request_body,
+                                     const std::unordered_map<std::string, std::string> &request_headers,
+                                     std::string &error) {
+  HttpProxyResponse response;
+
+  // Create socket
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0) {
+    error = "Failed to create socket";
+    return response;
+  }
+
+  // Connect to host
+  struct hostent *server_entry = gethostbyname(host.c_str());
+  if (!server_entry) {
+    error = "Failed to resolve hostname";
+    close(sock);
+    return response;
+  }
+
+  struct sockaddr_in server_addr;
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(port);
+  memcpy(&server_addr.sin_addr.s_addr, server_entry->h_addr,
+         server_entry->h_length);
+
+  // Set connect timeout
+  struct timeval connect_tv;
+  connect_tv.tv_sec = 10;
+  connect_tv.tv_usec = 0;
+  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &connect_tv, sizeof(connect_tv));
+
+  if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    error = "Failed to connect to server";
+    close(sock);
+    return response;
+  }
+
+  // Set recv timeout (30 seconds) to prevent blocking indefinitely
+  struct timeval recv_tv;
+  recv_tv.tv_sec = 30;
+  recv_tv.tv_usec = 0;
+  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_tv, sizeof(recv_tv));
+
+  // Build HTTP request
+  std::ostringstream request;
+  request << method << " " << path << " HTTP/1.1\r\n";
+  // Include port in Host header for non-standard ports (HTTP !=80, HTTPS !=443)
+  if ((port == 80) || (port == 443)) {
+    request << "Host: " << host << "\r\n";
+  } else {
+    request << "Host: " << host << ":" << port << "\r\n";
+  }
+  request << "Connection: close\r\n";
+
+  // Add custom headers
+  for (const auto &kv : request_headers) {
+    if (kv.first != "Host" && kv.first != "Connection") {
+      request << kv.first << ": " << kv.second << "\r\n";
+    }
+  }
+
+  if (!request_body.empty()) {
+    request << "Content-Length: " << request_body.length() << "\r\n";
+  }
+
+  request << "\r\n";
+  if (!request_body.empty()) {
+    request << request_body;
+  }
+
+  std::string request_str = request.str();
+
+  // Send request
+  ssize_t sent = send(sock, request_str.c_str(), request_str.length(), 0);
+  if (sent < 0) {
+    error = "Failed to send request";
+    close(sock);
+    return response;
+  }
+
+  // Receive response with smart termination detection.
+  // We read until connection close, but also detect end-of-body from
+  // Content-Length or chunked transfer-encoding to avoid blocking on
+  // servers that delay closing the connection.
+  std::string full_response;
+  char buffer[8192];
+  ssize_t received;
+
+  // Phase 1: Read until we have all headers (find \r\n\r\n)
+  bool headers_complete = false;
+  size_t header_end_pos = std::string::npos;
+  while (!headers_complete) {
+    received = recv(sock, buffer, sizeof(buffer), 0);
+    if (received <= 0) break;
+    full_response.append(buffer, received);
+    header_end_pos = full_response.find("\r\n\r\n");
+    if (header_end_pos != std::string::npos) {
+      headers_complete = true;
+    }
+  }
+
+  if (!headers_complete) {
+    close(sock);
+    if (full_response.empty()) {
+      error = "No response from upstream";
+    } else {
+      error = "Incomplete HTTP response headers";
+    }
+    return response;
+  }
+
+  // Parse headers to determine body length
+  size_t body_start = header_end_pos + 4;
+  std::string header_block = full_response.substr(0, header_end_pos);
+  std::string header_block_lower = to_lower(header_block);
+
+  long expected_content_length = -1;
+  bool is_chunked = false;
+  {
+    size_t cl_pos = header_block_lower.find("content-length:");
+    if (cl_pos != std::string::npos) {
+      size_t val_start = cl_pos + 15;
+      while (val_start < header_block_lower.size() &&
+             header_block_lower[val_start] == ' ') {
+        val_start++;
+      }
+      size_t val_end = header_block_lower.find("\r\n", val_start);
+      if (val_end == std::string::npos) val_end = header_block_lower.size();
+      try {
+        expected_content_length = std::stol(header_block_lower.substr(val_start, val_end - val_start));
+      } catch (...) {}
+    }
+    if (header_block_lower.find("transfer-encoding: chunked") != std::string::npos ||
+        header_block_lower.find("transfer-encoding:chunked") != std::string::npos) {
+      is_chunked = true;
+    }
+  }
+
+  // Phase 2: Read body based on detected method
+  if (expected_content_length >= 0) {
+    // Content-Length known: read until we have exactly that many body bytes
+    size_t body_so_far = full_response.size() - body_start;
+    while ((long)body_so_far < expected_content_length) {
+      received = recv(sock, buffer, sizeof(buffer), 0);
+      if (received <= 0) break;
+      full_response.append(buffer, received);
+      body_so_far = full_response.size() - body_start;
+    }
+  } else if (is_chunked) {
+    // Chunked: read until we see the final chunk marker "0\r\n"
+    // We look for \r\n0\r\n in the accumulated body data
+    auto has_final_chunk = [&]() -> bool {
+      if (full_response.size() < body_start + 5) return false;
+      // Check if body starts with "0\r\n" (empty body)
+      if (full_response.size() >= body_start + 3 &&
+          full_response[body_start] == '0' &&
+          full_response[body_start + 1] == '\r' &&
+          full_response[body_start + 2] == '\n') {
+        return true;
+      }
+      // Check for \r\n0\r\n pattern anywhere in body
+      return full_response.find("\r\n0\r\n", body_start) != std::string::npos;
+    };
+
+    while (!has_final_chunk()) {
+      received = recv(sock, buffer, sizeof(buffer), 0);
+      if (received <= 0) break;
+      full_response.append(buffer, received);
+    }
+  } else {
+    // Unknown length: read until connection close (with timeout already set)
+    while ((received = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
+      full_response.append(buffer, received);
+    }
+  }
+  close(sock);
+
+  // Parse HTTP response
+  size_t header_end = full_response.find("\r\n\r\n");
+  if (header_end == std::string::npos) {
+    header_end = full_response.find("\n\n");
+    if (header_end == std::string::npos) {
+      error = "Invalid HTTP response";
+      return response;
+    }
+    response.body = full_response.substr(header_end + 2);
+  } else {
+    response.body = full_response.substr(header_end + 4);
+  }
+
+  // Parse status line
+  size_t status_line_end = full_response.find("\r\n");
+  if (status_line_end == std::string::npos) {
+    status_line_end = full_response.find("\n");
+  }
+  std::string status_line = full_response.substr(0, status_line_end);
+  size_t code_start = status_line.find(" ") + 1;
+  size_t code_end = status_line.find(" ", code_start);
+  try {
+    response.status_code = std::stoi(status_line.substr(code_start, code_end - code_start));
+  } catch (const std::exception &) {
+    error = "Failed to parse status code";
+    return response;
+  }
+
+  // Parse response headers (basic)
+  size_t header_start = status_line_end + 2;
+  if (full_response[header_start] == '\r') header_start += 2;
+  
+  while (header_start < header_end) {
+    size_t header_line_end = full_response.find("\r\n", header_start);
+    if (header_line_end == std::string::npos) {
+      header_line_end = full_response.find("\n", header_start);
+    }
+    
+    std::string header_line =
+        full_response.substr(header_start, header_line_end - header_start);
+    size_t colon_pos = header_line.find(": ");
+    if (colon_pos != std::string::npos) {
+      std::string header_name = header_line.substr(0, colon_pos);
+      std::string header_value = header_line.substr(colon_pos + 2);
+      std::string header_name_lower = to_lower(header_name);
+      if (header_name_lower == "set-cookie") {
+        response.set_cookie_headers.push_back(header_value);
+      } else {
+        response.headers[header_name_lower] = header_value;
+      }
+    }
+    
+    header_start = header_line_end + 2;
+  }
+
+  auto encoding_it = response.headers.find("transfer-encoding");
+  if (encoding_it != response.headers.end() &&
+      encoding_it->second.find("chunked") != std::string::npos) {
+    std::string dechunked;
+    size_t pos = 0;
+    bool dechunk_success = true;
+    
+    while (pos < response.body.size() && dechunk_success) {
+      size_t line_end = response.body.find("\r\n", pos);
+      size_t line_len = 2;
+      if (line_end == std::string::npos) {
+        line_end = response.body.find('\n', pos);
+        line_len = 1;
+      }
+      if (line_end == std::string::npos) {
+        dechunk_success = false;
+        break;
+      }
+      std::string len_text = response.body.substr(pos, line_end - pos);
+      size_t ext_pos = len_text.find(';');
+      if (ext_pos != std::string::npos) {
+        len_text = len_text.substr(0, ext_pos);
+      }
+      
+      // Parse hex chunk size, handle various formats
+      size_t chunk_len = 0;
+      try {
+        chunk_len = std::stoul(len_text, nullptr, 16);
+      } catch (...) {
+        dechunk_success = false;
+        break;
+      }
+      
+      pos = line_end + line_len;
+      if (chunk_len == 0) {
+        // End of chunks
+        break;
+      }
+      if (pos + chunk_len > response.body.size()) {
+        dechunk_success = false;
+        break;
+      }
+      dechunked.append(response.body.substr(pos, chunk_len));
+      pos += chunk_len;
+      if (pos + 1 < response.body.size() && response.body[pos] == '\r' &&
+          response.body[pos + 1] == '\n') {
+        pos += 2;
+      } else if (pos < response.body.size() && response.body[pos] == '\n') {
+        pos += 1;
+      }
+    }
+    
+    // Use dechunked payload whenever parsing succeeded (including valid empty body)
+    if (dechunk_success) {
+      response.body = dechunked;
+      // Remove transfer-encoding header since we dechunked it
+      response.headers.erase("transfer-encoding");
+      // Set correct Content-Length after dechunking
+      response.headers["content-length"] = std::to_string(response.body.size());
+    }
+    // Otherwise keep original body - Crow will handle it or return error appropriately
+  }
+
+  return response;
+}
+
+int main() {
+  crow::SimpleApp app;
+  std::mutex session_mutex;
+  std::unordered_map<int, Session> sessions;
+  std::atomic<int> next_id{1};
+
+  std::mutex auth_mutex;
+  std::unordered_map<std::string, AuthSession> auth_sessions;
+
+  // Cryptographic random token generator
+  auto generate_token = []() -> std::string {
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<uint64_t> dist;
+    uint64_t a = dist(gen);
+    uint64_t b = dist(gen);
+    char buf[40];
+    snprintf(buf, sizeof(buf), "eft_%016llx%016llx",
+             (unsigned long long)a, (unsigned long long)b);
+    return std::string(buf);
+  };
+
+  std::mutex resource_mutex;
+  std::unordered_map<int, Resource> resources;
+  std::atomic<int> next_resource_id{1};
+
+  std::mutex user_mutex;
+  std::unordered_map<int, UserAccount> users;
+  std::atomic<int> next_user_id{1};
+
+  std::mutex audit_mutex;
+  std::vector<AuditEvent> audit_events;
+  std::atomic<int> next_audit_id{1};
+  const std::string audit_path = "audit-log.jsonl";
+
+  std::mutex proxy_cookie_mutex;
+  std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
+      proxy_cookie_jar;
+
+  SqliteDb sqlite;
+  std::string sqlite_error;
+  if (!sqlite.open("endoriumfort.db", sqlite_error)) {
+    std::cerr << "SQLite open failed: " << sqlite_error << '\n';
+  } else {
+    const std::string schema =
+        "CREATE TABLE IF NOT EXISTS sessions ("
+        "id INTEGER PRIMARY KEY,"
+        "target TEXT NOT NULL,"
+        "user TEXT NOT NULL,"
+        "protocol TEXT NOT NULL,"
+        "port INTEGER NOT NULL DEFAULT 22,"
+        "status TEXT NOT NULL,"
+        "created_at TEXT NOT NULL,"
+        "terminated_at TEXT"
+        ");";
+    if (!sqlite.exec(schema, sqlite_error)) {
+      std::cerr << "SQLite schema failed: " << sqlite_error << '\n';
+    }
+    sqlite.exec("ALTER TABLE sessions ADD COLUMN port INTEGER DEFAULT 22;",
+                sqlite_error);
+    const std::string resource_schema =
+        "CREATE TABLE IF NOT EXISTS resources ("
+        "id INTEGER PRIMARY KEY,"
+        "name TEXT NOT NULL,"
+        "target TEXT NOT NULL,"
+        "protocol TEXT NOT NULL,"
+        "port INTEGER NOT NULL DEFAULT 22,"
+        "description TEXT,"
+        "image_url TEXT,"
+        "created_at TEXT NOT NULL,"
+        "updated_at TEXT NOT NULL"
+        ");";
+    if (!sqlite.exec(resource_schema, sqlite_error)) {
+      std::cerr << "SQLite resource schema failed: " << sqlite_error << '\n';
+    }
+    sqlite.exec("ALTER TABLE resources ADD COLUMN image_url TEXT;",
+                sqlite_error);
+    sqlite.exec("ALTER TABLE resources ADD COLUMN http_username TEXT;",
+                sqlite_error);
+    sqlite.exec("ALTER TABLE resources ADD COLUMN http_password TEXT;",
+                sqlite_error);
+
+    const std::string user_schema =
+        "CREATE TABLE IF NOT EXISTS users ("
+        "id INTEGER PRIMARY KEY,"
+        "username TEXT NOT NULL UNIQUE,"
+        "password TEXT NOT NULL,"
+        "role TEXT NOT NULL,"
+        "created_at TEXT NOT NULL,"
+        "updated_at TEXT NOT NULL"
+        ");";
+    if (!sqlite.exec(user_schema, sqlite_error)) {
+      std::cerr << "SQLite user schema failed: " << sqlite_error << '\n';
+    }
+
+    const std::string user_resource_schema =
+        "CREATE TABLE IF NOT EXISTS user_resource_permissions ("
+        "id INTEGER PRIMARY KEY,"
+        "user_id INTEGER NOT NULL,"
+        "resource_id INTEGER NOT NULL,"
+        "created_at TEXT NOT NULL,"
+        "FOREIGN KEY (user_id) REFERENCES users(id),"
+        "FOREIGN KEY (resource_id) REFERENCES resources(id),"
+        "UNIQUE(user_id, resource_id)"
+        ");";
+    if (!sqlite.exec(user_resource_schema, sqlite_error)) {
+      std::cerr << "SQLite user_resource_permissions schema failed: "
+                << sqlite_error << '\n';
+    }
+  }
+
+  std::mutex event_mutex;
+  std::vector<SessionEvent> session_events;
+  std::atomic<int> next_event_id{1};
+
+  std::function<void(int)> close_ssh_for_session = [&](int) {};
+  std::function<void(int, const std::string &, const std::string &,
+                     const std::string &)>
+      terminate_session_internal =
+          [&](int, const std::string &, const std::string &,
+              const std::string &) {};
+
+#ifdef ENDORIUMFORT_SSH_ENABLED
+#ifndef _WIN32
+  std::mutex ws_mutex;
+  std::unordered_map<crow::websocket::connection *,
+                     std::shared_ptr<SshConnection>>
+      ws_connections;
+
+  close_ssh_for_session = [&](int session_id) {
+    std::vector<std::pair<crow::websocket::connection *,
+                          std::shared_ptr<SshConnection>>>
+        to_close;
+    {
+      std::lock_guard<std::mutex> lock(ws_mutex);
+      for (auto it = ws_connections.begin(); it != ws_connections.end();) {
+        if (it->second && it->second->session_id == session_id) {
+          to_close.push_back(*it);
+          it = ws_connections.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    for (const auto &entry : to_close) {
+      if (entry.second) {
+        ssh_disconnect(*entry.second);
+      }
+      if (entry.first) {
+        entry.first->close("terminated");
+      }
+    }
+  };
+#endif
+#endif
+
+#ifdef ENDORIUMFORT_SSH_ENABLED
+#ifndef _WIN32
+  if (libssh2_init(0) != 0) {
+    std::cerr << "libssh2 init failed" << '\n';
+  }
+#endif
+#endif
+
+  auto find_auth = [&](const crow::request &request)
+      -> std::optional<AuthSession> {
+    // First try bearer token from Authorization header
+    auto token = extract_bearer_token(request);
+    
+    // If no bearer token, try to get token from cookie
+    if (!token) {
+      auto cookie = request.get_header_value("Cookie");
+      if (!cookie.empty()) {
+        // Look for "endoriumfort_token=xxx" in the cookie header
+        size_t pos = cookie.find("endoriumfort_token=");
+        if (pos != std::string::npos) {
+          size_t start = pos + 19; // length of "endoriumfort_token="
+          size_t end = cookie.find(';', start);
+          if (end == std::string::npos) {
+            end = cookie.length();
+          }
+          token = cookie.substr(start, end - start);
+        }
+      }
+    }
+    
+    if (!token) {
+      return std::nullopt;
+    }
+    std::lock_guard<std::mutex> lock(auth_mutex);
+    auto it = auth_sessions.find(*token);
+    if (it == auth_sessions.end()) {
+      return std::nullopt;
+    }
+    return it->second;
+  };
+
+  auto find_auth_by_token = [&](const std::string &token)
+      -> std::optional<AuthSession> {
+    if (token.empty()) {
+      return std::nullopt;
+    }
+    std::lock_guard<std::mutex> lock(auth_mutex);
+    auto it = auth_sessions.find(token);
+    if (it == auth_sessions.end()) {
+      return std::nullopt;
+    }
+    return it->second;
+  };
+
+  auto append_audit = [&](const AuditEvent &event) {
+    std::lock_guard<std::mutex> lock(audit_mutex);
+    audit_events.push_back(event);
+    if (audit_events.size() > 200) {
+      audit_events.erase(audit_events.begin(), audit_events.begin() + 50);
+    }
+    std::ofstream out(audit_path, std::ios::app);
+    if (out) {
+      out << '{'
+          << "\"id\":" << event.id << ','
+          << "\"type\":\"" << json_escape(event.type) << "\","
+          << "\"actor\":\"" << json_escape(event.actor) << "\","
+          << "\"role\":\"" << json_escape(event.role) << "\","
+          << "\"createdAt\":\"" << json_escape(event.createdAt) << "\","
+          << "\"payload\":"
+          << (event.payloadIsJson ? event.payloadJson
+                                  : "\"" + json_escape(event.payloadJson) +
+                                        "\"")
+          << "}\n";
+    }
+  };
+
+  auto append_session_event = [&](const std::string &type,
+                                  const Session &session) {
+    SessionEvent event;
+    event.id = next_event_id.fetch_add(1);
+    event.type = type;
+    event.createdAt = now_utc();
+    event.payloadJson = build_session_payload_json(session);
+    std::lock_guard<std::mutex> lock(event_mutex);
+    session_events.push_back(event);
+    if (session_events.size() > 200) {
+      session_events.erase(session_events.begin(),
+                           session_events.begin() + 50);
+    }
+  };
+
+  auto load_sessions_from_db = [&]() {
+    if (!sqlite.db) {
+      return;
+    }
+    std::lock_guard<std::mutex> db_lock(sqlite.mutex);
+    const char *sql =
+      "SELECT id, target, user, protocol, port, status, created_at, "
+      "terminated_at FROM sessions";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite select failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+      return;
+    }
+
+    int max_id = 0;
+    {
+      std::lock_guard<std::mutex> lock(session_mutex);
+      while (sqlite3_step(stmt) == SQLITE_ROW) {
+        Session session;
+        session.id = sqlite3_column_int(stmt, 0);
+        session.target =
+            reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+        session.user =
+            reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+        session.protocol =
+          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+        session.port = sqlite3_column_int(stmt, 4);
+        if (session.port <= 0) {
+          session.port = 22;
+        }
+        session.status =
+          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
+        session.createdAt =
+          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 6));
+        const unsigned char *terminated = sqlite3_column_text(stmt, 7);
+        if (terminated) {
+          session.terminatedAt = reinterpret_cast<const char *>(terminated);
+        }
+        sessions[session.id] = session;
+        if (session.id > max_id) {
+          max_id = session.id;
+        }
+      }
+    }
+    sqlite3_finalize(stmt);
+    if (max_id > 0) {
+      next_id.store(max_id + 1);
+    }
+  };
+
+  auto load_resources_from_db = [&]() {
+    if (!sqlite.db) {
+      return;
+    }
+    std::lock_guard<std::mutex> db_lock(sqlite.mutex);
+    const char *sql =
+      "SELECT id, name, target, protocol, port, description, image_url, "
+      "http_username, http_password, created_at, updated_at FROM resources";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite resource select failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return;
+    }
+
+    int max_id = 0;
+    {
+      std::lock_guard<std::mutex> lock(resource_mutex);
+      while (sqlite3_step(stmt) == SQLITE_ROW) {
+        Resource resource;
+        resource.id = sqlite3_column_int(stmt, 0);
+        resource.name =
+            reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+        resource.target =
+            reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+        resource.protocol =
+            reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+        resource.port = sqlite3_column_int(stmt, 4);
+        if (resource.port <= 0) {
+          resource.port = 22;
+        }
+        const unsigned char *desc = sqlite3_column_text(stmt, 5);
+        if (desc) {
+          resource.description =
+              reinterpret_cast<const char *>(desc);
+        }
+        const unsigned char *image = sqlite3_column_text(stmt, 6);
+        if (image) {
+          resource.imageUrl = reinterpret_cast<const char *>(image);
+        }
+        const unsigned char *http_user = sqlite3_column_text(stmt, 7);
+        if (http_user) {
+          resource.httpUsername = reinterpret_cast<const char *>(http_user);
+        }
+        const unsigned char *http_pass = sqlite3_column_text(stmt, 8);
+        if (http_pass) {
+          resource.httpPassword = reinterpret_cast<const char *>(http_pass);
+        }
+        resource.createdAt =
+          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 9));
+        resource.updatedAt =
+          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 10));
+        resources[resource.id] = resource;
+        if (resource.id > max_id) {
+          max_id = resource.id;
+        }
+      }
+    }
+    sqlite3_finalize(stmt);
+    if (max_id > 0) {
+      next_resource_id.store(max_id + 1);
+    }
+  };
+
+  auto insert_session = [&](const Session &session) -> bool {
+    if (!sqlite.db) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "INSERT INTO sessions (id, target, user, protocol, status, "
+      "port, created_at, terminated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite insert prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, session.id);
+    sqlite3_bind_text(stmt, 2, session.target.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, session.user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, session.protocol.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, session.status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 6, session.port);
+    sqlite3_bind_text(stmt, 7, session.createdAt.c_str(), -1, SQLITE_TRANSIENT);
+    if (session.terminatedAt.empty()) {
+      sqlite3_bind_null(stmt, 8);
+    } else {
+      sqlite3_bind_text(stmt, 8, session.terminatedAt.c_str(), -1,
+                        SQLITE_TRANSIENT);
+    }
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) {
+      std::cerr << "SQLite insert failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+  };
+
+  auto update_session_termination = [&](const Session &session) -> bool {
+    if (!sqlite.db) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "UPDATE sessions SET status = ?, terminated_at = ? WHERE id = ?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite update prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_text(stmt, 1, session.status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, session.terminatedAt.c_str(), -1,
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, session.id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) {
+      std::cerr << "SQLite update failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+  };
+
+  terminate_session_internal = [&](int session_id, const std::string &actor,
+                                   const std::string &role,
+                                   const std::string &event_type) {
+    Session terminated;
+    {
+      std::lock_guard<std::mutex> lock(session_mutex);
+      auto it = sessions.find(session_id);
+      if (it == sessions.end()) {
+        return;
+      }
+      if (it->second.status != "active") {
+        return;
+      }
+      it->second.status = "terminated";
+      it->second.terminatedAt = now_utc();
+      terminated = it->second;
+    }
+
+    if (!update_session_termination(terminated)) {
+      return;
+    }
+
+    AuditEvent event;
+    event.id = next_audit_id.fetch_add(1);
+    event.type = event_type;
+    event.actor = actor;
+    event.role = role;
+    event.createdAt = now_utc();
+    event.payloadJson = build_session_payload_json(terminated);
+    event.payloadIsJson = true;
+    append_audit(event);
+    append_session_event(event_type, terminated);
+  };
+
+  auto insert_resource = [&](const Resource &resource) -> bool {
+    if (!sqlite.db) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+      "INSERT INTO resources (id, name, target, protocol, port, "
+      "description, image_url, http_username, http_password, created_at, updated_at) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite resource insert prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, resource.id);
+    sqlite3_bind_text(stmt, 2, resource.name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, resource.target.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, resource.protocol.c_str(), -1,
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 5, resource.port);
+    if (resource.description.empty()) {
+      sqlite3_bind_null(stmt, 6);
+    } else {
+      sqlite3_bind_text(stmt, 6, resource.description.c_str(), -1,
+                        SQLITE_TRANSIENT);
+    }
+    if (resource.imageUrl.empty()) {
+      sqlite3_bind_null(stmt, 7);
+    } else {
+      sqlite3_bind_text(stmt, 7, resource.imageUrl.c_str(), -1,
+                        SQLITE_TRANSIENT);
+    }
+    if (resource.httpUsername.empty()) {
+      sqlite3_bind_null(stmt, 8);
+    } else {
+      sqlite3_bind_text(stmt, 8, resource.httpUsername.c_str(), -1,
+                        SQLITE_TRANSIENT);
+    }
+    if (resource.httpPassword.empty()) {
+      sqlite3_bind_null(stmt, 9);
+    } else {
+      sqlite3_bind_text(stmt, 9, resource.httpPassword.c_str(), -1,
+                        SQLITE_TRANSIENT);
+    }
+    sqlite3_bind_text(stmt, 10, resource.createdAt.c_str(), -1,
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 11, resource.updatedAt.c_str(), -1,
+                      SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) {
+      std::cerr << "SQLite resource insert failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+  };
+
+  auto update_resource = [&](const Resource &resource) -> bool {
+    if (!sqlite.db) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+      "UPDATE resources SET name = ?, target = ?, protocol = ?, port = ?, "
+      "description = ?, image_url = ?, http_username = ?, http_password = ?, updated_at = ? WHERE id = ?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite resource update prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_text(stmt, 1, resource.name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, resource.target.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, resource.protocol.c_str(), -1,
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, resource.port);
+    if (resource.description.empty()) {
+      sqlite3_bind_null(stmt, 5);
+    } else {
+      sqlite3_bind_text(stmt, 5, resource.description.c_str(), -1,
+                        SQLITE_TRANSIENT);
+    }
+    if (resource.imageUrl.empty()) {
+      sqlite3_bind_null(stmt, 6);
+    } else {
+      sqlite3_bind_text(stmt, 6, resource.imageUrl.c_str(), -1,
+                        SQLITE_TRANSIENT);
+    }
+    if (resource.httpUsername.empty()) {
+      sqlite3_bind_null(stmt, 7);
+    } else {
+      sqlite3_bind_text(stmt, 7, resource.httpUsername.c_str(), -1,
+                        SQLITE_TRANSIENT);
+    }
+    if (resource.httpPassword.empty()) {
+      sqlite3_bind_null(stmt, 8);
+    } else {
+      sqlite3_bind_text(stmt, 8, resource.httpPassword.c_str(), -1,
+                        SQLITE_TRANSIENT);
+    }
+    sqlite3_bind_text(stmt, 9, resource.updatedAt.c_str(), -1,
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 10, resource.id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) {
+      std::cerr << "SQLite resource update failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+  };
+
+  auto delete_resource = [&](int resource_id) -> bool {
+    if (!sqlite.db) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql = "DELETE FROM resources WHERE id = ?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite resource delete prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, resource_id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) {
+      std::cerr << "SQLite resource delete failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+  };
+
+  auto load_users_from_db = [&]() {
+    if (!sqlite.db) {
+      return;
+    }
+    std::lock_guard<std::mutex> db_lock(sqlite.mutex);
+    const char *sql =
+        "SELECT id, username, password, role, created_at, updated_at FROM users";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite user select failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return;
+    }
+
+    int max_id = 0;
+    {
+      std::lock_guard<std::mutex> lock(user_mutex);
+      while (sqlite3_step(stmt) == SQLITE_ROW) {
+        UserAccount user;
+        user.id = sqlite3_column_int(stmt, 0);
+        user.username =
+            reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+        user.password =
+            reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+        user.role =
+            reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+        user.createdAt =
+            reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
+        user.updatedAt =
+            reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
+        users[user.id] = user;
+        if (user.id > max_id) {
+          max_id = user.id;
+        }
+      }
+    }
+    sqlite3_finalize(stmt);
+    if (max_id > 0) {
+      next_user_id.store(max_id + 1);
+    }
+  };
+
+  auto insert_user = [&](const UserAccount &user) -> bool {
+    if (!sqlite.db) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "INSERT INTO users (id, username, password, role, created_at, "
+        "updated_at) VALUES (?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite user insert prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, user.id);
+    sqlite3_bind_text(stmt, 2, user.username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, user.password.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, user.role.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, user.createdAt.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, user.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) {
+      std::cerr << "SQLite user insert failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+  };
+
+  auto update_user = [&](const UserAccount &user) -> bool {
+    if (!sqlite.db) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "UPDATE users SET password = ?, role = ?, updated_at = ? WHERE id = ?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite user update prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_text(stmt, 1, user.password.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, user.role.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, user.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, user.id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) {
+      std::cerr << "SQLite user update failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+  };
+
+  auto delete_user = [&](int user_id) -> bool {
+    if (!sqlite.db) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql = "DELETE FROM users WHERE id = ?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite user delete prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, user_id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) {
+      std::cerr << "SQLite user delete failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+  };
+
+  load_sessions_from_db();
+  load_resources_from_db();
+  load_users_from_db();
+
+  {
+    std::lock_guard<std::mutex> lock(user_mutex);
+    if (users.empty()) {
+      UserAccount admin;
+      admin.id = next_user_id.fetch_add(1);
+      admin.username = "admin";
+      admin.password = "admin";
+      admin.role = "admin";
+      admin.createdAt = now_utc();
+      admin.updatedAt = admin.createdAt;
+      users[admin.id] = admin;
+      if (!insert_user(admin)) {
+        std::cerr << "Failed to persist default admin user" << '\n';
+      }
+    }
+  }
+
+  CROW_ROUTE(app, "/api/health")([] {
+    crow::json::wvalue payload;
+    payload["status"] = "ok";
+    payload["message"] = "EndoriumFort API online";
+    payload["version"] = APP_VERSION;
+    return payload;
+  });
+
+  CROW_ROUTE(app, "/api/auth/login").methods(crow::HTTPMethod::Post)(
+      [&](const crow::request &request) {
+        auto body = crow::json::load(request.body);
+        if (!body) {
+          return crow::response(400, "Invalid JSON body");
+        }
+        std::string user = body["user"].s();
+        std::string password = body["password"].s();
+        if (user.empty() || password.empty()) {
+          return crow::response(400, "Missing user or password");
+        }
+
+        std::optional<UserAccount> matched;
+        {
+          std::lock_guard<std::mutex> lock(user_mutex);
+          for (const auto &entry : users) {
+            if (entry.second.username == user) {
+              matched = entry.second;
+              break;
+            }
+          }
+        }
+        if (!matched || matched->password != password) {
+          return crow::response(401, "Invalid credentials");
+        }
+
+        AuthSession auth;
+        auth.userId = matched->id;
+        auth.user = matched->username;
+        auth.role = matched->role;
+        auth.issuedAt = now_utc();
+        auth.token = generate_token();
+
+        {
+          std::lock_guard<std::mutex> lock(auth_mutex);
+          auth_sessions[auth.token] = auth;
+        }
+
+        crow::json::wvalue payload;
+        payload["token"] = auth.token;
+        payload["user"] = auth.user;
+        payload["role"] = auth.role;
+        payload["issuedAt"] = auth.issuedAt;
+        return crow::response{payload};
+      });
+
+  CROW_ROUTE(app, "/api/users").methods(crow::HTTPMethod::Get)(
+      [&](const crow::request &request) {
+        auto auth = find_auth(request);
+        if (!auth) {
+          return crow::response(401, "Unauthorized");
+        }
+        if (!is_allowed_role(auth->role, {"admin"})) {
+          return crow::response(403, "Forbidden");
+        }
+        std::vector<UserAccount> snapshot;
+        {
+          std::lock_guard<std::mutex> lock(user_mutex);
+          snapshot.reserve(users.size());
+          for (const auto &entry : users) {
+            snapshot.push_back(entry.second);
+          }
+        }
+        std::sort(snapshot.begin(), snapshot.end(),
+                  [](const UserAccount &a, const UserAccount &b) {
+                    return a.id < b.id;
+                  });
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["items"] = crow::json::wvalue::list();
+        for (size_t i = 0; i < snapshot.size(); ++i) {
+          payload["items"][static_cast<int>(i)] = user_to_json(snapshot[i]);
+        }
+        return crow::response{payload};
+      });
+
+  CROW_ROUTE(app, "/api/users").methods(crow::HTTPMethod::Post)(
+      [&](const crow::request &request) {
+        auto auth = find_auth(request);
+        if (!auth) {
+          return crow::response(401, "Unauthorized");
+        }
+        if (!is_allowed_role(auth->role, {"admin"})) {
+          return crow::response(403, "Forbidden");
+        }
+        auto body = crow::json::load(request.body);
+        if (!body) {
+          return crow::response(400, "Invalid JSON body");
+        }
+        std::string username = body["username"].s();
+        std::string password = body["password"].s();
+        std::string role = body["role"].s();
+        if (username.empty() || password.empty() || role.empty()) {
+          return crow::response(400, "Missing username, password, or role");
+        }
+        if (!is_allowed_role(role, {"operator", "admin", "auditor"})) {
+          return crow::response(400, "Invalid role");
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(user_mutex);
+          for (const auto &entry : users) {
+            if (entry.second.username == username) {
+              return crow::response(409, "User already exists");
+            }
+          }
+        }
+
+        UserAccount user;
+        user.id = next_user_id.fetch_add(1);
+        user.username = username;
+        user.password = password;
+        user.role = role;
+        user.createdAt = now_utc();
+        user.updatedAt = user.createdAt;
+
+        {
+          std::lock_guard<std::mutex> lock(user_mutex);
+          users[user.id] = user;
+        }
+
+        if (!insert_user(user)) {
+          return crow::response(500, "Failed to persist user");
+        }
+
+        // Note: Default permissions are not assigned here due to lambda scope
+        // They can be managed via the admin UI at /api/users/{userId}/resources/{resourceId}
+
+        AuditEvent event;
+        event.id = next_audit_id.fetch_add(1);
+        event.type = "user.create";
+        event.actor = auth->user;
+        event.role = auth->role;
+        event.createdAt = now_utc();
+        event.payloadJson = build_user_payload_json(user);
+        event.payloadIsJson = true;
+        append_audit(event);
+
+        crow::json::wvalue payload = user_to_json(user);
+        return crow::response{payload};
+      });
+
+  CROW_ROUTE(app, "/api/users/<int>")
+      .methods(crow::HTTPMethod::Put)(
+          [&](const crow::request &request, int user_id) {
+            auto auth = find_auth(request);
+            if (!auth) {
+              return crow::response(401, "Unauthorized");
+            }
+            if (!is_allowed_role(auth->role, {"admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+            auto body = crow::json::load(request.body);
+            if (!body) {
+              return crow::response(400, "Invalid JSON body");
+            }
+            std::string password = body["password"].s();
+            std::string role = body["role"].s();
+            if (password.empty() || role.empty()) {
+              return crow::response(400, "Missing password or role");
+            }
+            if (!is_allowed_role(role, {"operator", "admin", "auditor"})) {
+              return crow::response(400, "Invalid role");
+            }
+
+            UserAccount user;
+            {
+              std::lock_guard<std::mutex> lock(user_mutex);
+              auto it = users.find(user_id);
+              if (it == users.end()) {
+                return crow::response(404, "User not found");
+              }
+              user = it->second;
+              user.password = password;
+              user.role = role;
+              user.updatedAt = now_utc();
+              it->second = user;
+            }
+
+            if (!update_user(user)) {
+              return crow::response(500, "Failed to persist user");
+            }
+
+            AuditEvent event;
+            event.id = next_audit_id.fetch_add(1);
+            event.type = "user.update";
+            event.actor = auth->user;
+            event.role = auth->role;
+            event.createdAt = now_utc();
+            event.payloadJson = build_user_payload_json(user);
+            event.payloadIsJson = true;
+            append_audit(event);
+
+            crow::json::wvalue payload = user_to_json(user);
+            return crow::response{payload};
+          });
+
+  CROW_ROUTE(app, "/api/users/<int>")
+      .methods(crow::HTTPMethod::Delete)(
+          [&](const crow::request &request, int user_id) {
+            auto auth = find_auth(request);
+            if (!auth) {
+              return crow::response(401, "Unauthorized");
+            }
+            if (!is_allowed_role(auth->role, {"admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+            UserAccount user;
+            {
+              std::lock_guard<std::mutex> lock(user_mutex);
+              auto it = users.find(user_id);
+              if (it == users.end()) {
+                return crow::response(404, "User not found");
+              }
+              user = it->second;
+              users.erase(it);
+            }
+
+            if (!delete_user(user_id)) {
+              return crow::response(500, "Failed to delete user");
+            }
+
+            AuditEvent event;
+            event.id = next_audit_id.fetch_add(1);
+            event.type = "user.delete";
+            event.actor = auth->user;
+            event.role = auth->role;
+            event.createdAt = now_utc();
+            event.payloadJson = build_user_payload_json(user);
+            event.payloadIsJson = true;
+            append_audit(event);
+
+            crow::json::wvalue payload;
+            payload["status"] = "deleted";
+            payload["id"] = user_id;
+            return crow::response{payload};
+          });
+
+  auto get_resource_permissions = [&](int user_id) -> std::vector<int> {
+    std::vector<int> resource_ids;
+    if (!sqlite.db) {
+      return resource_ids;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "SELECT resource_id FROM user_resource_permissions WHERE user_id = ?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite permission select prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return resource_ids;
+    }
+    sqlite3_bind_int(stmt, 1, user_id);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+      int resource_id = sqlite3_column_int(stmt, 0);
+      resource_ids.push_back(resource_id);
+    }
+    sqlite3_finalize(stmt);
+    return resource_ids;
+  };
+
+  auto grant_resource_permission = [&](int user_id, int resource_id) -> bool {
+    if (!sqlite.db) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "INSERT OR IGNORE INTO user_resource_permissions (user_id, resource_id, "
+        "created_at) VALUES (?, ?, ?)";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite permission insert prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_int(stmt, 2, resource_id);
+    sqlite3_bind_text(stmt, 3, now_utc().c_str(), -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) {
+      std::cerr << "SQLite permission insert failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+  };
+
+  auto revoke_resource_permission = [&](int user_id, int resource_id) -> bool {
+    if (!sqlite.db) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "DELETE FROM user_resource_permissions WHERE user_id = ? AND "
+        "resource_id = ?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite permission delete prepare failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_int(stmt, 2, resource_id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) {
+      std::cerr << "SQLite permission delete failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+  };
+
+  CROW_ROUTE(app, "/api/resources").methods(crow::HTTPMethod::Get)(
+      [&](const crow::request &request) {
+        auto auth = find_auth(request);
+        if (!auth) {
+          return crow::response(401, "Unauthorized");
+        }
+        
+        // Get allowed resource IDs for this user
+        std::vector<int> allowed_resource_ids;
+        if (auth->role == "admin") {
+          // Admins see all resources
+          std::lock_guard<std::mutex> lock(resource_mutex);
+          for (const auto &entry : resources) {
+            allowed_resource_ids.push_back(entry.first);
+          }
+        } else {
+          // Other roles see only resources they have permission for
+          allowed_resource_ids = get_resource_permissions(auth->userId);
+        }
+        
+        std::vector<Resource> snapshot;
+        {
+          std::lock_guard<std::mutex> lock(resource_mutex);
+          for (int resource_id : allowed_resource_ids) {
+            auto it = resources.find(resource_id);
+            if (it != resources.end()) {
+              snapshot.push_back(it->second);
+            }
+          }
+        }
+        std::sort(snapshot.begin(), snapshot.end(),
+                  [](const Resource &a, const Resource &b) {
+                    return a.id < b.id;
+                  });
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["items"] = crow::json::wvalue::list();
+        for (size_t i = 0; i < snapshot.size(); ++i) {
+          payload["items"][static_cast<int>(i)] =
+              resource_to_json(snapshot[i]);
+        }
+        return crow::response{payload};
+      });
+
+  CROW_ROUTE(app, "/api/resources").methods(crow::HTTPMethod::Post)(
+      [&](const crow::request &request) {
+        auto auth = find_auth(request);
+        if (!auth) {
+          return crow::response(401, "Unauthorized");
+        }
+        if (!is_allowed_role(auth->role, {"admin"})) {
+          return crow::response(403, "Forbidden");
+        }
+        auto body = crow::json::load(request.body);
+        if (!body) {
+          return crow::response(400, "Invalid JSON body");
+        }
+        std::string name = body["name"].s();
+        std::string target = body["target"].s();
+        std::string protocol = body["protocol"].s();
+        int port = 22;
+        if (body.has("port")) {
+          port = body["port"].i();
+        }
+        std::string description;
+        if (body.has("description")) {
+          description = body["description"].s();
+        }
+        std::string image_url;
+        if (body.has("imageUrl")) {
+          image_url = body["imageUrl"].s();
+        }
+        std::string http_username;
+        if (body.has("httpUsername")) {
+          http_username = body["httpUsername"].s();
+        }
+        std::string http_password;
+        if (body.has("httpPassword")) {
+          http_password = body["httpPassword"].s();
+        }
+        if (name.empty() || target.empty() || protocol.empty()) {
+          return crow::response(400, "Missing name, target, or protocol");
+        }
+        if (port <= 0 || port > 65535) {
+          return crow::response(400, "Invalid port");
+        }
+
+        Resource resource;
+        resource.id = next_resource_id.fetch_add(1);
+        resource.name = name;
+        resource.target = target;
+        resource.protocol = protocol;
+        resource.port = port;
+        resource.description = description;
+        resource.imageUrl = image_url;
+        resource.httpUsername = http_username;
+        resource.httpPassword = http_password;
+        resource.createdAt = now_utc();
+        resource.updatedAt = resource.createdAt;
+
+        {
+          std::lock_guard<std::mutex> lock(resource_mutex);
+          resources.emplace(resource.id, resource);
+        }
+
+        if (!insert_resource(resource)) {
+          return crow::response(500, "Failed to persist resource");
+        }
+
+        AuditEvent event;
+        event.id = next_audit_id.fetch_add(1);
+        event.type = "resource.create";
+        event.actor = auth->user;
+        event.role = auth->role;
+        event.createdAt = now_utc();
+        event.payloadJson = build_resource_payload_json(resource);
+        event.payloadIsJson = true;
+        append_audit(event);
+
+        crow::json::wvalue payload = resource_to_json(resource);
+        return crow::response{payload};
+      });
+
+  CROW_ROUTE(app, "/api/resources/<int>")
+      .methods(crow::HTTPMethod::Put)(
+          [&](const crow::request &request, int resource_id) {
+            auto auth = find_auth(request);
+            if (!auth) {
+              return crow::response(401, "Unauthorized");
+            }
+            if (!is_allowed_role(auth->role, {"admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+            auto body = crow::json::load(request.body);
+            if (!body) {
+              return crow::response(400, "Invalid JSON body");
+            }
+            std::string name = body["name"].s();
+            std::string target = body["target"].s();
+            std::string protocol = body["protocol"].s();
+            int port = 22;
+            if (body.has("port")) {
+              port = body["port"].i();
+            }
+            std::string description;
+            if (body.has("description")) {
+              description = body["description"].s();
+            }
+            std::string image_url;
+            if (body.has("imageUrl")) {
+              image_url = body["imageUrl"].s();
+            }
+            std::string http_username;
+            if (body.has("httpUsername")) {
+              http_username = body["httpUsername"].s();
+            }
+            std::string http_password;
+            if (body.has("httpPassword")) {
+              http_password = body["httpPassword"].s();
+            }
+            if (name.empty() || target.empty() || protocol.empty()) {
+              return crow::response(400, "Missing name, target, or protocol");
+            }
+            if (port <= 0 || port > 65535) {
+              return crow::response(400, "Invalid port");
+            }
+
+            Resource resource;
+            {
+              std::lock_guard<std::mutex> lock(resource_mutex);
+              auto it = resources.find(resource_id);
+              if (it == resources.end()) {
+                return crow::response(404, "Resource not found");
+              }
+              resource = it->second;
+              resource.name = name;
+              resource.target = target;
+              resource.protocol = protocol;
+              resource.port = port;
+              resource.description = description;
+              resource.imageUrl = image_url;
+              resource.httpUsername = http_username;
+              resource.httpPassword = http_password;
+              resource.updatedAt = now_utc();
+              it->second = resource;
+            }
+
+            if (!update_resource(resource)) {
+              return crow::response(500, "Failed to persist resource");
+            }
+
+            AuditEvent event;
+            event.id = next_audit_id.fetch_add(1);
+            event.type = "resource.update";
+            event.actor = auth->user;
+            event.role = auth->role;
+            event.createdAt = now_utc();
+            event.payloadJson = build_resource_payload_json(resource);
+            event.payloadIsJson = true;
+            append_audit(event);
+
+            crow::json::wvalue payload = resource_to_json(resource);
+            return crow::response{payload};
+          });
+
+  CROW_ROUTE(app, "/api/resources/<int>")
+      .methods(crow::HTTPMethod::Delete)(
+          [&](const crow::request &request, int resource_id) {
+            auto auth = find_auth(request);
+            if (!auth) {
+              return crow::response(401, "Unauthorized");
+            }
+            if (!is_allowed_role(auth->role, {"admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+            Resource resource;
+            {
+              std::lock_guard<std::mutex> lock(resource_mutex);
+              auto it = resources.find(resource_id);
+              if (it == resources.end()) {
+                return crow::response(404, "Resource not found");
+              }
+              resource = it->second;
+              resources.erase(it);
+            }
+
+            if (!delete_resource(resource_id)) {
+              return crow::response(500, "Failed to delete resource");
+            }
+
+            AuditEvent event;
+            event.id = next_audit_id.fetch_add(1);
+            event.type = "resource.delete";
+            event.actor = auth->user;
+            event.role = auth->role;
+            event.createdAt = now_utc();
+            event.payloadJson = build_resource_payload_json(resource);
+            event.payloadIsJson = true;
+            append_audit(event);
+
+            crow::json::wvalue payload;
+            payload["status"] = "deleted";
+            payload["id"] = resource_id;
+            return crow::response{payload};
+          });
+
+  CROW_ROUTE(app, "/api/users/<int>/resources")
+      .methods(crow::HTTPMethod::Get)(
+          [&](const crow::request &request, int user_id) {
+            auto auth = find_auth(request);
+            if (!auth) {
+              return crow::response(401, "Unauthorized");
+            }
+            if (!is_allowed_role(auth->role, {"admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+            
+            auto allowed_ids = get_resource_permissions(user_id);
+            std::vector<Resource> resources_for_user;
+            {
+              std::lock_guard<std::mutex> lock(resource_mutex);
+              for (int resource_id : allowed_ids) {
+                auto it = resources.find(resource_id);
+                if (it != resources.end()) {
+                  resources_for_user.push_back(it->second);
+                }
+              }
+            }
+            
+            crow::json::wvalue payload;
+            payload["status"] = "ok";
+            payload["userId"] = user_id;
+            payload["resourceIds"] = crow::json::wvalue::list();
+            for (size_t i = 0; i < allowed_ids.size(); ++i) {
+              payload["resourceIds"][static_cast<int>(i)] = allowed_ids[i];
+            }
+            return crow::response{payload};
+          });
+
+  CROW_ROUTE(app, "/api/users/<int>/resources/<int>")
+      .methods(crow::HTTPMethod::Post)(
+          [&](const crow::request &request, int user_id, int resource_id) {
+            auto auth = find_auth(request);
+            if (!auth) {
+              return crow::response(401, "Unauthorized");
+            }
+            if (!is_allowed_role(auth->role, {"admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+            
+            if (!grant_resource_permission(user_id, resource_id)) {
+              return crow::response(500, "Failed to grant permission");
+            }
+            
+            crow::json::wvalue payload;
+            payload["status"] = "ok";
+            payload["message"] = "Permission granted";
+            payload["userId"] = user_id;
+            payload["resourceId"] = resource_id;
+            return crow::response{payload};
+          });
+
+  CROW_ROUTE(app, "/api/users/<int>/resources/<int>")
+      .methods(crow::HTTPMethod::Delete)(
+          [&](const crow::request &request, int user_id, int resource_id) {
+            auto auth = find_auth(request);
+            if (!auth) {
+              return crow::response(401, "Unauthorized");
+            }
+            if (!is_allowed_role(auth->role, {"admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+            
+            if (!revoke_resource_permission(user_id, resource_id)) {
+              return crow::response(500, "Failed to revoke permission");
+            }
+            
+            crow::json::wvalue payload;
+            payload["status"] = "ok";
+            payload["message"] = "Permission revoked";
+            payload["userId"] = user_id;
+            payload["resourceId"] = resource_id;
+            return crow::response{payload};
+          });
+
+  CROW_ROUTE(app, "/api/sessions")([&](const crow::request &request) {
+    auto auth = find_auth(request);
+    if (!auth) {
+      return crow::response(401, "Unauthorized");
+    }
+    const char *status_param = request.url_params.get("status");
+    const char *user_param = request.url_params.get("user");
+    const char *target_param = request.url_params.get("target");
+    const char *protocol_param = request.url_params.get("protocol");
+    const char *sort_param = request.url_params.get("sort");
+    auto limit = parse_int_param(request.url_params.get("limit"));
+    auto offset = parse_int_param(request.url_params.get("offset"));
+    std::string status_filter = status_param ? to_lower(status_param) : "";
+    std::string user_filter = user_param ? to_lower(user_param) : "";
+    std::string target_filter = target_param ? to_lower(target_param) : "";
+    std::string protocol_filter =
+        protocol_param ? to_lower(protocol_param) : "";
+    std::string sort_order = sort_param ? to_lower(sort_param) : "desc";
+
+    std::vector<Session> snapshot;
+    {
+      std::lock_guard<std::mutex> lock(session_mutex);
+      snapshot.reserve(sessions.size());
+      for (const auto &entry : sessions) {
+        snapshot.push_back(entry.second);
+      }
+    }
+
+    std::vector<Session> filtered;
+    for (const auto &session : snapshot) {
+      if (!status_filter.empty() &&
+          to_lower(session.status) != status_filter) {
+        continue;
+      }
+      if (!user_filter.empty() && to_lower(session.user) != user_filter) {
+        continue;
+      }
+      if (!target_filter.empty() && to_lower(session.target) != target_filter) {
+        continue;
+      }
+      if (!protocol_filter.empty() &&
+          to_lower(session.protocol) != protocol_filter) {
+        continue;
+      }
+      filtered.push_back(session);
+    }
+
+    std::sort(filtered.begin(), filtered.end(), [&](const Session &a,
+                                                    const Session &b) {
+      if (sort_order == "asc") {
+        return a.id < b.id;
+      }
+      return a.id > b.id;
+    });
+
+    int start_index = offset.value_or(0);
+    if (start_index < 0) {
+      start_index = 0;
+    }
+    int end_index = static_cast<int>(filtered.size());
+    if (limit && *limit > 0) {
+      end_index = std::min(end_index, start_index + *limit);
+    }
+    if (start_index > end_index) {
+      start_index = end_index;
+    }
+
+    crow::json::wvalue payload;
+    payload["status"] = "ok";
+    payload["items"] = crow::json::wvalue::list();
+    payload["total"] = static_cast<int>(snapshot.size());
+    payload["count"] = end_index - start_index;
+    int index = 0;
+    for (int i = start_index; i < end_index; ++i) {
+      payload["items"][index++] = session_to_json(filtered[i]);
+    }
+    return crow::response{payload};
+  });
+
+  CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::Post)(
+      [&](const crow::request &request) {
+        auto auth = find_auth(request);
+        if (!auth) {
+          return crow::response(401, "Unauthorized");
+        }
+        if (!is_allowed_role(auth->role, {"operator", "admin"})) {
+          return crow::response(403, "Forbidden");
+        }
+        auto body = crow::json::load(request.body);
+        if (!body) {
+          return crow::response(400, "Invalid JSON body");
+        }
+        std::string target = body["target"].s();
+        std::string user = body["user"].s();
+        std::string protocol = body["protocol"].s();
+        int port = 22;
+        if (body.has("port")) {
+          port = body["port"].i();
+        }
+        if (target.empty() || user.empty() || protocol.empty()) {
+          return crow::response(400, "Missing target, user, or protocol");
+        }
+        if (port <= 0 || port > 65535) {
+          return crow::response(400, "Invalid port");
+        }
+
+        Session session;
+        session.id = next_id.fetch_add(1);
+        session.target = target;
+        session.user = user;
+        session.protocol = protocol;
+        session.port = port;
+        session.status = "active";
+        session.createdAt = now_utc();
+
+        {
+          std::lock_guard<std::mutex> lock(session_mutex);
+          sessions.emplace(session.id, session);
+        }
+
+        if (!insert_session(session)) {
+          return crow::response(500, "Failed to persist session");
+        }
+
+        AuditEvent event;
+        event.id = next_audit_id.fetch_add(1);
+        event.type = "session.create";
+        event.actor = auth->user;
+        event.role = auth->role;
+        event.createdAt = now_utc();
+        event.payloadJson = build_session_payload_json(session);
+        event.payloadIsJson = true;
+        append_audit(event);
+        append_session_event("session.create", session);
+
+        crow::json::wvalue payload = session_to_json(session);
+        return crow::response{payload};
+      });
+
+  CROW_ROUTE(app, "/api/sessions/<int>")([&](const crow::request &request,
+                                               int session_id) {
+    auto auth = find_auth(request);
+    if (!auth) {
+      return crow::response(401, "Unauthorized");
+    }
+    std::lock_guard<std::mutex> lock(session_mutex);
+    auto it = sessions.find(session_id);
+    if (it == sessions.end()) {
+      return crow::response(404, "Session not found");
+    }
+    crow::json::wvalue payload = session_to_json(it->second);
+    return crow::response{payload};
+  });
+
+  CROW_ROUTE(app, "/api/sessions/<int>/terminate")
+      .methods(crow::HTTPMethod::Post)([&](const crow::request &request,
+                                           int session_id) {
+        auto auth = find_auth(request);
+        if (!auth) {
+          return crow::response(401, "Unauthorized");
+        }
+        if (!is_allowed_role(auth->role, {"operator", "admin"})) {
+          return crow::response(403, "Forbidden");
+        }
+        {
+          std::lock_guard<std::mutex> lock(session_mutex);
+          if (sessions.find(session_id) == sessions.end()) {
+            return crow::response(404, "Session not found");
+          }
+        }
+
+        terminate_session_internal(session_id, auth->user, auth->role,
+                                   "session.terminate");
+        close_ssh_for_session(session_id);
+
+        Session updated;
+        {
+          std::lock_guard<std::mutex> lock(session_mutex);
+          updated = sessions.at(session_id);
+        }
+        crow::json::wvalue payload = session_to_json(updated);
+        return crow::response{payload};
+      });
+
+#ifdef ENDORIUMFORT_SSH_ENABLED
+#ifndef _WIN32
+  CROW_WEBSOCKET_ROUTE(app, "/api/ws/ssh")
+      .onaccept([&](const crow::request &request, void **userdata) {
+        if (userdata) {
+          *userdata = nullptr;
+        }
+        // Try to get token from query param or cookie
+        std::string token;
+        const char *token_param = request.url_params.get("token");
+        token = token_param ? token_param : "";
+        
+        if (token.empty()) {
+          auto cookie = request.get_header_value("Cookie");
+          if (!cookie.empty()) {
+            size_t pos = cookie.find("endoriumfort_token=");
+            if (pos != std::string::npos) {
+              size_t start = pos + 19;
+              size_t end = cookie.find(';', start);
+              if (end == std::string::npos) {
+                end = cookie.length();
+              }
+              token = cookie.substr(start, end - start);
+            }
+          }
+        }
+        
+        std::cerr << "[WS] onaccept: token=" << token << std::endl;
+        auto auth = find_auth_by_token(token);
+        if (!auth) {
+          std::cerr << "[WS] onaccept: auth not found for token" << std::endl;
+          return false;
+        }
+        std::cerr << "[WS] onaccept: auth found, user=" << auth->user
+                  << " role=" << auth->role << std::endl;
+        bool allowed = is_allowed_role(auth->role, {"operator", "admin"});
+        std::cerr << "[WS] onaccept: allowed=" << allowed << std::endl;
+        return allowed;
+      })
+      .onopen([&](crow::websocket::connection &conn) {
+        std::cerr << "[WS] onopen: connection opened" << std::endl;
+        auto connection = std::make_shared<SshConnection>();
+        {
+          std::lock_guard<std::mutex> lock(ws_mutex);
+          ws_connections[&conn] = connection;
+        }
+        std::cerr << "[WS] onopen: connection registered" << std::endl;
+      })
+      .onclose([&](crow::websocket::connection &conn, const std::string &) {
+        std::shared_ptr<SshConnection> connection;
+        {
+          std::lock_guard<std::mutex> lock(ws_mutex);
+          auto it = ws_connections.find(&conn);
+          if (it != ws_connections.end()) {
+            connection = it->second;
+            ws_connections.erase(it);
+          }
+        }
+        if (connection) {
+          if (connection->session_id > 0) {
+            terminate_session_internal(connection->session_id, "system",
+                                       "system", "session.close");
+          }
+          ssh_disconnect(*connection);
+        }
+      })
+      .onmessage([&](crow::websocket::connection &conn, const std::string &data,
+                     bool is_binary) {
+        std::cerr << "[WS] onmessage: received message, is_binary=" << is_binary
+                  << std::endl;
+        if (is_binary) {
+          return;
+        }
+        std::shared_ptr<SshConnection> connection;
+        {
+          std::lock_guard<std::mutex> lock(ws_mutex);
+          auto it = ws_connections.find(&conn);
+          if (it != ws_connections.end()) {
+            connection = it->second;
+          }
+        }
+        if (!connection) {
+          std::cerr << "[WS] onmessage: connection not found" << std::endl;
+          return;
+        }
+
+        std::cerr << "[WS] onmessage: parsing JSON" << std::endl;
+        auto payload = crow::json::load(data);
+        if (!payload) {
+          std::cerr << "[WS] onmessage: invalid JSON" << std::endl;
+          conn.send_text("{\"type\":\"error\",\"message\":\"Invalid JSON\"}");
+          return;
+        }
+        std::string type;
+        if (payload.has("type")) {
+          type = std::string(payload["type"].s());
+        }
+        std::cerr << "[WS] onmessage: type=" << type << std::endl;
+        if (type == "start") {
+          if (connection->running) {
+            conn.send_text(
+                "{\"type\":\"error\",\"message\":\"Already started\"}");
+            return;
+          }
+          if (!payload.has("sessionId") || !payload.has("password")) {
+            conn.send_text(
+                "{\"type\":\"error\",\"message\":\"Missing fields\"}");
+            return;
+          }
+          int session_id = payload["sessionId"].i();
+          std::string password = payload["password"].s();
+          int cols = payload.has("cols") ? payload["cols"].i() : 120;
+          int rows = payload.has("rows") ? payload["rows"].i() : 32;
+
+          Session target_session;
+          {
+            std::lock_guard<std::mutex> lock(session_mutex);
+            auto it = sessions.find(session_id);
+            if (it == sessions.end()) {
+              conn.send_text(
+                  "{\"type\":\"error\",\"message\":\"Session not found\"}");
+              return;
+            }
+            if (it->second.status != "active") {
+              conn.send_text(
+                  "{\"type\":\"error\",\"message\":\"Session closed\"}");
+              return;
+            }
+            target_session = it->second;
+          }
+
+          std::string error;
+          if (!ssh_connect(*connection, target_session, password, cols, rows,
+                           error)) {
+            ssh_disconnect(*connection);
+            conn.send_text("{\"type\":\"error\",\"message\":\"" +
+                           json_escape(error) + "\"}");
+            return;
+          }
+
+          connection->session_id = session_id;
+          connection->reader = std::thread([&conn, connection,
+                                            &terminate_session_internal]() {
+            std::vector<char> buffer(4096);
+            while (connection->running) {
+              ssize_t rc = libssh2_channel_read(
+                  connection->channel, buffer.data(), buffer.size());
+              if (rc == LIBSSH2_ERROR_EAGAIN) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(12));
+                continue;
+              }
+              if (rc <= 0) {
+                break;
+              }
+              conn.send_binary(std::string(buffer.data(),
+                                            static_cast<size_t>(rc)));
+            }
+            if (connection->running) {
+              conn.send_text(
+                  "{\"type\":\"status\",\"message\":\"SSH closed\"}");
+            }
+            connection->running = false;
+            if (connection->session_id > 0) {
+              terminate_session_internal(connection->session_id, "system",
+                                         "system", "session.close");
+            }
+            conn.close("ssh-closed");
+          });
+          return;
+        }
+
+        if (type == "input") {
+          if (!payload.has("data")) {
+            return;
+          }
+          if (!connection->channel) {
+            return;
+          }
+          std::string input = payload["data"].s();
+          std::lock_guard<std::mutex> lock(connection->write_mutex);
+          libssh2_channel_write(connection->channel, input.c_str(),
+                                input.size());
+          return;
+        }
+
+        if (type == "resize") {
+          if (!payload.has("cols") || !payload.has("rows")) {
+            return;
+          }
+          if (!connection->channel) {
+            return;
+          }
+          int cols = payload["cols"].i();
+          int rows = payload["rows"].i();
+          libssh2_channel_request_pty_size(connection->channel, cols, rows);
+          return;
+        }
+      });
+#else
+  CROW_ROUTE(app, "/api/ws/ssh")([] {
+    return crow::response(501, "SSH proxy is not supported on Windows.");
+  });
+#endif
+#else
+  CROW_ROUTE(app, "/api/ws/ssh")([] {
+    return crow::response(501, "SSH proxy disabled (libssh2 not found).");
+  });
+#endif
+
+  CROW_ROUTE(app, "/api/sessions/stream")(
+      [&](const crow::request &request) {
+        auto auth = find_auth(request);
+        if (!auth) {
+          return crow::response(401, "Unauthorized");
+        }
+        const char *since_param = request.url_params.get("since");
+        auto since = parse_int_param(since_param).value_or(0);
+        auto header = request.get_header_value("Last-Event-ID");
+        if (!header.empty()) {
+          auto parsed = parse_int_param(header.c_str());
+          if (parsed) {
+            since = std::max(since, *parsed);
+          }
+        }
+
+        std::vector<SessionEvent> snapshot;
+        {
+          std::lock_guard<std::mutex> lock(event_mutex);
+          snapshot.reserve(session_events.size());
+          for (const auto &event : session_events) {
+            if (event.id > since) {
+              snapshot.push_back(event);
+            }
+          }
+        }
+
+        std::ostringstream body;
+        body << "retry: 5000\n";
+        int sent = 0;
+        for (const auto &event : snapshot) {
+          body << "id: " << event.id << "\n";
+          body << "event: " << event.type << "\n";
+          body << "data: " << event.payloadJson << "\n\n";
+          if (++sent >= 100) {
+            break;
+          }
+        }
+
+        crow::response response;
+        response.code = 200;
+        response.set_header("Content-Type", "text/event-stream");
+        response.set_header("Cache-Control", "no-cache");
+        response.set_header("Connection", "keep-alive");
+        response.body = body.str();
+        return response;
+      });
+
+  CROW_ROUTE(app, "/api/audit").methods(crow::HTTPMethod::Post)(
+      [&](const crow::request &request) {
+        auto auth = find_auth(request);
+        if (!auth) {
+          return crow::response(401, "Unauthorized");
+        }
+        if (!is_allowed_role(auth->role, {"auditor", "admin"})) {
+          return crow::response(403, "Forbidden");
+        }
+
+        AuditEvent event;
+        event.id = next_audit_id.fetch_add(1);
+        event.type = "audit.custom";
+        event.actor = auth->user;
+        event.role = auth->role;
+        event.createdAt = now_utc();
+        auto body = crow::json::load(request.body);
+        if (body) {
+          event.payloadJson = request.body;
+          event.payloadIsJson = true;
+        } else {
+          event.payloadJson = request.body;
+          event.payloadIsJson = false;
+        }
+        append_audit(event);
+
+        crow::json::wvalue payload;
+        payload["status"] = "accepted";
+        payload["id"] = event.id;
+        return crow::response{payload};
+      });
+
+  CROW_ROUTE(app, "/api/audit")([&](const crow::request &request) {
+    auto auth = find_auth(request);
+    if (!auth) {
+      return crow::response(401, "Unauthorized");
+    }
+    if (!is_allowed_role(auth->role, {"auditor", "admin"})) {
+      return crow::response(403, "Forbidden");
+    }
+    crow::json::wvalue payload;
+    payload["status"] = "ok";
+    payload["items"] = crow::json::wvalue::list();
+    {
+      std::lock_guard<std::mutex> lock(audit_mutex);
+      int index = 0;
+      for (auto it = audit_events.rbegin();
+           it != audit_events.rend() && index < 50; ++it) {
+        payload["items"][index]["id"] = it->id;
+        payload["items"][index]["type"] = it->type;
+        payload["items"][index]["actor"] = it->actor;
+        payload["items"][index]["role"] = it->role;
+        payload["items"][index]["createdAt"] = it->createdAt;
+        payload["items"][index]["payloadRaw"] = it->payloadJson;
+        payload["items"][index]["payloadIsJson"] = it->payloadIsJson;
+        ++index;
+      }
+    }
+    return crow::response{payload};
+  });
+
+  auto handle_proxy_request = [&](const crow::request &request,
+                                  int resource_id,
+                                  const std::string &path) {
+    bool is_ajax_request = false;
+    const char *ajax_param = request.url_params.get("ajax_request");
+    if (ajax_param && (std::string(ajax_param) == "true" ||
+                       std::string(ajax_param) == "1")) {
+      is_ajax_request = true;
+    }
+    auto requested_with = to_lower(request.get_header_value("X-Requested-With"));
+    if (requested_with == "xmlhttprequest") {
+      is_ajax_request = true;
+    }
+    // Also check POST body for ajax_request=true (some apps send it only in body)
+    if (!is_ajax_request && !request.body.empty()) {
+      if (request.body.find("ajax_request=true") != std::string::npos ||
+          request.body.find("ajax_request=1") != std::string::npos) {
+        is_ajax_request = true;
+      }
+    }
+
+    auto get_query_param_value = [](const std::string &query,
+                                    const std::string &key)
+        -> std::optional<std::string> {
+      if (query.empty() || key.empty()) {
+        return std::nullopt;
+      }
+      size_t pos = 0;
+      while (pos <= query.size()) {
+        size_t amp = query.find('&', pos);
+        if (amp == std::string::npos) {
+          amp = query.size();
+        }
+        std::string part = query.substr(pos, amp - pos);
+        size_t eq = part.find('=');
+        std::string name = (eq == std::string::npos)
+                               ? part
+                               : part.substr(0, eq);
+        if (name == key) {
+          if (eq == std::string::npos) {
+            return std::string();
+          }
+          return part.substr(eq + 1);
+        }
+        if (amp == query.size()) {
+          break;
+        }
+        pos = amp + 1;
+      }
+      return std::nullopt;
+    };
+
+    auto is_bastion_token = [](const std::string &value) {
+      return value.rfind("eft_", 0) == 0 || value.rfind("tok-", 0) == 0;
+    };
+
+    auto strip_bastion_query_params = [](const std::string &query,
+                                         const std::string &bastion_token) {
+      if (query.empty()) {
+        return query;
+      }
+      std::ostringstream out;
+      bool first = true;
+      size_t pos = 0;
+      while (pos <= query.size()) {
+        size_t amp = query.find('&', pos);
+        if (amp == std::string::npos) {
+          amp = query.size();
+        }
+
+        std::string part = query.substr(pos, amp - pos);
+        bool keep = true;
+        if (!part.empty()) {
+          size_t eq = part.find('=');
+          std::string name = (eq == std::string::npos)
+                                 ? part
+                                 : part.substr(0, eq);
+          std::string value = (eq == std::string::npos)
+                                  ? std::string()
+                                  : part.substr(eq + 1);
+
+          // Always strip new bastion query parameter.
+          if (name == "ef_token") {
+            keep = false;
+          }
+
+          // Strip legacy bastion token only when it is exactly the active bastion token.
+          // This preserves application-level query params named `token` (e.g. phpMyAdmin CSRF).
+          if (keep && name == "token" && !bastion_token.empty() &&
+              value == bastion_token) {
+            keep = false;
+          }
+        }
+
+        if (keep && !part.empty()) {
+          if (!first) {
+            out << '&';
+          }
+          out << part;
+          first = false;
+        }
+
+        if (amp == query.size()) {
+          break;
+        }
+        pos = amp + 1;
+      }
+      return out.str();
+    };
+
+    auto parse_cookie_pairs = [](const std::string &cookie_header) {
+      std::vector<std::pair<std::string, std::string>> result;
+      size_t pos = 0;
+      while (pos < cookie_header.size()) {
+        while (pos < cookie_header.size() &&
+               std::isspace(static_cast<unsigned char>(cookie_header[pos]))) {
+          ++pos;
+        }
+        size_t sep = cookie_header.find(';', pos);
+        if (sep == std::string::npos) {
+          sep = cookie_header.size();
+        }
+        std::string part = cookie_header.substr(pos, sep - pos);
+        size_t eq = part.find('=');
+        if (eq != std::string::npos) {
+          std::string name = part.substr(0, eq);
+          std::string value = part.substr(eq + 1);
+          while (!name.empty() &&
+                 std::isspace(static_cast<unsigned char>(name.front()))) {
+            name.erase(name.begin());
+          }
+          while (!name.empty() &&
+                 std::isspace(static_cast<unsigned char>(name.back()))) {
+            name.pop_back();
+          }
+          while (!value.empty() &&
+                 std::isspace(static_cast<unsigned char>(value.front()))) {
+            value.erase(value.begin());
+          }
+          while (!value.empty() &&
+                 std::isspace(static_cast<unsigned char>(value.back()))) {
+            value.pop_back();
+          }
+          if (!name.empty()) {
+            result.push_back({name, value});
+          }
+        }
+        if (sep == cookie_header.size()) {
+          break;
+        }
+        pos = sep + 1;
+      }
+      return result;
+    };
+
+    auto build_cookie_header = [](const std::vector<std::pair<std::string, std::string>> &pairs) {
+      std::ostringstream out;
+      bool first = true;
+      for (const auto &kv : pairs) {
+        if (kv.first.empty()) {
+          continue;
+        }
+        if (!first) {
+          out << "; ";
+        }
+        out << kv.first << "=" << kv.second;
+        first = false;
+      }
+      return out.str();
+    };
+
+    // Keep the FIRST occurrence of each cookie name (browsers send
+    // more-specific-path cookies first per RFC 6265 §5.4).
+    auto dedupe_cookie_pairs_keep_first =
+        [](const std::vector<std::pair<std::string, std::string>> &pairs) {
+      std::vector<std::pair<std::string, std::string>> dedup;
+      std::unordered_map<std::string, bool> seen;
+      dedup.reserve(pairs.size());
+
+      for (const auto &kv : pairs) {
+        if (kv.first.empty()) {
+          continue;
+        }
+        if (seen.find(kv.first) != seen.end()) {
+          continue;
+        }
+        seen[kv.first] = true;
+        dedup.push_back(kv);
+      }
+      return dedup;
+    };
+
+    auto parse_set_cookie_name_value = [](const std::string &set_cookie_value)
+        -> std::optional<std::pair<std::string, std::string>> {
+      if (set_cookie_value.empty()) {
+        return std::nullopt;
+      }
+      size_t end = set_cookie_value.find(';');
+      std::string first_part =
+          set_cookie_value.substr(0, end == std::string::npos ? set_cookie_value.size() : end);
+      size_t eq = first_part.find('=');
+      if (eq == std::string::npos) {
+        return std::nullopt;
+      }
+      std::string name = first_part.substr(0, eq);
+      std::string value = first_part.substr(eq + 1);
+      while (!name.empty() &&
+             std::isspace(static_cast<unsigned char>(name.front()))) {
+        name.erase(name.begin());
+      }
+      while (!name.empty() &&
+             std::isspace(static_cast<unsigned char>(name.back()))) {
+        name.pop_back();
+      }
+      while (!value.empty() &&
+             std::isspace(static_cast<unsigned char>(value.front()))) {
+        value.erase(value.begin());
+      }
+      while (!value.empty() &&
+             std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
+      }
+      if (name.empty()) {
+        return std::nullopt;
+      }
+      return std::make_pair(name, value);
+    };
+
+    // Extract token from Authorization header, query param, or cookie
+    auto auth_header = request.get_header_value("Authorization");
+    std::string token;
+    
+    if (auth_header.find("Bearer ") != std::string::npos) {
+      token = auth_header.substr(7);
+    } else {
+      // Try to get bastion token from query params.
+      // IMPORTANT: apps like phpMyAdmin also use `token` query param for CSRF;
+      // do not treat it as bastion auth unless it matches bastion token format.
+      const char *ef_token_param = request.url_params.get("ef_token");
+      if (ef_token_param && is_bastion_token(ef_token_param)) {
+        token = ef_token_param;
+      }
+      if (token.empty()) {
+        const char *token_param = request.url_params.get("token");
+        if (token_param && is_bastion_token(token_param)) {
+          token = token_param;
+        }
+      }
+      
+      // If still no token, try to get from cookie
+      if (token.empty()) {
+        auto cookie = request.get_header_value("Cookie");
+        if (!cookie.empty()) {
+          size_t pos = cookie.find("endoriumfort_token=");
+          if (pos != std::string::npos) {
+            size_t start = pos + 19; // length of "endoriumfort_token="
+            size_t end = cookie.find(';', start);
+            if (end == std::string::npos) {
+              end = cookie.length();
+            }
+            token = cookie.substr(start, end - start);
+          }
+        }
+      }
+
+      // Fallback for iframe/webapp subresources:
+      // when upstream also sets Set-Cookie, browsers may prioritize target app cookies.
+      // In that case, recover token from same-origin Referer URL.
+      if (token.empty()) {
+        auto referer = request.get_header_value("Referer");
+        if (!referer.empty()) {
+          size_t qpos = referer.find('?');
+          if (qpos != std::string::npos && qpos + 1 < referer.size()) {
+            std::string query = referer.substr(qpos + 1);
+            auto referer_token = get_query_param_value(query, "ef_token");
+            if (!referer_token) {
+              auto legacy_token = get_query_param_value(query, "token");
+              if (legacy_token && is_bastion_token(*legacy_token)) {
+                referer_token = legacy_token;
+              }
+            }
+            if (referer_token) {
+              token = *referer_token;
+            }
+          }
+        }
+      }
+    }
+
+    auto auth = find_auth_by_token(token);
+    if (!auth) {
+      return crow::response(401, "Unauthorized");
+    }
+
+    const std::string proxy_cookie_key = token + ":" + std::to_string(resource_id);
+    const bool use_proxy_cookie_jar = false;
+
+    // Check resource permissions
+    std::vector<int> allowed_resource_ids;
+    if (auth->role == "admin") {
+      std::lock_guard<std::mutex> lock(resource_mutex);
+      for (const auto &entry : resources) {
+        allowed_resource_ids.push_back(entry.first);
+      }
+    } else {
+      allowed_resource_ids = get_resource_permissions(auth->userId);
+    }
+
+    // Verify resource exists and user has permission
+    Resource target_resource;
+    {
+      std::lock_guard<std::mutex> lock(resource_mutex);
+      auto it = resources.find(resource_id);
+      if (it == resources.end()) {
+        return crow::response(404, "Resource not found");
+      }
+      if (it->second.protocol != "http" &&
+          it->second.protocol != "https") {
+        return crow::response(400, "Resource is not a web resource");
+      }
+
+      bool has_permission = false;
+      for (int id : allowed_resource_ids) {
+        if (id == resource_id) {
+          has_permission = true;
+          break;
+        }
+      }
+      if (!has_permission) {
+        return crow::response(403, "Access denied to this resource");
+      }
+
+      target_resource = it->second;
+    }
+
+    std::string target_host = target_resource.target;
+    int target_port = target_resource.port;
+    size_t port_sep = target_host.rfind(':');
+    if (port_sep != std::string::npos && target_host.find(']') == std::string::npos) {
+      std::string port_text = target_host.substr(port_sep + 1);
+      if (!port_text.empty() &&
+          std::all_of(port_text.begin(), port_text.end(),
+                      [](unsigned char ch) { return std::isdigit(ch); })) {
+        target_port = std::stoi(port_text);
+        target_host = target_host.substr(0, port_sep);
+      }
+    }
+
+    if (target_host.empty()) {
+      return crow::response(400, "Invalid target host");
+    }
+
+    // Build target URL
+    std::string target_url = "/" + path;
+    if (!request.url.empty() && request.url.find('?') != std::string::npos) {
+      std::string raw_query = request.url.substr(request.url.find('?') + 1);
+      std::string sanitized_query =
+          strip_bastion_query_params(raw_query, token);
+      if (!sanitized_query.empty()) {
+        target_url += "?" + sanitized_query;
+      }
+    }
+
+    std::string upstream_origin = target_resource.protocol + "://" + target_host;
+    const bool is_http_default_port =
+        target_resource.protocol == "http" && target_port == 80;
+    const bool is_https_default_port =
+        target_resource.protocol == "https" && target_port == 443;
+    if (!is_http_default_port && !is_https_default_port) {
+      upstream_origin += ":" + std::to_string(target_port);
+    }
+
+    const bool is_config_get_request =
+        target_url.find("route=/config/get") != std::string::npos;
+
+    // Get HTTP method name
+    std::string method_name;
+    if (request.method == crow::HTTPMethod::Get) method_name = "GET";
+    else if (request.method == crow::HTTPMethod::Post) method_name = "POST";
+    else if (request.method == crow::HTTPMethod::Put) method_name = "PUT";
+    else if (request.method == crow::HTTPMethod::Delete) method_name = "DELETE";
+    else if (request.method == crow::HTTPMethod::Head) method_name = "HEAD";
+    else if (request.method == crow::HTTPMethod::Patch) method_name = "PATCH";
+    else if (request.method == crow::HTTPMethod::Options) method_name = "OPTIONS";
+    else method_name = "GET";
+
+    // Prepare request headers
+    std::unordered_map<std::string, std::string> proxy_headers;
+    proxy_headers["User-Agent"] = "EndoriumFort-Proxy/1.0";
+    proxy_headers["X-Forwarded-For"] = request.remote_ip_address;
+    proxy_headers["X-Forwarded-Proto"] = target_resource.protocol;
+    proxy_headers["Accept-Encoding"] = "identity";
+
+    // Add HTTP Basic Auth if credentials are configured in the resource
+    if (!target_resource.httpUsername.empty()) {
+      std::string credentials = target_resource.httpUsername + ":" + 
+                                target_resource.httpPassword;
+      std::string encoded = base64_encode(credentials);
+      proxy_headers["Authorization"] = "Basic " + encoded;
+    }
+
+    // Copy important headers from client
+    for (const auto &header : request.headers) {
+      const std::string header_name_lower = to_lower(header.first);
+
+      // Skip Authorization header ONLY if we're using resource credentials
+      // OR if it contains the EndoriumFort Bearer token
+      bool skip_auth = false;
+      if (header_name_lower == "authorization") {
+        // If resource has credentials configured, use those instead of client's
+        if (!target_resource.httpUsername.empty()) {
+          skip_auth = true;
+        }
+        // If client is using Bearer token (EndoriumFort auth), don't forward it
+        else if (header.second.find("Bearer ") != std::string::npos) {
+          skip_auth = true;
+        }
+        // Otherwise, forward the client's Authorization header (e.g., Basic auth from browser popup)
+      }
+
+      if (!skip_auth &&
+          header_name_lower != "host" &&
+          header_name_lower != "connection" &&
+          header_name_lower != "transfer-encoding" &&
+          header_name_lower != "accept-encoding" &&
+          header_name_lower != "content-length" &&
+          header_name_lower != "expect") {
+        if (header_name_lower == "origin") {
+          proxy_headers["Origin"] = upstream_origin;
+          continue;
+        }
+        if (header_name_lower == "referer") {
+          // Rewrite proxy Referer URL to upstream URL.
+          // Browser sends: http://localhost:8080/proxy/3/index.php?route=...&ef_token=...
+          // Upstream needs: http://192.168.0.16:8080/index.php?route=...
+          std::string rewritten_referer = header.second;
+          // Find and replace the proxy prefix in the Referer
+          std::string proxy_prefix = "/proxy/" + std::to_string(resource_id) + "/";
+          std::string proxy_prefix_noslash = "/proxy/" + std::to_string(resource_id);
+          
+          // Extract path+query from the Referer URL
+          size_t path_start = std::string::npos;
+          // Find the path portion after the host
+          size_t proto_end = rewritten_referer.find("://");
+          if (proto_end != std::string::npos) {
+            path_start = rewritten_referer.find('/', proto_end + 3);
+          }
+          
+          if (path_start != std::string::npos) {
+            std::string ref_path = rewritten_referer.substr(path_start);
+            // Strip proxy prefix from path
+            if (ref_path.find(proxy_prefix) == 0) {
+              ref_path = "/" + ref_path.substr(proxy_prefix.size());
+            } else if (ref_path.find(proxy_prefix_noslash) == 0 && 
+                       (ref_path.size() == proxy_prefix_noslash.size() || 
+                        ref_path[proxy_prefix_noslash.size()] == '?')) {
+              ref_path = "/" + ref_path.substr(proxy_prefix_noslash.size());
+            }
+            // Strip ef_token from referer query string
+            size_t qpos = ref_path.find('?');
+            if (qpos != std::string::npos) {
+              std::string ref_query = ref_path.substr(qpos + 1);
+              std::string clean_query = strip_bastion_query_params(ref_query, token);
+              ref_path = ref_path.substr(0, qpos);
+              if (!clean_query.empty()) {
+                ref_path += "?" + clean_query;
+              }
+            }
+            rewritten_referer = upstream_origin + ref_path;
+          } else {
+            rewritten_referer = upstream_origin + "/";
+          }
+          proxy_headers["Referer"] = rewritten_referer;
+          continue;
+        }
+        if (header_name_lower == "cookie") {
+          auto cookie_pairs = parse_cookie_pairs(header.second);
+          std::vector<std::pair<std::string, std::string>> sanitized;
+          sanitized.reserve(cookie_pairs.size());
+          for (const auto &kv : cookie_pairs) {
+            if (kv.first == "endoriumfort_token") {
+              continue;
+            }
+            sanitized.push_back(kv);
+          }
+          sanitized = dedupe_cookie_pairs_keep_first(sanitized);
+          std::string rebuilt = build_cookie_header(sanitized);
+          if (!rebuilt.empty()) {
+            proxy_headers["Cookie"] = rebuilt;
+          }
+        } else {
+          proxy_headers[header.first] = header.second;
+        }
+      }
+    }
+
+    // Safety net: explicitly set X-Requested-With for AJAX requests.
+    // phpMyAdmin's PHP checks this header (not the URL param) for AJAX detection.
+    // Some proxy/header configurations may drop or alter non-standard headers.
+    if (is_ajax_request) {
+      proxy_headers["X-Requested-With"] = "XMLHttpRequest";
+    }
+
+    if (use_proxy_cookie_jar) {
+      std::lock_guard<std::mutex> lock(proxy_cookie_mutex);
+      auto jar_it = proxy_cookie_jar.find(proxy_cookie_key);
+      if (jar_it != proxy_cookie_jar.end() && !jar_it->second.empty()) {
+        std::vector<std::pair<std::string, std::string>> merged;
+        auto existing_it = proxy_headers.find("Cookie");
+        if (existing_it != proxy_headers.end() && !existing_it->second.empty()) {
+          merged = parse_cookie_pairs(existing_it->second);
+        }
+
+        for (const auto &jar_cookie : jar_it->second) {
+          bool found = false;
+          for (auto &item : merged) {
+            if (item.first == jar_cookie.first) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            merged.push_back({jar_cookie.first, jar_cookie.second});
+          }
+        }
+
+        merged = dedupe_cookie_pairs_keep_first(merged);
+
+        std::string rebuilt = build_cookie_header(merged);
+        if (!rebuilt.empty()) {
+          proxy_headers["Cookie"] = rebuilt;
+        }
+      }
+    }
+
+    std::string error;
+    HttpProxyResponse proxy_response = http_proxy_request(
+        method_name,
+        target_host,
+        target_port,
+        target_url,
+        request.body,
+        proxy_headers,
+        error
+    );
+
+    if (!error.empty()) {
+      // Audit failed proxy access
+      AuditEvent event;
+      event.id = next_audit_id.fetch_add(1);
+      event.type = "web.proxy_error";
+      event.actor = auth->user;
+      event.role = auth->role;
+      event.createdAt = now_utc();
+      event.payloadJson = "{\"resourceId\":" + std::to_string(resource_id) +
+                         ",\"error\":\"" + error + "\"}";
+      event.payloadIsJson = true;
+      append_audit(event);
+
+      return crow::response(502, error);
+    }
+
+    // Audit successful proxy access
+    AuditEvent audit_event;
+    audit_event.id = next_audit_id.fetch_add(1);
+    audit_event.type = "web.proxy_access";
+    audit_event.actor = auth->user;
+    audit_event.role = auth->role;
+    audit_event.createdAt = now_utc();
+
+    std::ostringstream audit_oss;
+    audit_oss << "{"
+              << "\"resourceId\":" << resource_id
+              << ",\"resourceName\":\"" << target_resource.name << "\""
+              << ",\"path\":\"" << path << "\""
+              << ",\"method\":\"" << method_name
+              << "\",\"status\":" << proxy_response.status_code
+              << ",\"responseSize\":" << proxy_response.body.length()
+              << "}";
+    audit_event.payloadJson = audit_oss.str();
+    audit_event.payloadIsJson = true;
+    append_audit(audit_event);
+
+    auto rewrite_location = [&](const std::string &location) {
+      if (location.empty()) {
+        return location;
+      }
+      const std::string prefix = "/proxy/" + std::to_string(resource_id);
+      std::string rewritten_url;
+      
+      if (location[0] == '/') {
+        rewritten_url = prefix + location;
+      } else {
+        const std::string http_prefix = "http://";
+        const std::string https_prefix = "https://";
+        if (location.rfind(http_prefix, 0) == 0 || location.rfind(https_prefix, 0) == 0) {
+          std::string without_scheme = location;
+          size_t scheme_end = without_scheme.find("//");
+          if (scheme_end != std::string::npos) {
+            without_scheme = without_scheme.substr(scheme_end + 2);
+          }
+          size_t slash_pos = without_scheme.find('/');
+          std::string host_port = slash_pos == std::string::npos
+                                      ? without_scheme
+                                      : without_scheme.substr(0, slash_pos);
+          std::string rest = slash_pos == std::string::npos
+                                 ? std::string()
+                                 : without_scheme.substr(slash_pos);
+          if (host_port == target_host || host_port == target_resource.target) {
+            if (rest.empty()) {
+              rest = "/";
+            }
+            rewritten_url = prefix + rest;
+          } else {
+            return location;
+          }
+        } else {
+          return location;
+        }
+      }
+      
+      return rewritten_url;
+    };
+
+    auto rewrite_html_body = [&](const std::string &html) {
+      if (html.empty()) {
+        return html;
+      }
+      
+      // Rewrite absolute paths to proxy paths
+      // Without this, URLs like /luci-static/ would load directly from the target server
+      std::string rewritten = html;
+      const std::string prefix = "/proxy/" + std::to_string(resource_id) + "/";
+      const std::string prefix_escaped = "\\/proxy\\/" + std::to_string(resource_id) + "\\/";
+      
+      // Replace absolute paths in href, src, action attributes
+      const std::array<std::string, 7> tokens = {
+          "href=\"/", "href=\'/", "src=\"/", "src=\'/",
+          "action=\"/", "action=\'/", "url(/"};
+      for (const auto &token : tokens) {
+        size_t pos = 0;
+        while ((pos = rewritten.find(token, pos)) != std::string::npos) {
+          // Skip if already /proxy/X/
+          if (pos + token.size() + 8 < rewritten.size() &&
+              rewritten.substr(pos + token.size(), 6) == "proxy/") {
+            pos += token.size() + 1;
+            continue;
+          }
+          // Replace absolute path with proxied path
+          std::string replacement = token.substr(0, token.size() - 1) + prefix;
+          rewritten.replace(pos, token.size(), replacement);
+          pos += replacement.size();
+        }
+      }
+
+      // Also rewrite escaped slashes for LuCI-specific JSON snippets only.
+      // A generic rewrite of all "\/..." patterns is too aggressive and can
+      // corrupt unrelated application payloads (e.g., phpMyAdmin JS/JSON data).
+      {
+        size_t pos = 0;
+        const std::array<std::string, 2> luci_tokens = {
+            "\"\\/cgi-bin\\/luci", "\"\\/luci-static"};
+        for (const auto &escaped_token : luci_tokens) {
+          pos = 0;
+          std::string escaped_replacement =
+              "\"" + prefix_escaped + escaped_token.substr(3);
+          while ((pos = rewritten.find(escaped_token, pos)) !=
+                 std::string::npos) {
+            // Skip if already /proxy/X/
+            if (pos + escaped_token.size() + 14 < rewritten.size() &&
+                rewritten.substr(pos + 3, 6) == "proxy") {
+              pos += escaped_token.size();
+              continue;
+            }
+            rewritten.replace(pos, escaped_token.size(), escaped_replacement);
+            pos += escaped_replacement.size();
+          }
+        }
+      }
+
+      // Inject the base tag for proper relative URL resolution.
+      // Without this, relative paths like "js/foo.js" in the proxied HTML
+      // would resolve against /proxy/<id> instead of /proxy/<id>/.
+      const std::string base_tag = "<base href=\"/proxy/" + std::to_string(resource_id) + "/\">";
+      size_t head_pos = rewritten.find("<head>");
+      if (head_pos != std::string::npos) {
+        rewritten.insert(head_pos + 6, base_tag);
+      } else {
+        size_t head_pos2 = rewritten.find("<head ");
+        if (head_pos2 != std::string::npos) {
+          size_t head_close = rewritten.find('>', head_pos2);
+          if (head_close != std::string::npos) {
+            rewritten.insert(head_close + 1, base_tag);
+          }
+        } else {
+          size_t html_pos = rewritten.find("<html");
+          if (html_pos != std::string::npos) {
+            size_t html_end = rewritten.find('>', html_pos);
+            if (html_end != std::string::npos) {
+              rewritten.insert(html_end + 1, base_tag);
+            }
+          }
+        }
+      }
+
+      return rewritten;
+    };
+
+    auto trim_copy = [](const std::string &value) {
+      size_t start = 0;
+      while (start < value.size() &&
+             std::isspace(static_cast<unsigned char>(value[start]))) {
+        ++start;
+      }
+      size_t end = value.size();
+      while (end > start &&
+             std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+      }
+      return value.substr(start, end - start);
+    };
+
+    auto rewrite_set_cookie_for_proxy = [&](const std::string &cookie_value) {
+      if (cookie_value.empty()) {
+        return cookie_value;
+      }
+
+      std::vector<std::string> parts;
+      size_t pos = 0;
+      while (pos <= cookie_value.size()) {
+        size_t sep = cookie_value.find(';', pos);
+        if (sep == std::string::npos) {
+          sep = cookie_value.size();
+        }
+        parts.push_back(trim_copy(cookie_value.substr(pos, sep - pos)));
+        if (sep == cookie_value.size()) {
+          break;
+        }
+        pos = sep + 1;
+      }
+
+      if (parts.empty() || parts[0].empty()) {
+        return cookie_value;
+      }
+
+      const std::string scoped_path =
+          "Path=/proxy/" + std::to_string(resource_id) + "/";
+      std::string rewritten = parts[0];
+      bool has_path = false;
+
+      for (size_t i = 1; i < parts.size(); ++i) {
+        if (parts[i].empty()) {
+          continue;
+        }
+        std::string lower = to_lower(parts[i]);
+
+        // On localhost HTTP dev, Secure cookies are not sent by browsers.
+        if (lower == "secure") {
+          continue;
+        }
+
+        // Domain from upstream host is invalid when response is served by localhost proxy.
+        // Let browser default to current host (localhost).
+        if (lower.rfind("domain=", 0) == 0) {
+          continue;
+        }
+
+        // SameSite=None requires Secure in modern browsers.
+        // Since we remove Secure for HTTP localhost, normalize to Lax.
+        if (lower == "samesite=none") {
+          rewritten += "; SameSite=Lax";
+          continue;
+        }
+
+        if (lower.rfind("path=", 0) == 0) {
+          rewritten += "; " + scoped_path;
+          has_path = true;
+          continue;
+        }
+
+        rewritten += "; " + parts[i];
+      }
+
+      if (!has_path) {
+        rewritten += "; " + scoped_path;
+      }
+
+      return rewritten;
+    };
+
+    auto content_type_it = proxy_response.headers.find("content-type");
+    bool should_rewrite_html = false;
+    if (content_type_it != proxy_response.headers.end()) {
+      const std::string &content_type = content_type_it->second;
+      if (content_type.find("text/html") != std::string::npos) {
+        // Always rewrite HTML, even for AJAX requests.
+        // If the upstream returns text/html for an AJAX request (e.g. because
+        // it didn't detect AJAX), the HTML still needs base tag + URL rewriting
+        // so that resources load correctly if the browser renders it.
+        should_rewrite_html = true;
+      }
+
+      // phpMyAdmin /config/get is expected to include a `value` field.
+      // If upstream returns success=true without value, frontend stores
+      // localStorage item as "undefined" then crashes on JSON.parse.
+      if (is_config_get_request &&
+          content_type.find("application/json") != std::string::npos) {
+        std::string trimmed_body = trim_copy(proxy_response.body);
+        if (!trimmed_body.empty() && trimmed_body.front() == '{' &&
+            trimmed_body.back() == '}' &&
+            trimmed_body.find("\"success\":true") != std::string::npos &&
+            trimmed_body.find("\"value\"") == std::string::npos) {
+          size_t close_brace = trimmed_body.rfind('}');
+          if (close_brace != std::string::npos) {
+            if (close_brace > 0 && trimmed_body[close_brace - 1] != '{') {
+              trimmed_body.insert(close_brace, ",\"value\":null");
+            } else {
+              trimmed_body.insert(close_brace, "\"value\":null");
+            }
+            proxy_response.body = trimmed_body;
+          }
+        }
+      }
+    }
+
+    // Build response
+    crow::response resp;
+    resp.code = proxy_response.status_code;
+    resp.body = proxy_response.body;
+
+    if (should_rewrite_html) {
+      resp.body = rewrite_html_body(proxy_response.body);
+    }
+
+    // Set response headers
+    resp.set_header("X-Proxied-By", "EndoriumFort");
+    resp.set_header("X-Resource-Id", std::to_string(resource_id));
+    
+    // Set cookie with the token so all subsequent requests include it
+    if (!token.empty()) {
+      std::string cookie_value = "endoriumfort_token=" + token + 
+                                 "; Path=/proxy/" + std::to_string(resource_id) + 
+                                 "/; HttpOnly; SameSite=Lax";
+      resp.add_header("Set-Cookie", cookie_value);
+    }
+
+    for (const auto &header : proxy_response.headers) {
+      if (header.first == "connection" ||
+          header.first == "transfer-encoding" ||
+          header.first == "set-cookie" ||
+          header.first == "x-frame-options" ||
+          header.first == "frame-options" ||
+          header.first == "content-security-policy" ||
+          header.first == "x-content-security-policy" ||
+          header.first == "x-webkit-csp" ||
+          header.first == "content-length" ||
+          (should_rewrite_html && header.first == "content-encoding")) {
+        continue;
+      }
+      if (header.first == "location") {
+        resp.set_header("Location", rewrite_location(header.second));
+      } else {
+        resp.set_header(header.first, header.second);
+      }
+    }
+
+    std::vector<std::string> cookie_name_order;
+    std::unordered_map<std::string, std::string> dedup_cookies;
+    cookie_name_order.reserve(proxy_response.set_cookie_headers.size());
+
+    for (const auto &cookie_value : proxy_response.set_cookie_headers) {
+      if (cookie_value.empty()) {
+        continue;
+      }
+      std::string rewritten_cookie = rewrite_set_cookie_for_proxy(cookie_value);
+      auto parsed_cookie = parse_set_cookie_name_value(rewritten_cookie);
+      if (!parsed_cookie) {
+        continue;
+      }
+      if (dedup_cookies.find(parsed_cookie->first) == dedup_cookies.end()) {
+        cookie_name_order.push_back(parsed_cookie->first);
+      }
+      dedup_cookies[parsed_cookie->first] = rewritten_cookie;
+    }
+
+    for (const auto &cookie_name : cookie_name_order) {
+      auto it = dedup_cookies.find(cookie_name);
+      if (it == dedup_cookies.end()) {
+        continue;
+      }
+      resp.add_header("Set-Cookie", it->second);
+
+      if (use_proxy_cookie_jar) {
+        auto parsed_cookie = parse_set_cookie_name_value(it->second);
+        if (!parsed_cookie) {
+          continue;
+        }
+        std::lock_guard<std::mutex> lock(proxy_cookie_mutex);
+        if (parsed_cookie->second.empty()) {
+          proxy_cookie_jar[proxy_cookie_key].erase(parsed_cookie->first);
+        } else {
+          proxy_cookie_jar[proxy_cookie_key][parsed_cookie->first] =
+              parsed_cookie->second;
+        }
+      }
+    }
+
+    resp.set_header("Content-Length", std::to_string(resp.body.size()));
+
+    return resp;
+  };
+
+  // Web proxy endpoint - requires authentication and resource permission
+  // Handle /proxy/<id> (no trailing slash) - serve content directly.
+  CROW_ROUTE(app, "/proxy/<int>")
+      .methods(crow::HTTPMethod::Get, crow::HTTPMethod::Post,
+               crow::HTTPMethod::Put, crow::HTTPMethod::Delete,
+               crow::HTTPMethod::Head, crow::HTTPMethod::Patch)
+      ([&](const crow::request &request, int resource_id) {
+        return handle_proxy_request(request, resource_id, "");
+      });
+
+  CROW_ROUTE(app, "/proxy/<int>/<path>")
+      .methods(crow::HTTPMethod::Get, crow::HTTPMethod::Post,
+               crow::HTTPMethod::Put, crow::HTTPMethod::Delete,
+               crow::HTTPMethod::Head, crow::HTTPMethod::Patch)
+      ([&](const crow::request &request, int resource_id, std::string path) {
+        return handle_proxy_request(request, resource_id, path);
+      });
+
+  // Endpoint to get a URL for accessing a web resource
+  CROW_ROUTE(app, "/api/web/resources/<int>/url")
+      .methods(crow::HTTPMethod::Get)
+      ([&](const crow::request &request, int resource_id) {
+        auto auth = find_auth(request);
+        if (!auth) {
+          return crow::response(401, "Unauthorized");
+        }
+        
+        // Check permissions
+        std::vector<int> allowed_resource_ids;
+        if (auth->role == "admin") {
+          std::lock_guard<std::mutex> lock(resource_mutex);
+          for (const auto &entry : resources) {
+            allowed_resource_ids.push_back(entry.first);
+          }
+        } else {
+          allowed_resource_ids = get_resource_permissions(auth->userId);
+        }
+        
+        bool has_permission = false;
+        for (int id : allowed_resource_ids) {
+          if (id == resource_id) {
+            has_permission = true;
+            break;
+          }
+        }
+        
+        if (!has_permission) {
+          return crow::response(403, "Access denied");
+        }
+        
+        Resource target_resource;
+        {
+          std::lock_guard<std::mutex> lock(resource_mutex);
+          auto it = resources.find(resource_id);
+          if (it == resources.end()) {
+            return crow::response(404, "Resource not found");
+          }
+          target_resource = it->second;
+        }
+        
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["resourceId"] = resource_id;
+        payload["resourceName"] = target_resource.name;
+        payload["proxyUrl"] = "/proxy/" + std::to_string(resource_id) + "?ef_token=" + auth->token;
+        payload["token"] = auth->token;
+        
+        return crow::response{payload};
+      });
+
+  // Web proxy configuration - for admin to set up web resources
+  CROW_ROUTE(app, "/api/web/resources").methods(crow::HTTPMethod::Get)(
+      [&](const crow::request &request) {
+        auto auth = find_auth(request);
+        if (!auth) {
+          return crow::response(401, "Unauthorized");
+        }
+        
+        std::vector<Resource> web_resources;
+        {
+          std::lock_guard<std::mutex> lock(resource_mutex);
+          for (const auto &entry : resources) {
+            if (entry.second.protocol == "http" || 
+                entry.second.protocol == "https") {
+              web_resources.push_back(entry.second);
+            }
+          }
+        }
+        
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["items"] = crow::json::wvalue::list();
+        for (size_t i = 0; i < web_resources.size(); ++i) {
+          payload["items"][static_cast<int>(i)] = 
+              resource_to_json(web_resources[i]);
+        }
+        return crow::response{payload};
+      });
+
+  // ============================================================
+  // WebSocket TCP Tunnel for EndoriumFortAgent
+  // ============================================================
+  // Protocol:
+  //   1. Agent connects to ws://<backend>/ws/tunnel
+  //   2. onaccept: authenticate via "token" query param, extract "resource_id"
+  //   3. onopen: connect TCP to target resource, start upstream reader thread
+  //   4. onmessage (binary): forward data from agent → upstream TCP
+  //   5. onclose: close upstream TCP, stop reader thread
+  // This enables the agent to expose 127.0.0.1:<localport> and tunnel all
+  // traffic transparently through the bastion to the target.
+
+  struct TunnelState {
+    int upstream_sock = -1;
+    int resource_id = 0;
+    std::string user;
+    std::string token;
+    std::atomic<bool> active{false};
+    std::thread reader_thread;
+  };
+
+  std::mutex tunnel_mutex;
+  std::unordered_map<crow::websocket::connection*, std::shared_ptr<TunnelState>> tunnel_connections;
+
+  CROW_WEBSOCKET_ROUTE(app, "/ws/tunnel")
+    .onaccept([&](const crow::request& req, void** userdata) -> bool {
+      try {
+      CROW_LOG_INFO << "Tunnel: onaccept called, raw_url=" << req.raw_url;
+
+      // Authenticate with token from query params
+      std::string token_str;
+      const char* token_param = req.url_params.get("token");
+      if (token_param) token_str = token_param;
+      if (token_str.empty()) {
+        const char* ef_token_param = req.url_params.get("ef_token");
+        if (ef_token_param) token_str = ef_token_param;
+      }
+      CROW_LOG_INFO << "Tunnel: token=" << (token_str.empty() ? "(empty)" : token_str);
+      if (token_str.empty()) {
+        CROW_LOG_WARNING << "Tunnel: rejected - no token";
+        return false;
+      }
+
+      auto auth = find_auth_by_token(token_str);
+      if (!auth) {
+        CROW_LOG_WARNING << "Tunnel: rejected - invalid token: " << token_str;
+        return false;
+      }
+      CROW_LOG_INFO << "Tunnel: auth OK user=" << auth->user << " role=" << auth->role;
+
+      // Get resource_id
+      const char* res_param = req.url_params.get("resource_id");
+      if (!res_param) {
+        CROW_LOG_WARNING << "Tunnel: rejected - no resource_id";
+        return false;
+      }
+      int resource_id = 0;
+      try {
+        resource_id = std::stoi(res_param);
+      } catch (...) {
+        CROW_LOG_WARNING << "Tunnel: rejected - invalid resource_id";
+        return false;
+      }
+      CROW_LOG_INFO << "Tunnel: resource_id=" << resource_id;
+
+      // Check resource exists and user has permission
+      Resource target_resource;
+      {
+        std::lock_guard<std::mutex> lock(resource_mutex);
+        auto it = resources.find(resource_id);
+        if (it == resources.end()) {
+          CROW_LOG_WARNING << "Tunnel: rejected - resource not found: " << resource_id;
+          return false;
+        }
+        target_resource = it->second;
+      }
+      CROW_LOG_INFO << "Tunnel: resource found target=" << target_resource.target << " port=" << target_resource.port;
+
+      std::vector<int> allowed_ids;
+      if (auth->role == "admin") {
+        std::lock_guard<std::mutex> lock(resource_mutex);
+        for (const auto& r : resources) allowed_ids.push_back(r.first);
+      } else {
+        allowed_ids = get_resource_permissions(auth->userId);
+      }
+      bool has_perm = false;
+      for (int id : allowed_ids) {
+        if (id == resource_id) { has_perm = true; break; }
+      }
+      if (!has_perm) {
+        CROW_LOG_WARNING << "Tunnel: rejected - no permission for resource " << resource_id;
+        return false;
+      }
+      CROW_LOG_INFO << "Tunnel: permission OK";
+
+      // Create tunnel state and store in userdata
+      auto state = std::make_shared<TunnelState>();
+      state->resource_id = resource_id;
+      state->user = auth->user;
+      state->token = token_str;
+
+      // Parse target host and port
+      std::string target_host = target_resource.target;
+      int target_port = target_resource.port;
+      size_t port_sep = target_host.rfind(':');
+      if (port_sep != std::string::npos && target_host.find(']') == std::string::npos) {
+        std::string port_text = target_host.substr(port_sep + 1);
+        if (!port_text.empty() &&
+            std::all_of(port_text.begin(), port_text.end(),
+                        [](unsigned char ch) { return std::isdigit(ch); })) {
+          target_port = std::stoi(port_text);
+          target_host = target_host.substr(0, port_sep);
+        }
+      }
+      CROW_LOG_INFO << "Tunnel: connecting TCP to " << target_host << ":" << target_port;
+
+      // Connect to upstream target
+      int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+      if (sock < 0) {
+        CROW_LOG_ERROR << "Tunnel: failed to create socket errno=" << errno;
+        return false;
+      }
+
+      struct timeval send_tv;
+      send_tv.tv_sec = 30;
+      send_tv.tv_usec = 0;
+      setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &send_tv, sizeof(send_tv));
+      struct timeval recv_tv;
+      recv_tv.tv_sec = 60;
+      recv_tv.tv_usec = 0;
+      setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_tv, sizeof(recv_tv));
+
+      struct hostent* server_entry = gethostbyname(target_host.c_str());
+      if (!server_entry) {
+        CROW_LOG_ERROR << "Tunnel: failed to resolve " << target_host;
+        ::close(sock);
+        return false;
+      }
+      CROW_LOG_INFO << "Tunnel: resolved " << target_host;
+
+      struct sockaddr_in server_addr;
+      memset(&server_addr, 0, sizeof(server_addr));
+      server_addr.sin_family = AF_INET;
+      server_addr.sin_port = htons(target_port);
+      memcpy(&server_addr.sin_addr.s_addr, server_entry->h_addr, server_entry->h_length);
+
+      if (::connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        CROW_LOG_ERROR << "Tunnel: failed to connect to " << target_host << ":" << target_port << " errno=" << errno;
+        ::close(sock);
+        return false;
+      }
+      CROW_LOG_INFO << "Tunnel: TCP connected to " << target_host << ":" << target_port;
+
+      state->upstream_sock = sock;
+      state->active = true;
+
+      // Store the shared_ptr via raw pointer in userdata
+      auto* raw_state = new std::shared_ptr<TunnelState>(state);
+      *userdata = raw_state;
+
+      CROW_LOG_INFO << "Tunnel: accepted for user=" << auth->user
+                    << " resource=" << resource_id
+                    << " target=" << target_host << ":" << target_port;
+
+      // Audit
+      AuditEvent event;
+      event.id = next_audit_id.fetch_add(1);
+      event.type = "tunnel.open";
+      event.actor = auth->user;
+      event.role = auth->role;
+      event.createdAt = now_utc();
+      event.payloadJson = "{\"resourceId\":" + std::to_string(resource_id) +
+                         ",\"target\":\"" + target_host + ":" + std::to_string(target_port) + "\"}";
+      event.payloadIsJson = true;
+      append_audit(event);
+
+      return true;
+
+      } catch (const std::exception& ex) {
+        CROW_LOG_ERROR << "Tunnel: onaccept exception: " << ex.what();
+        return false;
+      } catch (...) {
+        CROW_LOG_ERROR << "Tunnel: onaccept unknown exception";
+        return false;
+      }
+    })
+    .onopen([&](crow::websocket::connection& conn) {
+      // Retrieve tunnel state from userdata
+      auto* raw_state = static_cast<std::shared_ptr<TunnelState>*>(conn.userdata());
+      if (!raw_state) {
+        conn.close("Internal error");
+        return;
+      }
+      auto state = *raw_state;
+      delete raw_state;
+      conn.userdata(nullptr);
+
+      {
+        std::lock_guard<std::mutex> lock(tunnel_mutex);
+        tunnel_connections[&conn] = state;
+      }
+
+      // Start a reader thread that reads from upstream and sends to WebSocket
+      state->reader_thread = std::thread([state, &conn]() {
+        char buffer[16384];
+        while (state->active) {
+          ssize_t n = recv(state->upstream_sock, buffer, sizeof(buffer), 0);
+          if (n < 0) {
+            // Timeout (EAGAIN/EWOULDBLOCK) → just retry if still active
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            break; // real error
+          }
+          if (n == 0) break; // peer closed
+          try {
+            conn.send_binary(std::string(buffer, n));
+          } catch (...) {
+            break;
+          }
+        }
+        // Connection ended from upstream side
+        state->active = false;
+        try {
+          conn.close("upstream closed");
+        } catch (...) {}
+      });
+    })
+    .onmessage([&](crow::websocket::connection& conn, const std::string& data, bool is_binary) {
+      std::shared_ptr<TunnelState> state;
+      {
+        std::lock_guard<std::mutex> lock(tunnel_mutex);
+        auto it = tunnel_connections.find(&conn);
+        if (it == tunnel_connections.end()) return;
+        state = it->second;
+      }
+      if (!state || !state->active || state->upstream_sock < 0) return;
+
+      // Forward data from agent to upstream
+      const char* ptr = data.data();
+      size_t remaining = data.size();
+      while (remaining > 0) {
+        ssize_t sent = send(state->upstream_sock, ptr, remaining, MSG_NOSIGNAL);
+        if (sent <= 0) {
+          state->active = false;
+          conn.close("upstream write error");
+          return;
+        }
+        ptr += sent;
+        remaining -= sent;
+      }
+    })
+    .onclose([&](crow::websocket::connection& conn, const std::string& reason) {
+      std::shared_ptr<TunnelState> state;
+      {
+        std::lock_guard<std::mutex> lock(tunnel_mutex);
+        auto it = tunnel_connections.find(&conn);
+        if (it != tunnel_connections.end()) {
+          state = it->second;
+          tunnel_connections.erase(it);
+        }
+      }
+      if (state) {
+        state->active = false;
+        if (state->upstream_sock >= 0) {
+          shutdown(state->upstream_sock, SHUT_RDWR);
+          ::close(state->upstream_sock);
+          state->upstream_sock = -1;
+        }
+        if (state->reader_thread.joinable()) {
+          state->reader_thread.join();
+        }
+
+        CROW_LOG_INFO << "Tunnel: closed for user=" << state->user
+                      << " resource=" << state->resource_id
+                      << " reason=" << reason;
+
+        // Audit
+        AuditEvent event;
+        event.id = next_audit_id.fetch_add(1);
+        event.type = "tunnel.close";
+        event.actor = state->user;
+        event.role = "";
+        event.createdAt = now_utc();
+        event.payloadJson = "{\"resourceId\":" + std::to_string(state->resource_id) +
+                           ",\"reason\":\"" + reason + "\"}";
+        event.payloadIsJson = true;
+        append_audit(event);
+      }
+    });
+
+  app.port(8080).multithreaded().run();
+#ifdef ENDORIUMFORT_SSH_ENABLED
+#ifndef _WIN32
+  libssh2_exit();
+#endif
+#endif
+  return 0;
+}

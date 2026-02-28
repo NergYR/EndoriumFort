@@ -1,0 +1,94 @@
+.web-proxy-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background-color: #f5f5f5;
+}
+
+.web-proxy-header {
+  background-color: #2c3e50;
+  color: white;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  flex-wrap: wrap;
+}
+
+.back-button {
+  background-color: #34495e;
+  color: white;
+  border: none;
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.3s;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.back-button:hover {
+  background-color: #1a252f;
+}
+
+.web-proxy-header h2 {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-info {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.web-proxy-content {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.proxy-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+.proxy-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-color: white;
+  z-index: 10;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #3498db;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.proxy-loading p {
+  margin-top: 15px;
+  color: #7f8c8d;
+}

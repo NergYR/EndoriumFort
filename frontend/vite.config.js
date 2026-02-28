@@ -9,6 +9,9 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8080',
         ws: true
+      },
+      '/proxy': {
+        target: 'http://localhost:8080'
       }
     }
   }

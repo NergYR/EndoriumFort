@@ -1,0 +1,23 @@
+if(EXISTS "${VERSION_FILE}")
+  file(READ "${VERSION_FILE}" VERSION_STRING)
+  string(STRIP "${VERSION_STRING}" VERSION_STRING)
+else()
+  set(VERSION_STRING "0.0.0")
+endif()
+
+string(REPLACE "." ";" VERSION_LIST "${VERSION_STRING}")
+list(LENGTH VERSION_LIST LIST_LEN)
+
+if(LIST_LEN EQUAL 3)
+    list(GET VERSION_LIST 0 MAJOR)
+    list(GET VERSION_LIST 1 MINOR)
+    list(GET VERSION_LIST 2 PATCH)
+    math(EXPR PATCH "${PATCH} + 1")
+    set(NEW_VERSION "${MAJOR}.${MINOR}.${PATCH}")
+else()
+    set(NEW_VERSION "0.0.1")
+endif()
+
+file(WRITE "${VERSION_FILE}" "${NEW_VERSION}")
+file(WRITE "${VERSION_HEADER_FILE}" "#pragma once\n// This file is auto-generated.\n#define APP_VERSION \"${NEW_VERSION}\"\n")
+message(STATUS "Incremented version to: ${NEW_VERSION}")

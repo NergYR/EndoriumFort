@@ -20,4 +20,17 @@ Write-Host "[Backend] Building"
 cmake --build $BackendBuildDir
 Pop-Location
 
+Write-Host "[Agent] Building EndoriumFortAgent"
+Push-Location "agent"
+$goPath = Get-Command go -ErrorAction SilentlyContinue
+if ($goPath) {
+  $env:GOOS = "windows"
+  $env:GOARCH = "amd64"
+  go build -o endoriumfort-agent.exe .
+  Write-Host "[Agent] Built: agent\endoriumfort-agent.exe"
+} else {
+  Write-Host "[Agent] Go not found - skipping agent build"
+}
+Pop-Location
+
 Write-Host "Build complete."
