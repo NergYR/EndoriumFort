@@ -1,366 +1,369 @@
-# EndoriumFort
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.3.1-blue?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/license-Source--Available-orange?style=flat-square" alt="License">
+  <img src="https://img.shields.io/badge/backend-C%2B%2B%2017-00599C?style=flat-square&logo=cplusplus" alt="C++">
+  <img src="https://img.shields.io/badge/frontend-React%2018-61DAFB?style=flat-square&logo=react" alt="React">
+  <img src="https://img.shields.io/badge/agent-Go%201.24-00ADD8?style=flat-square&logo=go" alt="Go">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square" alt="Platform">
+</p>
 
-EndoriumFort is a PAM (Privileged Access Management) bastion system inspired by Wallix, Systancia Gate/Cleanroom, Teleport, and Apache Guacamole. It focuses on a clean, auditable access path from users to LAN targets with a gateway and WebBastion control plane.
+# 🏰 EndoriumFort
 
-## Architecture
+**EndoriumFort** is an open-source **Privileged Access Management (PAM)** bastion system designed to secure, monitor, and audit remote access to your infrastructure. Inspired by [Wallix](https://www.wallix.com/), [Systancia Gate](https://www.systancia.com/), [Teleport](https://goteleport.com/), and [Apache Guacamole](https://guacamole.apache.org/).
+
+> **One gateway. Every protocol. Full audit trail.**
+
+---
+
+## ✨ Highlights
+
+| Feature | Description |
+|---------|-------------|
+| 🔐 **Credential Vault** | Store SSH credentials securely — auto-injected on connection |
+| 🖥️ **Web SSH Terminal** | Full xterm.js terminal in the browser via WebSocket |
+| 🌐 **HTTP/HTTPS Proxy** | Transparent web proxy with cookie-based auth |
+| 🚇 **Agent Tunnel** | Systancia-style local agent for zero-rewrite TCP tunneling |
+| 👁️ **Session Shadowing** | Real-time read-only observation of active sessions |
+| 🎬 **Session Recording** | Asciinema v2 format with animated in-browser replay |
+| 🔑 **2FA / TOTP** | RFC 6238 two-factor authentication with QR setup |
+| 🛡️ **RBAC** | Role-based access control (admin, operator, auditor) |
+| 📊 **Live Dashboard** | Real-time KPI stats, session monitoring, security alerts |
+| 🌙 **Dark Mode** | Full dark theme with localStorage persistence |
+
+---
+
+## 📐 Architecture
+
 ```
-Browser ←→ 127.0.0.1:local_port ←→ EndoriumFortAgent ←→ WebSocket ←→ Backend ←→ Target Resource
+┌──────────┐     HTTPS/WSS      ┌──────────────┐     SSH/TCP/HTTP     ┌──────────┐
+│  Browser  │◄──────────────────►│  EndoriumFort │◄────────────────────►│  Targets  │
+│  (React)  │                    │   Backend     │                      │  (LAN)    │
+└──────────┘                    └──────────────┘                      └──────────┘
+      ▲                                ▲
+      │                                │
+      │  http://127.0.0.1:<port>       │  WebSocket Tunnel
+      │                                │
+┌──────────┐                           │
+│  Agent    │◄─────────────────────────┘
+│  (Go CLI) │
+└──────────┘
 ```
 
-### Agent-Based Tunnel (v0.0.111) ✨ NEW
-EndoriumFort uses a **Systancia-style local agent** for transparent access to web resources:
+EndoriumFort operates in two modes:
 
-1. **EndoriumFortAgent** runs on the user's workstation
-2. Agent authenticates with the bastion backend
-3. Agent opens a local TCP listener (`127.0.0.1:<port>`)
-4. Browser connects to `http://127.0.0.1:<port>` — the app works as if accessed directly
-5. All traffic is tunneled through WebSocket to the backend, then forwarded to the target
+- **Web Mode** — Browser connects directly to the backend for SSH terminals, web proxy, and session management
+- **Agent Mode** — A local Go agent creates TCP tunnels via WebSocket, providing transparent access to any web application without URL rewriting
 
-**Benefits over reverse proxy:**
-- No URL rewriting, no cookie path issues, no AJAX compatibility problems
-- Target app sees native requests — 100% transparent
-- Works with any web app (phpMyAdmin, OpenWRT, etc.) without modification
-- Full audit trail of tunnel connections
+---
 
-## How it works
+## 🗂️ Project Structure
 
-### Core Features (v0.2.0)
+```
+EndoriumFort/
+├── backend/            # C++17 API server (Crow framework)
+│   ├── src/            #   main.cc, routes, SSH, tunnel, proxy, RDP
+│   ├── CMakeLists.txt  #   CMake build with FetchContent (Asio, Crow)
+│   └── VERSION         #   Backend version (0.0.137)
+├── frontend/           # React 18 + Vite 7 SPA
+│   ├── src/            #   App.jsx, styles.css, api.js, WebProxyViewer
+│   ├── package.json    #   Dependencies (xterm.js, React)
+│   └── VERSION         #   Frontend version (0.1.4)
+├── agent/              # Go CLI tunnel agent
+│   ├── main.go         #   Login, list, connect commands
+│   ├── go.mod          #   gorilla/websocket
+│   └── VERSION         #   Agent version (0.3.3)
+├── build-all.sh        # Linux/macOS build script (smart versioning)
+├── build-all.ps1       # Windows build script (PowerShell)
+├── run-dev.sh          # Dev launcher (backend + frontend)
+├── VERSION             # Global version (0.3.1)
+├── CHANGELOG.md        # Version history
+└── LICENSE             # Source-Available License
+```
 
-1. **User Authentication & Security**
-   - Token-based auth system with Bearer tokens and **1-hour expiration** ✨ v0.2.0
-   - **Password hashing** — SHA-256 with random salt, 10000 iterations ✨ v0.2.0
-   - **Password policy** — min 8 chars, upper + lower + digit required ✨ v0.2.0
-   - **Server-side logout** — tokens properly invalidated ✨ v0.2.0
-   - Role-based access control (admin, operator, auditor)
-   - **Two-Factor Authentication (TOTP/2FA)** — Compatible with Google Authenticator ✨ v0.1.0
-   - **Login audit trail** — all login/logout/failure events recorded ✨ v0.2.0
-   - Default credentials: admin/Admin123 (auto-hashed on first login)
+---
 
-2. **Resource Management**
-   - SSH sessions with live WebSocket console (libssh2)
-   - **HTTP/HTTPS web resources with transparent proxy**
-   - **RDP support framework** (requires FreeRDP) ✨ v0.1.0
-   - Role-based permission grants per user
-   - Support for multiple protocols on a single dashboard
+## 🚀 Quick Start
 
-3. **Session Management**
-   - Start, terminate, and monitor live sessions
-   - SSH console with real-time terminal emulation (xterm.js)
-   - **Automatic SSH session recording** in Asciinema format ✨ v0.1.0
-   - Session history and filtering
+### Prerequisites
 
-4. **Session Recording & Replay** ✨ v0.1.0
-   - All SSH sessions automatically recorded in Asciinema v2 (.cast) format
-   - Input/output timestamped for complete audit trail
-   - Download `.cast` files for replay with `asciinema play`
-   - Text-based replay viewer in the browser
-   - Filterable by session ID
+| Dependency | Required for |
+|------------|-------------|
+| **CMake** ≥ 3.16 | Backend build |
+| **g++** / **clang++** (C++17) | Backend compilation |
+| **SQLite3** (dev headers) | Database |
+| **libssh2** (dev headers) | SSH terminal support |
+| **Node.js** ≥ 18 | Frontend build |
+| **Go** ≥ 1.24 | Agent build |
 
-5. **Two-Factor Authentication (2FA)** ✨ v0.1.0
-   - RFC 6238 TOTP with built-in crypto (no external dependency)
-   - QR code generation for easy authenticator app setup
-   - Enable/disable with code verification
-   - Login flow: password → TOTP code → access granted
+#### Install on Debian / Ubuntu / Kali
 
-6. **Self-Service Account Management** ✨ v0.2.0
-   - **Change password** modal with current password verification
-   - Password policy validation with clear error messages
-   - Audit trail for password changes
-
-7. **Dark Mode** ✨ v0.2.0
-   - Toggle via 🌙/☀️ button on all pages
-   - Persisted in localStorage
-   - Complete dark theme across all components
-
-8. **Web Proxy** ✨ v0.0.14
-   - Transparent HTTP reverse proxy for web resources
-   - All traffic tunneled through bastion
-   - Same iframe-based access for seamless UX
-   - Full audit trail of proxy access
-
-9. **Audit & Compliance**
-   - All events logged to `audit-log.jsonl` (JSONL format)
-   - User actions: login, logout, session create/terminate, proxy access
-   - Login success/failure tracking with IP and username ✨ v0.2.0
-   - Audit viewer in admin panel with role-based filtering
-
-10. **Admin Console**
-   - User account management (create/edit/delete)
-   - Resource administration (create/edit/delete)
-   - Permission grants (user → resource mappings)
-   - Audit log viewer with filtering
-
-All session data is stored in-memory with SQLite database backend. Audit events are appended to a local JSONL file. The implementation establishes complete flow from authentication through session management to audit compliance.
-
-## Structure
-- **frontend**: Vite + React UI (WebBastion dashboard)
-- **backend**: C++ Crow API (auth, resources, audit, WebSocket tunnel)
-- **agent**: Go CLI agent (EndoriumFortAgent — local tunnel client)
-
-## Quick Start — Agent Tunnel
-
-### 1. Build everything
 ```bash
+sudo apt install build-essential cmake libsqlite3-dev libssh2-1-dev nodejs npm golang
+```
+
+#### Install on macOS
+
+```bash
+brew install cmake sqlite libssh2 node go
+```
+
+### Build Everything
+
+```bash
+git clone https://github.com/NergYR/EndoriumFort.git
+cd EndoriumFort
+chmod +x build-all.sh
 ./build-all.sh
 ```
 
-### 2. Start the backend
+This will:
+1. Build the C++ backend with CMake
+2. Build the React frontend with Vite
+3. Build the Go agent (native + cross-compiled for Linux/macOS/Windows)
+4. Auto-increment versions only when source code actually changes
+5. Create a git commit + tag if anything changed
+
+### Run in Development
+
 ```bash
-cd backend/build && ./endoriumfort_backend
+./run-dev.sh
 ```
 
-### 3. Use the agent
+Opens:
+- **Backend** on `http://localhost:8080`
+- **Frontend** on `http://localhost:5173` (Vite dev server with proxy)
+
+### Default Login
+
+| Field | Value |
+|-------|-------|
+| Username | `admin` |
+| Password | `Admin123` |
+
+> Password is auto-hashed (SHA-256 + salt) on first login. Change it immediately.
+
+---
+
+## 🖥️ Usage
+
+### Web Dashboard
+
+1. Login at `http://localhost:5173`
+2. **Dashboard** — View live KPI stats, active sessions, and security alerts
+3. **Resources** — Click a resource tile to connect (SSH terminal, web proxy, or agent tunnel)
+4. **Sessions** — Monitor, shadow (👁), or terminate active sessions
+5. **Recordings** — Replay past SSH sessions with the animated Asciinema player
+6. **Audit** — Search and filter all security events
+7. **Admin** — Manage users, resources, permissions, and credentials
+
+### Agent Tunnel
+
+For transparent access to web applications (no URL rewriting):
+
 ```bash
-# Login and get a token
-./agent/endoriumfort-agent login --server http://bastion:8080 --user admin --password admin
+# Authenticate
+./agent/endoriumfort-agent login \
+  --server http://bastion:8080 \
+  --user admin --password Admin123
 
 # List available resources
-./agent/endoriumfort-agent list --server http://bastion:8080 --token tok-1000
+./agent/endoriumfort-agent list \
+  --server http://bastion:8080 --token <your-token>
 
-# Open a tunnel to resource #3 on local port 8888
-./agent/endoriumfort-agent connect --server http://bastion:8080 --token tok-1000 --resource 3 --local-port 8888
+# Open tunnel to resource #3 on local port 8888
+./agent/endoriumfort-agent connect \
+  --server http://bastion:8080 --token <your-token> \
+  --resource 3 --local-port 8888
 
-# Now open http://127.0.0.1:8888 in your browser!
+# Browse http://127.0.0.1:8888 — traffic tunneled through bastion
 ```
 
-## UI highlights (major update)
-The WebBastion UI is streamlined to the essentials for daily operations:
+Or simply **click a resource tile** with the 🚀 agent protocol — the frontend generates the command automatically with a random port.
 
-- Dedicated login screen before entering the console.
-- Resource tiles (Systancia-style) to launch sessions from admin-managed assets.
-- Separate admin console for creating and maintaining resources.
-- Admin-managed user accounts with default admin/admin login.
-- Minimal session management for start, terminate, and live SSH supervision.
-- Focused console layout with health status and auth guardrails.
-- Endorium palette aligned with the product logo.
+---
 
-See [CHANGELOG.md](CHANGELOG.md) for the UI update entry.
+## 🔒 Security Features
 
-## Frontend (Vite + React)
-- Dev server: `npm install` then `npm run dev` in frontend
-- Build: `npm run build`
-  - Dev proxy: `/api` -> `http://localhost:8080`
+| Feature | Details |
+|---------|---------|
+| **Password Hashing** | SHA-256 with random 128-bit salt, 10,000 iterations |
+| **Token Expiration** | Bearer tokens expire after 1 hour, server-side invalidation |
+| **2FA / TOTP** | RFC 6238, QR code setup, compatible with Google Authenticator |
+| **RBAC** | 3 roles — admin (full), operator (sessions), auditor (read-only + shadow) |
+| **Credential Vault** | SSH passwords stored in DB, never exposed in standard API |
+| **Session Recording** | All SSH I/O recorded in Asciinema v2 format |
+| **Audit Trail** | Every action logged to JSONL — login, logout, connect, shadow, proxy |
+| **Cookie Auth** | HttpOnly cookies for web proxy, no tokens in URLs |
 
-## Backend (C++ Crow)
-- Build:
-  - Configure: `cmake -S . -B build`
-  - Compile: `cmake --build build`
-- MinGW make (PowerShell): `./backend/build-mingw.ps1`
-- Run: `./build/endoriumfort_backend`
-- SQLite3 is required (headers + library). The backend stores sessions in `endoriumfort.db`.
-- libssh2 is required on Linux for the Web SSH console (Live SSH console panel).
+---
 
-### Web Proxy Features (v0.0.56)
+## 📡 API Reference
 
-The HTTP/HTTPS proxy now uses **cookie-based authentication** for transparent access to web resources:
+### Authentication
 
-#### Cookie-Based Authentication
-- Tokens stored in `endoriumfort_token` cookie (automatic, transparent to users)
-- Cookie path set per-resource (`/proxy/{resourceId}/`) for security isolation
-- Cookie is emitted as `HttpOnly; SameSite=Lax` for local HTTP development (`localhost`)
-- Token extraction fallback: Authorization Bearer → query param → Cookie header
-- `Set-Cookie` header automatically sent in responses
-
-#### HTML Path Rewriting
-- Absolute paths (`href="/path"`, `src="/path"`) automatically converted to proxified paths (`/proxy/{resourceId}/path`)
-- Base tag injection enables proper relative URL resolution
-- Handles all URL token types: `href="/`, `src="/`, `action="/`, `url(/`
-- Skips already-proxified URLs and external absolute links
-
-#### User Experience
-- **iframe-based access** in frontend - resources display inline with authentication transparent
-- **"↗ Nouvel onglet" button** - Opens resource in new tab, preserving cookie-based auth
-- **No credential injection** - All auth handled via cookies, no tokens in URLs
-- **Seamless redirects** - Location headers properly rewritten and tokens preserved
-
-#### Setup Example
-1. Create a web resource pointing to target (e.g., `192.168.0.31` for OpenWRT LuCI)
-2. Ensure `protocol: "http"` or `"https"`
-3. Access via `http://localhost:8080/proxy/{resourceId}/path`
-4. Authentication handled automatically via cookies + header injection
-
-## One-command build and launch
-Use the root script to compile and launch the stack:
-
-- **Linux/Mac:** `./run-dev.sh` (new dev script that starts both backend+frontend)
-- **PowerShell:** `./build-all.ps1`
-
-The dev script will:
-1. Rebuild backend (make -j$(nproc))
-2. Start backend on port 8080
-3. Start frontend dev server on port 5173 (auto-reload)
-4. Display logs: `tail -f /tmp/backend.log` and `tail -f /tmp/frontend.log`
-
-## API
-### Health
-- GET /api/health
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/auth/login` | Authenticate (returns Bearer token) |
+| `POST` | `/api/auth/logout` | Invalidate token server-side |
+| `POST` | `/api/auth/change-password` | Change current user's password |
+| `POST` | `/api/auth/setup-2fa` | Generate TOTP secret + QR URI |
+| `POST` | `/api/auth/verify-2fa` | Verify and enable 2FA |
+| `POST` | `/api/auth/disable-2fa` | Disable 2FA |
+| `GET`  | `/api/auth/2fa-status` | Check 2FA status |
 
 ### Sessions
-- GET /api/sessions
-- Query params: `status`, `user`, `target`, `protocol`, `limit`, `offset`, `sort`
-- POST /api/sessions
-  - Body: `{ "target": "10.0.0.12", "user": "ops-admin", "protocol": "ssh", "port": 22 }`
-- GET /api/sessions/:id
-- POST /api/sessions/:id/terminate
-- GET /api/sessions/stream (SSE-style event feed, supports `Last-Event-ID` or `?since=`)
 
-### Web SSH console
-- Available on Linux builds with libssh2.
-- WebSocket: `/api/ws/ssh?token=...`
-- Client sends JSON control messages:
-  - `{"type":"start","sessionId":1,"password":"...","cols":120,"rows":32}`
-  - `{"type":"input","data":"ls -la\n"}`
-  - `{"type":"resize","cols":120,"rows":32}`
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`  | `/api/sessions` | List sessions (filterable) |
+| `POST` | `/api/sessions` | Create new session |
+| `GET`  | `/api/sessions/:id` | Get session details |
+| `POST` | `/api/sessions/:id/terminate` | Terminate session |
+| `GET`  | `/api/sessions/stream` | SSE event stream |
 
-### TCP Tunnel (NEW v0.0.111) — EndoriumFortAgent
-- WebSocket: `/ws/tunnel?token=...&resource_id=...`
-  - Binary WebSocket messages forwarded bidirectionally to target TCP
-  - Authentication via `token` query param (Bearer token)
-  - Resource authorization checked (admin or permission grant)
-  - Audit events: `tunnel.open`, `tunnel.close`
-  - One WebSocket per local TCP connection (multiplexed by agent)
+### Resources
 
-**Protocol flow:**
-1. Agent opens WebSocket: `ws://backend:8080/ws/tunnel?token=tok-1000&resource_id=3`
-2. Backend authenticates, connects TCP to target resource (e.g., 192.168.0.16:8080)
-3. All binary WebSocket messages are forwarded as raw TCP data
-4. Connection closes when either side disconnects
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`    | `/api/resources` | List resources (RBAC filtered) |
+| `POST`   | `/api/resources` | Create resource (admin) |
+| `PUT`    | `/api/resources/:id` | Update resource (admin) |
+| `DELETE` | `/api/resources/:id` | Delete resource (admin) |
+| `GET`    | `/api/resources/:id/credentials` | Get stored credentials (admin/auditor) |
 
-### Web Proxy (NEW v0.0.14)
-- GET|POST|PUT|DELETE|HEAD|PATCH|OPTIONS /proxy/{resourceId}/*
-  - Transparent HTTP reverse proxy for web resources
-  - All requests/responses tunnel through bastion
-  - Auth token required (Bearer)
-  - Requires user permission grant on resource
-  
-**Example:**
+### Users & Permissions
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`    | `/api/users` | List users (admin) |
+| `POST`   | `/api/users` | Create user (admin) |
+| `PUT`    | `/api/users/:id` | Update user (admin) |
+| `DELETE` | `/api/users/:id` | Delete user (admin) |
+| `POST`   | `/api/users/:userId/resources/:resourceId` | Grant access |
+| `DELETE` | `/api/users/:userId/resources/:resourceId` | Revoke access |
+
+### WebSocket Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `/api/ws/ssh` | Live SSH terminal |
+| `/api/ws/shadow` | Session shadowing (read-only) |
+| `/api/ws/rdp` | RDP session (requires FreeRDP) |
+| `/ws/tunnel` | Agent TCP tunnel |
+
+### Other
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`  | `/api/health` | Health check |
+| `GET`  | `/api/stats` | Dashboard KPI metrics |
+| `GET`  | `/api/audit` | Audit events |
+| `GET`  | `/api/recordings` | List session recordings |
+| `GET`  | `/api/recordings/:id/cast` | Download .cast file |
+| `ANY`  | `/proxy/:resourceId/*` | HTTP reverse proxy |
+
+---
+
+## 🏗️ Build System
+
+EndoriumFort uses a **smart versioning system** based on SHA-256 hashing of source files:
+
+- Each component (backend, frontend, agent) has its own `VERSION` file
+- Versions only increment when source code actually changes
+- A global `VERSION` at the root tracks the overall project version
+- On each build, if any component changed, a git commit + tag is automatically created
+
 ```bash
-curl -H "Authorization: Bearer tok-1000" \
-  http://localhost:8080/proxy/1/path/to/resource?param=value
+# Full build with auto-versioning
+./build-all.sh          # Linux / macOS
+./build-all.ps1         # Windows (PowerShell)
+
+# Development mode (backend + frontend with hot reload)
+./run-dev.sh
 ```
 
-### Resources (NEW)
-- GET /api/resources
-  - Filter by user permissions (admin sees all, others see only permitted)
-- POST /api/resources (admin only)
-  - Body: `{ "name": "...", "target": "...", "protocol": "ssh|http|https", "port": 22 }`
-- PUT /api/resources/:id (admin only)
-- DELETE /api/resources/:id (admin only)
-- GET /api/users/{userId}/resources
-  - Get permissions for a user
-- POST /api/users/{userId}/resources/{resourceId}
-  - Grant user access to resource
-- DELETE /api/users/{userId}/resources/{resourceId}
-  - Revoke user access from resource
+### Cross-Compilation
 
-### Web Proxy Viewer (NEW)
-- GET /webproxy
-  - React component that displays web resources in responsive iframe
-  - Accessed via dashboard "Connect" button on HTTP/HTTPS resources
-  - Transparent to user - they see the content as if direct
+The build scripts automatically cross-compile the agent:
 
-### Two-Factor Authentication (NEW v0.1.0)
-- POST /api/auth/setup-2fa — Generate TOTP secret + QR code URI
-- POST /api/auth/verify-2fa — Verify and enable 2FA `{ "code": "123456" }`
-- POST /api/auth/disable-2fa — Disable 2FA `{ "code": "123456" }`
-- GET /api/auth/2fa-status — Check if 2FA is enabled for current user
-- Login with 2FA: POST /api/auth/login `{ "username":"…", "password":"…", "totpCode":"123456" }`
-  - Returns `{"status":"2fa_required"}` if code missing and 2FA enabled
+| Host | Agent binaries produced |
+|------|------------------------|
+| Linux amd64 | `endoriumfort-agent` (linux) + `.exe` (windows) + macOS arm64 |
+| macOS arm64 | `endoriumfort-agent` (macOS) + `.exe` (windows) + linux amd64 |
 
-### Auth (NEW v0.2.0)
-- POST /api/auth/login — Returns token with `expiresAt` field (1h TTL)
-  - Body: `{ "user": "admin", "password": "Admin123" }`
-  - Returns: `{ "token": "eft_...", "user": "admin", "role": "admin", "expiresAt": "..." }`
-  - Passwords verified via SHA-256 hash (legacy plaintext auto-migrated)
-- POST /api/auth/logout — Invalidate token server-side
-- POST /api/auth/change-password — Change current user's password
-  - Body: `{ "currentPassword": "...", "newPassword": "..." }`
-  - Validates password policy (8+ chars, upper + lower + digit)
+---
 
-### Session Recordings (NEW v0.1.0)
-- GET /api/recordings — List all recordings (optional `?sessionId=` filter)
-- GET /api/recordings/:id — Get recording metadata (JSON)
-- GET /api/recordings/:id/cast — Download `.cast` file (Asciinema v2 format)
-  - Replay with: `asciinema play recording.cast`
+## 🛠️ Tech Stack
 
-### RDP WebSocket (NEW v0.1.0)
-- WebSocket: `/api/ws/rdp` — RDP session proxy (requires FreeRDP at compile time)
-  - Returns 501 if compiled without FreeRDP support
+| Layer | Technology |
+|-------|-----------|
+| **Backend** | C++17, [Crow](https://crowcpp.org/) 1.2, SQLite3, libssh2, Asio |
+| **Frontend** | React 18, Vite 7, [xterm.js](https://xtermjs.org/) v6 |
+| **Agent** | Go 1.24, [gorilla/websocket](https://github.com/gorilla/websocket) |
+| **Build** | CMake 3.16+, npm, Go toolchain |
+| **Database** | SQLite3 (file-based, zero config) |
+| **Protocols** | SSH, HTTP/HTTPS, RDP (FreeRDP), VNC (planned), TCP tunnel |
 
-### Audit
-- GET /api/audit — Audit events now include login/logout/failure tracking
-- POST /api/audit
+---
 
-### Auth (legacy)
-- POST /api/auth/login
-  - Body: `{ "user": "admin", "password": "admin" }`
-  - Returns: `{ "token": "tok-1000", "user": "admin", "role": "admin" }`
+## 🗺️ Roadmap
 
-### Users
-- GET /api/users (admin only)
-- POST /api/users (admin only)
-- PUT /api/users/:id (admin only)
-- DELETE /api/users/:id (admin only)
+- [x] SSH terminal with recording & replay
+- [x] HTTP/HTTPS transparent proxy
+- [x] Agent-based TCP tunneling
+- [x] 2FA / TOTP authentication
+- [x] Credential vault with auto-injection
+- [x] Session shadowing (live observation)
+- [x] Dashboard KPIs & statistics
+- [x] Smart per-component versioning
+- [ ] AES-256 encryption for vault passwords
+- [ ] Rate limiting & brute-force protection
+- [ ] CSP headers & security hardening
+- [ ] Anomaly detection & alerting
+- [ ] LDAP / Active Directory integration
+- [ ] VNC protocol support
+- [ ] Docker deployment
+- [ ] Cluster / HA mode
 
-### Web Proxy (NEW v0.0.14)
-- GET|POST|PUT|DELETE|HEAD|PATCH|OPTIONS /proxy/{resourceId}/*
-  - Transparent HTTP reverse proxy for web resources
-  - All requests/responses tunnel through bastion
-  - Auth token required (Bearer)
-  - Returns proxied response with original headers
-  - Requires user permission grant on resource
-  
-**Example:**
-```bash
-curl -H "Authorization: Bearer tok-1000" \
-  http://localhost:8080/proxy/1/path/to/resource?param=value
-```
+---
 
-### Resources (NEW)
-- GET /api/resources
-  - Filter by user permissions (admin sees all, others see only permitted)
-- POST /api/resources (admin only)
-  - Body: `{ "name": "...", "target": "...", "protocol": "ssh|http|https", "port": 22 }`
-- PUT /api/resources/:id (admin only)
-- DELETE /api/resources/:id (admin only)
-- GET /api/users/{userId}/resources
-  - Get permissions for a user
-- POST /api/users/{userId}/resources/{resourceId}
-  - Grant user access to resource
-- DELETE /api/users/{userId}/resources/{resourceId}
-  - Revoke user access from resource
+## 📄 License
 
-### Web Proxy Viewer (NEW)
-- GET /webproxy
-  - React component that displays web resources in iframe
-  - Accessed via dashboard "Connect" button on HTTP/HTTPS resources
-  - Transparent to user
-- `id` (integer)
-- `target` (string)
-- `user` (string)
-- `protocol` (string)
-- `status` (active or terminated)
-- `createdAt` (UTC ISO string)
-- `terminatedAt` (UTC ISO string, optional)
+This project is released under the **EndoriumFort Source-Available License v1.0**.
 
-## Development flow
-1. Start backend and frontend with: `./run-dev.sh`
-2. Open browser to http://localhost:5173
-3. Login with admin/admin
-4. Create resources (SSH or HTTP) from admin panel
-5. Assign permissions to users
-6. Test sessions from dashboard
+**You are free to:**
+- ✅ Use the software for personal, educational, or commercial purposes
+- ✅ Redistribute verbatim copies with attribution
 
-## Notes
-- Session storage is in-memory and resets on restart.
-- Audit log is appended to `audit-log.jsonl` in the backend working directory.
-- Audit payloads are stored as raw JSON objects.
-- Auth is token-based with operator, admin, and auditor roles.
-- **Web proxy requires active token and user permission on resource.**
-- Default database: `endoriumfort.db` (SQLite3)
-- Version auto-incremented on each build (currently v0.0.14)
+**You must:**
+- 📎 **Cite this repository** in any use: [github.com/NergYR/EndoriumFort](https://github.com/NergYR/EndoriumFort)
 
-## Features Documentation
-- See [PROXY_IMPLEMENTATION.md](PROXY_IMPLEMENTATION.md) for detailed proxy documentation
-- See [FEATURES.md](FEATURES.md) for complete feature list
-- See [CHANGELOG.md](CHANGELOG.md) for version history
+**You may not:**
+- ❌ Modify, alter, or create derivative works
+- ❌ Sublicense or relicense under different terms
+
+See [LICENSE](LICENSE) for full terms.
+
+---
+
+## 🤝 Contributing
+
+Contributions via pull requests are welcome! Since the license does not allow derivative works, contributions must be submitted back to the original repository.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+---
+
+## 👤 Author
+
+**NergYR** — [github.com/NergYR](https://github.com/NergYR)
+
+---
+
+<p align="center">
+  <strong>EndoriumFort</strong> — Secure your infrastructure, audit everything.
+</p>

@@ -1,0 +1,32 @@
+EndoriumFort Source-Available License v1.0
+
+Copyright (c) 2026 NergYR (https://github.com/NergYR/EndoriumFort)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to use
+the Software for personal, educational, or commercial purposes, subject to
+the following conditions:
+
+1. ATTRIBUTION — Any use of the Software, in whole or in part, must include
+   a clearly visible attribution to the original repository:
+   https://github.com/NergYR/EndoriumFort
+
+2. NO MODIFICATION — You may not modify, alter, adapt, translate, or create
+   derivative works based on the Software. You may not distribute modified
+   versions of the Software. Forking for the sole purpose of submitting
+   contributions (pull requests) back to the original repository is permitted.
+
+3. REDISTRIBUTION — You may redistribute verbatim copies of the Software,
+   provided that this license notice and the attribution requirement are
+   included in all copies or substantial portions of the Software.
+
+4. NO SUBLICENSING — You may not sublicense, sell, or relicense the Software
+   under different terms.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
