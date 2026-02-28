@@ -66,14 +66,9 @@ include CMakeFiles/increment_version.dir/compiler_depend.make
 # Include the progress variables for this target.
 include CMakeFiles/increment_version.dir/progress.make
 
-CMakeFiles/increment_version:
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/energetiq/EndoriumFort/backend/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Incrementing version..."
-	/usr/bin/cmake -DVERSION_FILE=/home/energetiq/EndoriumFort/backend/VERSION -DVERSION_HEADER_FILE=/home/energetiq/EndoriumFort/backend/src/version.h -P /home/energetiq/EndoriumFort/backend/scripts/increment_version.cmake
-
 CMakeFiles/increment_version.dir/codegen:
 .PHONY : CMakeFiles/increment_version.dir/codegen
 
-increment_version: CMakeFiles/increment_version
 increment_version: CMakeFiles/increment_version.dir/build.make
 .PHONY : increment_version
 

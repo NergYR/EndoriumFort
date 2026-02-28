@@ -1468,3 +1468,22 @@
 {"id":26,"type":"web.proxy_access","actor":"admin","role":"admin","createdAt":"2026-02-27T14:18:08Z","payload":{"resourceId":3,"resourceName":"phpmyadmin","path":"js/dist/indexes.js","method":"GET","status":200,"responseSize":27180}}
 {"id":27,"type":"web.proxy_access","actor":"admin","role":"admin","createdAt":"2026-02-27T14:18:08Z","payload":{"resourceId":3,"resourceName":"phpmyadmin","path":"js/vendor/jquery/jquery-ui.min.js","method":"GET","status":200,"responseSize":254963}}
 {"id":28,"type":"web.proxy_access","actor":"admin","role":"admin","createdAt":"2026-02-27T14:18:08Z","payload":{"resourceId":3,"resourceName":"phpmyadmin","path":"js/dist/common.js","method":"GET","status":200,"responseSize":4530}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-02-28T10:17:11Z","payload":{"userId":1,"username":"admin"}}
+{"id":2,"type":"resource.create","actor":"admin","role":"admin","createdAt":"2026-02-28T10:18:12Z","payload":{"resourceId":5,"name":"OpenWRT","target":"192.168.0.31","protocol":"agent","port":80,"createdAt":"2026-02-28T10:18:12Z","updatedAt":"2026-02-28T10:18:12Z"}}
+{"id":3,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-02-28T10:21:42Z","payload":{"userId":1,"username":"admin"}}
+{"id":4,"type":"resource.delete","actor":"admin","role":"admin","createdAt":"2026-02-28T10:33:10Z","payload":{"resourceId":5,"name":"OpenWRT","target":"192.168.0.31","protocol":"agent","port":80,"createdAt":"2026-02-28T10:18:12Z","updatedAt":"2026-02-28T10:18:12Z"}}
+{"id":5,"type":"resource.create","actor":"admin","role":"admin","createdAt":"2026-02-28T10:33:20Z","payload":{"resourceId":6,"name":"OpenWRT","target":"192.168.0.31","protocol":"agent","port":80,"createdAt":"2026-02-28T10:33:20Z","updatedAt":"2026-02-28T10:33:20Z"}}
+{"id":6,"type":"tunnel.open","actor":"admin","role":"admin","createdAt":"2026-02-28T10:35:34Z","payload":{"resourceId":6,"target":"192.168.0.31:80"}}
+{"id":7,"type":"tunnel.close","actor":"admin","role":"","createdAt":"2026-02-28T10:35:34Z","payload":{"resourceId":6,"reason":"uncleanly"}}
+{"id":8,"type":"tunnel.open","actor":"admin","role":"admin","createdAt":"2026-02-28T10:35:37Z","payload":{"resourceId":6,"target":"192.168.0.31:80"}}
+{"id":9,"type":"tunnel.open","actor":"admin","role":"admin","createdAt":"2026-02-28T10:35:37Z","payload":{"resourceId":6,"target":"192.168.0.31:80"}}
+{"id":10,"type":"tunnel.open","actor":"admin","role":"admin","createdAt":"2026-02-28T10:35:38Z","payload":{"resourceId":6,"target":"192.168.0.31:80"}}
+{"id":11,"type":"tunnel.open","actor":"admin","role":"admin","createdAt":"2026-02-28T10:35:38Z","payload":{"resourceId":6,"target":"192.168.0.31:80"}}
+{"id":12,"type":"tunnel.open","actor":"admin","role":"admin","createdAt":"2026-02-28T10:35:39Z","payload":{"resourceId":6,"target":"192.168.0.31:80"}}
+{"id":13,"type":"tunnel.open","actor":"admin","role":"admin","createdAt":"2026-02-28T10:35:47Z","payload":{"resourceId":6,"target":"192.168.0.31:80"}}
+{"id":14,"type":"tunnel.close","actor":"admin","role":"","createdAt":"2026-02-28T10:36:07Z","payload":{"resourceId":6,"reason":"êbad close code 30064"}}
+{"id":15,"type":"tunnel.close","actor":"admin","role":"","createdAt":"2026-02-28T10:36:07Z","payload":{"resourceId":6,"reason":"êbad close code 30064"}}
+{"id":16,"type":"tunnel.close","actor":"admin","role":"","createdAt":"2026-02-28T10:36:07Z","payload":{"resourceId":6,"reason":"êbad close code 30064"}}
+{"id":17,"type":"tunnel.close","actor":"admin","role":"","createdAt":"2026-02-28T10:36:07Z","payload":{"resourceId":6,"reason":"êbad close code 30064"}}
+{"id":18,"type":"tunnel.close","actor":"admin","role":"","createdAt":"2026-02-28T10:36:07Z","payload":{"resourceId":6,"reason":"êbad close code 30064"}}
+{"id":19,"type":"tunnel.close","actor":"admin","role":"","createdAt":"2026-02-28T10:36:38Z","payload":{"resourceId":6,"reason":"uncleanly"}}

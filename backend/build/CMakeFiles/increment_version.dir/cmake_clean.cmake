@@ -1,6 +1,3 @@
-file(REMOVE_RECURSE
-  "CMakeFiles/increment_version"
-)
 
 # Per-language clean rules from dependency scanning.
 foreach(lang )

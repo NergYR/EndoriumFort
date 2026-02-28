@@ -108,12 +108,12 @@ _deps/crow-build/clean: _deps/crow-build/CMakeFiles/uninstall.dir/clean
 CMakeFiles/increment_version.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/increment_version.dir/build.make CMakeFiles/increment_version.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/increment_version.dir/build.make CMakeFiles/increment_version.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/energetiq/EndoriumFort/backend/build/CMakeFiles --progress-num=10 "Built target increment_version"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/energetiq/EndoriumFort/backend/build/CMakeFiles --progress-num= "Built target increment_version"
 .PHONY : CMakeFiles/increment_version.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/increment_version.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/energetiq/EndoriumFort/backend/build/CMakeFiles 1
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/energetiq/EndoriumFort/backend/build/CMakeFiles 0
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/increment_version.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/energetiq/EndoriumFort/backend/build/CMakeFiles 0
 .PHONY : CMakeFiles/increment_version.dir/rule
@@ -125,7 +125,7 @@ increment_version: CMakeFiles/increment_version.dir/rule
 # codegen rule for target.
 CMakeFiles/increment_version.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/increment_version.dir/build.make CMakeFiles/increment_version.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/energetiq/EndoriumFort/backend/build/CMakeFiles --progress-num=10 "Finished codegen for target increment_version"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/energetiq/EndoriumFort/backend/build/CMakeFiles --progress-num= "Finished codegen for target increment_version"
 .PHONY : CMakeFiles/increment_version.dir/codegen
 
 # clean rule for target.
@@ -145,7 +145,7 @@ CMakeFiles/endoriumfort_backend.dir/all: CMakeFiles/increment_version.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/endoriumfort_backend.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/energetiq/EndoriumFort/backend/build/CMakeFiles 10
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/energetiq/EndoriumFort/backend/build/CMakeFiles 9
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/endoriumfort_backend.dir/all
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/energetiq/EndoriumFort/backend/build/CMakeFiles 0
 .PHONY : CMakeFiles/endoriumfort_backend.dir/rule

@@ -31,11 +31,18 @@ if (NOT LibSSH2_FOUND)
   endif()
 endif()
 
-# Increment version on every build
-add_custom_target(increment_version
-    COMMAND ${CMAKE_COMMAND} -DVERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/VERSION -DVERSION_HEADER_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/version.h -P ${CMAKE_CURRENT_SOURCE_DIR}/scripts/increment_version.cmake
-    COMMENT "Incrementing version..."
-)
+# Version is now managed by build-all.sh/ps1 (change-detection based).
+# Manual fallback: increment on every build if version.h is missing.
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/version.h")
+  add_custom_target(increment_version
+      COMMAND ${CMAKE_COMMAND} -DVERSION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/VERSION -DVERSION_HEADER_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/version.h -P ${CMAKE_CURRENT_SOURCE_DIR}/scripts/increment_version.cmake
+      COMMENT "Generating version.h (first build)..."
+  )
+else()
+  add_custom_target(increment_version
+      COMMENT "Version managed by build-all.sh — skipping auto-increment."
+  )
+endif()
 
 add_executable(endoriumfort_backend
   src/main.cc

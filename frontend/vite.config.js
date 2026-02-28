@@ -10,6 +10,10 @@ export default defineConfig({
         target: 'http://localhost:8080',
         ws: true
       },
+      '/ws': {
+        target: 'http://localhost:8080',
+        ws: true
+      },
       '/proxy': {
         target: 'http://localhost:8080'
       }

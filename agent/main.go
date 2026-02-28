@@ -23,7 +23,8 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.3.0"
+// version is set at build time via: go build -ldflags "-X main.version=x.y.z"
+var version = "0.3.0"
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -230,7 +231,7 @@ func apiLogin(serverURL, user, password string) (token, role string, err error) 
 }
 
 func apiListResources(serverURL, token string) ([]Resource, error) {
-	req, _ := http.NewRequest("GET", serverURL+"/api/web/resources", nil)
+	req, _ := http.NewRequest("GET", serverURL+"/api/resources", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := http.DefaultClient.Do(req)
