@@ -1,0 +1,47 @@
+# ─── EndoriumFort — .dockerignore ────────────────────────────────────────
+# Exclude unnecessary files from Docker build context
+
+# Git
+.git
+.github
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Build artifacts (we rebuild inside Docker)
+backend/build/
+backend/backend/
+frontend/node_modules/
+frontend/dist/
+
+# Agent (not part of Docker image)
+agent/
+release/
+
+# Dev/doc files
+*.md
+!README.md
+CHANGELOG.md
+SECURITY.md
+LICENSE
+
+# Scripts not needed in Docker
+build-all.sh
+build-all.ps1
+build-mingw.ps1
+deploy-prod.sh
+run-dev.sh
+status.sh
+diagnose-post-400.sh
+test-*.sh
+
+# Temporary files
+*.log
+*.db
+*.jsonl
+.build_changed
+**/.src_hash
+*.bak

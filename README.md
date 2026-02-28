@@ -264,6 +264,73 @@ Or simply **click a resource tile** with the 🚀 agent protocol — the fronten
 
 ---
 
+## 🐳 Docker Deployment
+
+### Quick Start with Docker
+
+```bash
+# Pull and run the latest image
+docker pull nergyr/endoriumfort:latest
+docker run -d -p 80:80 \
+  -v ef-data:/app/data \
+  -v ef-recordings:/app/recordings \
+  --name endoriumfort \
+  nergyr/endoriumfort:latest
+```
+
+Then open `http://localhost` in your browser.
+
+### Docker Compose
+
+```bash
+# Clone the repository
+git clone https://github.com/NergYR/EndoriumFort.git
+cd EndoriumFort
+
+# Start with docker compose
+docker compose up -d
+
+# Customize port and timezone
+EF_PORT=8443 TZ=America/New_York docker compose up -d
+```
+
+### Build from Source
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DOCKER_IMAGE` | `nergyr/endoriumfort` | Docker Hub image name |
+| `DOCKER_TAG` | `latest` | Image tag |
+| `EF_PORT` | `80` | Host port mapping |
+| `TZ` | `Europe/Paris` | Container timezone |
+
+### Persistent Volumes
+
+| Volume | Mount Point | Description |
+|--------|-------------|-------------|
+| `ef-data` | `/app/data` | SQLite database, configuration |
+| `ef-recordings` | `/app/recordings` | Session recordings (.cast) |
+
+### CI/CD — Docker Hub Publishing
+
+A GitHub Actions workflow automatically builds and pushes the Docker image on every tag push (`v*`):
+
+- **Docker Hub**: `nergyr/endoriumfort:<version>` + `:latest`
+- **GHCR**: `ghcr.io/nergyr/endoriumfort:<version>` + `:latest`
+- **GitHub Actions cache** for faster builds
+
+Required secrets in GitHub repository settings:
+- `DOCKERHUB_USERNAME` — Docker Hub username
+- `DOCKERHUB_TOKEN` — Docker Hub access token
+
+---
+
 ## 🏗️ Build System
 
 EndoriumFort uses a **smart versioning system** based on SHA-256 hashing of source files:
@@ -322,7 +389,7 @@ The build scripts automatically cross-compile the agent:
 - [ ] Anomaly detection & alerting
 - [ ] LDAP / Active Directory integration
 - [ ] VNC protocol support
-- [ ] Docker deployment
+- [x] Docker deployment
 - [ ] Cluster / HA mode
 
 ---

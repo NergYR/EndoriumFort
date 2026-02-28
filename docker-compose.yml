@@ -1,0 +1,36 @@
+# ─── EndoriumFort — Docker Compose ───────────────────────────────────────
+# Production-ready deployment with persistent volumes.
+#
+# Usage:
+#   docker compose up -d            # Start
+#   docker compose logs -f          # View logs
+#   docker compose down             # Stop
+#   docker compose pull && docker compose up -d  # Update to latest image
+
+services:
+  endoriumfort:
+    image: ${DOCKER_IMAGE:-nergyr/endoriumfort}:${DOCKER_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: endoriumfort
+    restart: unless-stopped
+    ports:
+      - "${EF_PORT:-80}:80"
+    volumes:
+      - ef-data:/app/data
+      - ef-recordings:/app/recordings
+    environment:
+      - TZ=${TZ:-Europe/Paris}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  ef-data:
+    driver: local
+  ef-recordings:
+    driver: local

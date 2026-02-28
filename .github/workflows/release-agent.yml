@@ -1,0 +1,108 @@
+name: Release Agent Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: agent/go.sum
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build agent binaries
+        working-directory: agent
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          LDFLAGS="-X main.version=${VERSION} -s -w"
+
+          echo "Building EndoriumFortAgent ${VERSION}..."
+
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" \
+            -o ../release/endoriumfort-agent-linux-amd64 .
+          echo "  ✓ Linux amd64"
+
+          # Linux arm64
+          GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" \
+            -o ../release/endoriumfort-agent-linux-arm64 .
+          echo "  ✓ Linux arm64"
+
+          # Windows amd64
+          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" \
+            -o ../release/endoriumfort-agent-windows-amd64.exe .
+          echo "  ✓ Windows amd64"
+
+          # macOS amd64 (Intel)
+          GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" \
+            -o ../release/endoriumfort-agent-darwin-amd64 .
+          echo "  ✓ macOS amd64"
+
+          # macOS arm64 (Apple Silicon)
+          GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" \
+            -o ../release/endoriumfort-agent-darwin-arm64 .
+          echo "  ✓ macOS arm64"
+
+      - name: Generate checksums
+        working-directory: release
+        run: sha256sum endoriumfort-agent-* > checksums-sha256.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "EndoriumFort ${{ steps.version.outputs.VERSION }}"
+          body: |
+            ## EndoriumFort Agent ${{ steps.version.outputs.VERSION }}
+
+            ### Downloads
+
+            | Platform | Architecture | File |
+            |----------|-------------|------|
+            | Linux | amd64 | `endoriumfort-agent-linux-amd64` |
+            | Linux | arm64 | `endoriumfort-agent-linux-arm64` |
+            | Windows | amd64 | `endoriumfort-agent-windows-amd64.exe` |
+            | macOS | Intel | `endoriumfort-agent-darwin-amd64` |
+            | macOS | Apple Silicon | `endoriumfort-agent-darwin-arm64` |
+
+            ### Usage
+            ```bash
+            # Linux / macOS — make executable
+            chmod +x endoriumfort-agent-*
+
+            # Login
+            ./endoriumfort-agent -server https://your-server:8080 login -user admin
+
+            # List resources
+            ./endoriumfort-agent -server https://your-server:8080 list
+
+            # Connect to a resource
+            ./endoriumfort-agent -server https://your-server:8080 connect -resource <id>
+            ```
+
+            ### Verify checksums
+            ```bash
+            sha256sum -c checksums-sha256.txt
+            ```
+          files: |
+            release/endoriumfort-agent-linux-amd64
+            release/endoriumfort-agent-linux-arm64
+            release/endoriumfort-agent-windows-amd64.exe
+            release/endoriumfort-agent-darwin-amd64
+            release/endoriumfort-agent-darwin-arm64
+            release/checksums-sha256.txt
+          generate_release_notes: true

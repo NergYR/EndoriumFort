@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.5.0 - 2025-07-17
+### Feature: Docker & Production Deployment
+- **Docker multi-stage build**: 3-stage Dockerfile (C++ backend build → React frontend build → production image with nginx)
+- **docker-compose.yml**: Single-service deployment with configurable env vars (`EF_PORT`, `TZ`, `DOCKER_IMAGE`, `DOCKER_TAG`), persistent volumes (`ef-data`, `ef-recordings`)
+- **Docker Hub CI/CD**: GitHub Actions workflow (`docker-publish.yml`) auto-builds and pushes on tag `v*` to Docker Hub (`nergyr/endoriumfort`) and GHCR, with GHA build cache
+- **Production deployment script**: `deploy-prod.sh` with systemd service, Nginx reverse proxy, TLS support (Let's Encrypt / self-signed), multi-distro (apt/dnf/yum)
+- **Agent release workflow**: GitHub Actions (`release-agent.yml`) cross-compiles Go agent for 5 targets on tag push, creates GitHub Release with checksums
+- **Build tag safety**: Tags are no longer force-overwritten; build scripts check existence before creating
+
+### New Files
+- `Dockerfile` — Multi-stage production build
+- `docker/entrypoint.sh` — Container entrypoint (backend + nginx, health check, graceful shutdown)
+- `docker/nginx.conf` — Nginx reverse proxy config (API, WebSocket, web proxy, SPA fallback)
+- `docker-compose.yml` — Docker Compose service definition
+- `.dockerignore` — Build context exclusions
+- `.github/workflows/docker-publish.yml` — Docker Hub & GHCR publishing workflow
+- `.github/workflows/release-agent.yml` — Agent release workflow
+- `deploy-prod.sh` — Production deployment script (Linux)
+
+### UI Changes
+- **Logo integration**: Full blue logo on login page, icon dark logo in headers and as favicon
+- **Brand identity**: `.brand-logo` with hover animation, dark mode inversion
+
 ## v0.4.0 - 2025-07-17
 ### Security: Comprehensive Security Hardening
 - **Security headers middleware**: X-Content-Type-Options, X-Frame-Options, CSP, Referrer-Policy, Cache-Control, Permissions-Policy applied on every response via Crow middleware
