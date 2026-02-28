@@ -6,6 +6,7 @@
 #include "http_proxy.h"
 #include "rdp.h"
 #include "routes.h"
+#include "security_middleware.h"
 #include "ssh.h"
 #include "tunnel.h"
 
@@ -16,7 +17,7 @@
 #endif
 
 int main() {
-  crow::SimpleApp app;
+  CrowApp app;
   AppContext ctx;
 
   // ── Initialise database and load data ──

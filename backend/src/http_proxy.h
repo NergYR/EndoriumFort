@@ -3,7 +3,7 @@
 // Contains the raw HTTP client (http_proxy_request) and the Crow handler
 // that implements /proxy/<id>/<path>.
 
-#include "crow.h"
+#include "security_middleware.h"
 #include "models.h"
 
 #include <string>
@@ -32,7 +32,7 @@ crow::response handle_proxy_request(
     const std::string &path);
 
 // Registers /proxy/<int> and /proxy/<int>/<path> routes.
-void register_proxy_routes(crow::SimpleApp &app, AppContext &ctx);
+void register_proxy_routes(CrowApp &app, AppContext &ctx);
 
 // Registers /api/web/resources/<int>/url and /api/web/resources routes.
-void register_web_resource_routes(crow::SimpleApp &app, AppContext &ctx);
+void register_web_resource_routes(CrowApp &app, AppContext &ctx);

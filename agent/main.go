@@ -194,6 +194,18 @@ func interactiveMode() {
 	startTunnel(serverURL, token, selected, localPort)
 }
 
+// ─── Security helpers ───────────────────────────────────────────────────
+
+func warnIfInsecure(serverURL string) {
+	if strings.HasPrefix(serverURL, "http://") {
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "⚠️  ATTENTION: Connexion non chiffrée (HTTP)")
+		fmt.Fprintln(os.Stderr, "   Les credentials et tokens transitent en clair.")
+		fmt.Fprintln(os.Stderr, "   Utilisez HTTPS en production.")
+		fmt.Fprintln(os.Stderr, "")
+	}
+}
+
 // ─── API helpers ────────────────────────────────────────────────────────
 
 func apiLogin(serverURL, user, password string) (token, role string, err error) {
@@ -321,34 +333,71 @@ func cmdLogin(args []string) {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
 	server := fs.String("server", "", "Backend URL (ex: http://bastion:8080)")
 	user := fs.String("user", "", "Nom d'utilisateur")
-	password := fs.String("password", "", "Mot de passe")
+	password := fs.String("password", "", "Mot de passe (prefer EF_PASSWORD env var)")
 	fs.Parse(args)
+
+	// Allow password from env var for security (avoids ps aux leak)
+	if *password == "" {
+		*password = os.Getenv("EF_PASSWORD")
+	}
 
 	if *server == "" || *user == "" || *password == "" {
 		fmt.Fprintln(os.Stderr, "Erreur: --server, --user et --password sont requis")
+		fmt.Fprintln(os.Stderr, "Astuce: vous pouvez passer le mot de passe via EF_PASSWORD")
 		fs.Usage()
 		os.Exit(1)
 	}
+
+	warnIfInsecure(*server)
 
 	token, role, err := apiLogin(strings.TrimRight(*server, "/"), *user, *password)
 	if err != nil {
 		log.Fatalf("Échec de connexion: %v", err)
 	}
 
+	// Mask token in output (show only first 12 chars)
+	maskedToken := token
+	if len(token) > 12 {
+		maskedToken = token[:12] + "..."
+	}
+
 	fmt.Println("✓ Connexion réussie")
 	fmt.Printf("  Utilisateur: %s\n", *user)
 	fmt.Printf("  Rôle:        %s\n", role)
-	fmt.Printf("  Token:       %s\n", token)
+	fmt.Printf("  Token:       %s\n", maskedToken)
+	fmt.Printf("  Token complet sauvegardé dans: ~/.endoriumfort_token\n")
+
+	// Save token to file with restricted permissions
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		tokenFile := home + "/.endoriumfort_token"
+		os.WriteFile(tokenFile, []byte(token), 0600)
+	}
 }
 
 func cmdList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	server := fs.String("server", "", "Backend URL")
-	token := fs.String("token", "", "Token d'authentification")
+	token := fs.String("token", "", "Token d'authentification (prefer EF_TOKEN env var)")
 	fs.Parse(args)
+
+	// Allow token from env var or saved file
+	if *token == "" {
+		*token = os.Getenv("EF_TOKEN")
+	}
+	if *token == "" {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			data, err := os.ReadFile(home + "/.endoriumfort_token")
+			if err == nil {
+				*token = strings.TrimSpace(string(data))
+			}
+		}
+	}
 
 	if *server == "" || *token == "" {
 		fmt.Fprintln(os.Stderr, "Erreur: --server et --token sont requis")
+		fmt.Fprintln(os.Stderr, "Astuce: EF_TOKEN env var ou ~/.endoriumfort_token")
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -369,13 +418,28 @@ func cmdList(args []string) {
 func cmdConnect(args []string) {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	server := fs.String("server", "", "Backend URL")
-	token := fs.String("token", "", "Token d'authentification")
+	token := fs.String("token", "", "Token d'authentification (prefer EF_TOKEN env var)")
 	resourceID := fs.Int("resource", 0, "ID de la ressource")
 	localPort := fs.Int("local-port", 0, "Port local d'écoute")
 	fs.Parse(args)
 
+	// Allow token from env var or saved file
+	if *token == "" {
+		*token = os.Getenv("EF_TOKEN")
+	}
+	if *token == "" {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			data, err := os.ReadFile(home + "/.endoriumfort_token")
+			if err == nil {
+				*token = strings.TrimSpace(string(data))
+			}
+		}
+	}
+
 	if *server == "" || *token == "" || *resourceID == 0 || *localPort == 0 {
 		fmt.Fprintln(os.Stderr, "Erreur: --server, --token, --resource et --local-port sont requis")
+		fmt.Fprintln(os.Stderr, "Astuce: EF_TOKEN env var ou ~/.endoriumfort_token")
 		fs.Usage()
 		os.Exit(1)
 	}

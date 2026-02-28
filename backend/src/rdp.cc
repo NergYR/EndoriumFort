@@ -32,7 +32,7 @@
 //   binary frame = [u16 x][u16 y][u16 w][u16 h][raw RGBA pixels]
 //   or JSON:  {"type":"status","message":"connected"}
 
-void register_rdp_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_rdp_routes(CrowApp &app, AppContext &ctx) {
   CROW_WEBSOCKET_ROUTE(app, "/api/ws/rdp")
       .onaccept([&ctx](const crow::request &request, void **) {
         std::string token;
@@ -58,7 +58,7 @@ void register_rdp_routes(crow::SimpleApp &app, AppContext &ctx) {
 //  Stub – FreeRDP not found
 // ═════════════════════════════════════════════════════════════════════
 
-void register_rdp_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_rdp_routes(CrowApp &app, AppContext &ctx) {
   (void)ctx;
   CROW_ROUTE(app, "/api/ws/rdp")([] {
     crow::json::wvalue payload;

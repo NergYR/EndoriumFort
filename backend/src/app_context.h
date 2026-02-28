@@ -7,12 +7,19 @@
 #include "database.h"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// ── Rate limiting state ──
+struct RateLimitEntry {
+  std::queue<std::chrono::steady_clock::time_point> attempts;
+};
 
 struct AppContext {
   // ── Session state ──
@@ -57,6 +64,12 @@ struct AppContext {
   std::vector<SessionEvent> session_events;
   std::atomic<int> next_event_id{1};
 
+  // ── Rate limiting ──
+  std::mutex rate_limit_mutex;
+  std::unordered_map<std::string, RateLimitEntry> rate_limit_map;
+  int rate_limit_max_attempts = 10;  // max attempts per window
+  std::chrono::seconds rate_limit_window{300};  // 5 minute window
+
   // ── Database ──
   SqliteDb sqlite;
 
@@ -91,8 +104,13 @@ struct AppContext {
   void append_audit(const AuditEvent &event);
   void append_session_event(const std::string &type, const Session &session);
   bool invalidate_token(const std::string &token);
+  void invalidate_user_tokens(int user_id);
   void cleanup_expired_tokens();
   std::string compute_expiry();
+
+  // ── Security ──
+  bool check_rate_limit(const std::string &key);
+  bool is_safe_target(const std::string &host);
 
   // ── DB init ──
   void init_database();

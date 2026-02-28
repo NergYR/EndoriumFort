@@ -14,9 +14,9 @@ export default function WebProxyViewer({ resourceId, token, resourceName, onNavi
     return () => clearTimeout(timer);
   }, [resourceId, token, onNavigate]);
 
-  const iframeUrl = `http://localhost:8080/proxy/${resourceId}?ef_token=${token}`;
-  // Pour le nouvel onglet, utiliser le backend directement (port 8080)
-  const backendProxyUrl = `http://localhost:8080/proxy/${resourceId}?ef_token=${token}`;
+  // Use relative proxy URL (cookie-based auth, no token in URL)
+  const iframeUrl = `/proxy/${resourceId}/`;
+  const backendProxyUrl = `/proxy/${resourceId}/`;
 
   const openInNewTab = () => {
     window.open(backendProxyUrl, '_blank', 'noopener,noreferrer');
@@ -58,7 +58,7 @@ export default function WebProxyViewer({ resourceId, token, resourceName, onNavi
           title={`Proxy pour ${resourceName}`}
           className="proxy-iframe"
           onLoad={() => setLoading(false)}
-          sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals allow-top-navigation"
+          sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals allow-top-navigation-by-user-activation"
         />
       </div>
     </div>

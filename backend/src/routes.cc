@@ -15,7 +15,7 @@
 //  Health
 // ══════════════════════════════════════════════════════════════════════
 
-void register_health_routes(crow::SimpleApp &app, AppContext &) {
+void register_health_routes(CrowApp &app, AppContext &) {
   CROW_ROUTE(app, "/api/health")([] {
     crow::json::wvalue payload;
     payload["status"] = "ok";
@@ -29,7 +29,7 @@ void register_health_routes(crow::SimpleApp &app, AppContext &) {
 //  Auth (login / logout / change-password)
 // ══════════════════════════════════════════════════════════════════════
 
-void register_auth_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_auth_routes(CrowApp &app, AppContext &ctx) {
   // POST /api/auth/login
   CROW_ROUTE(app, "/api/auth/login").methods(crow::HTTPMethod::Post)(
       [&ctx](const crow::request &request) {
@@ -39,6 +39,20 @@ void register_auth_routes(crow::SimpleApp &app, AppContext &ctx) {
         std::string password = body["password"].s();
         if (user.empty() || password.empty())
           return crow::response(400, "Missing user or password");
+
+        // Rate limiting (by username)
+        if (!ctx.check_rate_limit("login:" + user)) {
+          AuditEvent rl_evt;
+          rl_evt.id = ctx.next_audit_id.fetch_add(1);
+          rl_evt.type = "auth.login.rate_limited";
+          rl_evt.actor = user;
+          rl_evt.role = "";
+          rl_evt.createdAt = now_utc();
+          rl_evt.payloadJson = "{\"username\":\"" + json_escape(user) + "\"}";
+          rl_evt.payloadIsJson = true;
+          ctx.append_audit(rl_evt);
+          return crow::response(429, "Too many login attempts. Try again later.");
+        }
 
         // Optional TOTP code for 2FA
         std::string totp_code;
@@ -200,6 +214,10 @@ void register_auth_routes(crow::SimpleApp &app, AppContext &ctx) {
         if (!ctx.update_user_password_hash(auth->userId, hashed))
           return crow::response(500, "Failed to update password");
 
+        // Invalidate all existing tokens for this user (force re-login)
+        std::string current_token = auth->token;
+        ctx.invalidate_user_tokens(auth->userId);
+
         // Audit
         AuditEvent evt;
         evt.id = ctx.next_audit_id.fetch_add(1);
@@ -207,13 +225,13 @@ void register_auth_routes(crow::SimpleApp &app, AppContext &ctx) {
         evt.actor = auth->user;
         evt.role = auth->role;
         evt.createdAt = now_utc();
-        evt.payloadJson = "{\"userId\":" + std::to_string(auth->userId) + "}";
+        evt.payloadJson = "{\"userId\":" + std::to_string(auth->userId) + ",\"tokensInvalidated\":true}";
         evt.payloadIsJson = true;
         ctx.append_audit(evt);
 
         crow::json::wvalue payload;
         payload["status"] = "ok";
-        payload["message"] = "Password changed successfully";
+        payload["message"] = "Password changed. All sessions invalidated — please log in again.";
         return crow::response{payload};
       });
 }
@@ -222,7 +240,7 @@ void register_auth_routes(crow::SimpleApp &app, AppContext &ctx) {
 //  Users
 // ══════════════════════════════════════════════════════════════════════
 
-void register_user_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_user_routes(CrowApp &app, AppContext &ctx) {
   // GET /api/users
   CROW_ROUTE(app, "/api/users").methods(crow::HTTPMethod::Get)(
       [&ctx](const crow::request &request) {
@@ -461,7 +479,7 @@ void register_user_routes(crow::SimpleApp &app, AppContext &ctx) {
 //  Resources
 // ══════════════════════════════════════════════════════════════════════
 
-void register_resource_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_resource_routes(CrowApp &app, AppContext &ctx) {
   // GET /api/resources
   CROW_ROUTE(app, "/api/resources").methods(crow::HTTPMethod::Get)(
       [&ctx](const crow::request &request) {
@@ -529,6 +547,22 @@ void register_resource_routes(crow::SimpleApp &app, AppContext &ctx) {
           return crow::response(400, "Missing name, target, or protocol");
         if (port <= 0 || port > 65535)
           return crow::response(400, "Invalid port");
+
+        // Validate protocol whitelist
+        if (!is_allowed_role(protocol, {"ssh", "rdp", "vnc", "http", "https", "agent"}))
+          return crow::response(400, "Invalid protocol. Allowed: ssh, rdp, vnc, http, https, agent");
+
+        // Input length limits
+        if (name.size() > 255 || target.size() > 255 || description.size() > 1024)
+          return crow::response(400, "Field too long");
+
+        // SSRF protection: validate target is not a dangerous address
+        if (!ctx.is_safe_target(target))
+          return crow::response(400, "Target address is not allowed (loopback/metadata/reserved)");
+
+        // Validate imageUrl scheme if provided
+        if (!image_url.empty() && image_url.rfind("http", 0) != 0 && image_url.rfind("/", 0) != 0)
+          return crow::response(400, "Invalid imageUrl: must be HTTP(S) or relative path");
 
         Resource resource;
         resource.id = ctx.next_resource_id.fetch_add(1);
@@ -599,6 +633,18 @@ void register_resource_routes(crow::SimpleApp &app, AppContext &ctx) {
               return crow::response(400, "Missing name, target, or protocol");
             if (port <= 0 || port > 65535)
               return crow::response(400, "Invalid port");
+
+            // Validate protocol whitelist
+            if (!is_allowed_role(protocol, {"ssh", "rdp", "vnc", "http", "https", "agent"}))
+              return crow::response(400, "Invalid protocol");
+
+            // Input length limits
+            if (name.size() > 255 || target.size() > 255 || description.size() > 1024)
+              return crow::response(400, "Field too long");
+
+            // SSRF protection
+            if (!ctx.is_safe_target(target))
+              return crow::response(400, "Target address is not allowed");
 
             Resource resource;
             {
@@ -680,11 +726,13 @@ void register_resource_routes(crow::SimpleApp &app, AppContext &ctx) {
 //  Sessions
 // ══════════════════════════════════════════════════════════════════════
 
-void register_session_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_session_routes(CrowApp &app, AppContext &ctx) {
   // GET /api/sessions
   CROW_ROUTE(app, "/api/sessions")([&ctx](const crow::request &request) {
     auto auth = ctx.find_auth(request);
     if (!auth) return crow::response(401, "Unauthorized");
+    if (!is_allowed_role(auth->role, {"admin", "auditor", "operator"}))
+      return crow::response(403, "Forbidden");
 
     const char *status_param = request.url_params.get("status");
     const char *user_param = request.url_params.get("user");
@@ -796,6 +844,8 @@ void register_session_routes(crow::SimpleApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request, int session_id) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
+        if (!is_allowed_role(auth->role, {"admin", "auditor", "operator"}))
+          return crow::response(403, "Forbidden");
         std::lock_guard<std::mutex> lock(ctx.session_mutex);
         auto it = ctx.sessions.find(session_id);
         if (it == ctx.sessions.end())
@@ -836,6 +886,8 @@ void register_session_routes(crow::SimpleApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
+        if (!is_allowed_role(auth->role, {"admin", "auditor", "operator"}))
+          return crow::response(403, "Forbidden");
         const char *since_param = request.url_params.get("since");
         auto since = parse_int_param(since_param).value_or(0);
         auto header = request.get_header_value("Last-Event-ID");
@@ -877,7 +929,7 @@ void register_session_routes(crow::SimpleApp &app, AppContext &ctx) {
 //  Audit
 // ══════════════════════════════════════════════════════════════════════
 
-void register_audit_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_audit_routes(CrowApp &app, AppContext &ctx) {
   // POST /api/audit
   CROW_ROUTE(app, "/api/audit").methods(crow::HTTPMethod::Post)(
       [&ctx](const crow::request &request) {
@@ -941,7 +993,7 @@ void register_audit_routes(crow::SimpleApp &app, AppContext &ctx) {
 //  TOTP / 2FA
 // ══════════════════════════════════════════════════════════════════════
 
-void register_totp_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_totp_routes(CrowApp &app, AppContext &ctx) {
   // POST /api/auth/setup-2fa — Generate a TOTP secret for the current user
   CROW_ROUTE(app, "/api/auth/setup-2fa")
       .methods(crow::HTTPMethod::Post)(
@@ -1096,7 +1148,7 @@ void register_totp_routes(crow::SimpleApp &app, AppContext &ctx) {
 //  Session Recordings
 // ══════════════════════════════════════════════════════════════════════
 
-void register_recording_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_recording_routes(CrowApp &app, AppContext &ctx) {
   // GET /api/recordings — List all recordings
   CROW_ROUTE(app, "/api/recordings")(
       [&ctx](const crow::request &request) {
@@ -1205,12 +1257,14 @@ void register_recording_routes(crow::SimpleApp &app, AppContext &ctx) {
 //  Stats / Dashboard
 // ══════════════════════════════════════════════════════════════════════
 
-void register_stats_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_stats_routes(CrowApp &app, AppContext &ctx) {
   // GET /api/stats — Dashboard statistics
   CROW_ROUTE(app, "/api/stats")(
       [&ctx](const crow::request &request) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
+        if (!is_allowed_role(auth->role, {"admin", "auditor"}))
+          return crow::response(403, "Forbidden");
 
         int total_sessions = 0, active_sessions = 0, terminated_sessions = 0;
         {

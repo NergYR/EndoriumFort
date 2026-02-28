@@ -134,7 +134,7 @@ void ssh_disconnect(SshConnection &connection) {
 //  Route registration
 // ═══════════════════════════════════════════════════════════════════════
 
-void register_ssh_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_ssh_routes(CrowApp &app, AppContext &ctx) {
 #ifdef ENDORIUMFORT_SSH_ENABLED
 #ifndef _WIN32
 
@@ -181,10 +181,10 @@ void register_ssh_routes(crow::SimpleApp &app, AppContext &ctx) {
           }
         }
 
-        std::cerr << "[WS] onaccept: token=" << token << std::endl;
+        std::cerr << "[WS] onaccept: token=" << (token.size() > 8 ? token.substr(0, 8) + "..." : "(short)") << std::endl;
         auto auth = ctx.find_auth_by_token(token);
         if (!auth) {
-          std::cerr << "[WS] onaccept: auth not found for token" << std::endl;
+          std::cerr << "[WS] onaccept: auth not found" << std::endl;
           return false;
         }
         std::cerr << "[WS] onaccept: auth found, user=" << auth->user

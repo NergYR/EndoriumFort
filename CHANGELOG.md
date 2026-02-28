@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.4.0 - 2025-07-17
+### Security: Comprehensive Security Hardening
+- **Security headers middleware**: X-Content-Type-Options, X-Frame-Options, CSP, Referrer-Policy, Cache-Control, Permissions-Policy applied on every response via Crow middleware
+- **Rate limiting**: Sliding window (10 attempts / 5 min) on login endpoint with 429 response and audit event
+- **CSPRNG token generation**: `/dev/urandom` 256-bit tokens with `eft_` prefix (replaces mt19937_64)
+- **SSRF protection**: Blocks loopback, link-local, metadata IPs on resource creation/update
+- **RBAC enforcement**: Sessions (admin/auditor/operator), Stats (admin/auditor), Web resources filtered by permissions
+- **Input validation**: Protocol whitelist (ssh/rdp/vnc/http/https/agent), length limits (name 255, target 255, description 1024), imageUrl validation
+- **Token rotation**: All user tokens invalidated on password change
+- **JSON injection fix**: `json_escape()` applied to all audit log dynamic fields
+- **DNS resolution**: Thread-safe `getaddrinfo()` replaces `gethostbyname()` in proxy and tunnel
+- **Token leak prevention**: Tokens masked in logs (first 8 chars + `...`), removed from proxy URL responses
+- **Default admin hardening**: Password changed from "admin" to "Admin123" with security warning log
+- **Frontend security**: Relative proxy URLs (no token in URL), iframe sandbox `allow-top-navigation-by-user-activation`
+- **Agent security**: `EF_TOKEN`/`EF_PASSWORD` env vars, token file `~/.endoriumfort_token` (0600), TLS warning, masked token output
+
+### New Files
+- `SECURITY.md`: Full security policy with vulnerability table, RBAC matrix, deployment recommendations
+- `security_middleware.h`: Crow middleware struct + `CrowApp` type alias
+
+### Backend Changes
+- `main.cc`: Uses `CrowApp` (middleware-enabled) instead of `crow::SimpleApp`
+- `app_context.h`: `RateLimitEntry`, rate limit fields, `invalidate_user_tokens()`, `check_rate_limit()`, `is_safe_target()`
+- `app_context.cc`: CSPRNG `generate_token()`, rate limiter, SSRF checker, token invalidation
+- `routes.cc`: Rate limiting, RBAC checks, input validation, protocol whitelist, SSRF guards
+- `http_proxy.cc`: `getaddrinfo()`, JSON escaping, permission filtering, token removed from response
+- `tunnel.cc`: `getaddrinfo()`, token masking, JSON escaping
+- `ssh.cc`: Token masking in logs
+
+### Frontend Changes
+- `WebProxyViewer.jsx`: Relative URLs, hardened iframe sandbox
+
+### Agent Changes
+- `main.go`: `warnIfInsecure()`, `EF_TOKEN`/`EF_PASSWORD` env vars, token file storage, masked output
+
 ## v0.3.0 - 2026-02-28
 ### Feature: Credential Vault (Coffre-fort d'identifiants)
 - **New: SSH credential storage** on resources (`sshUsername`, `sshPassword`)

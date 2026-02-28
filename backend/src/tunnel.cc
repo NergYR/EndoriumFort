@@ -18,7 +18,7 @@
 #include <unistd.h>
 #endif
 
-void register_tunnel_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_tunnel_routes(CrowApp &app, AppContext &ctx) {
   CROW_WEBSOCKET_ROUTE(app, "/ws/tunnel")
       .onaccept([&ctx](const crow::request &req, void **userdata) -> bool {
         try {
@@ -32,8 +32,7 @@ void register_tunnel_routes(crow::SimpleApp &app, AppContext &ctx) {
             const char *ef_token_param = req.url_params.get("ef_token");
             if (ef_token_param) token_str = ef_token_param;
           }
-          CROW_LOG_INFO << "Tunnel: token="
-                        << (token_str.empty() ? "(empty)" : token_str);
+          CROW_LOG_INFO << "Tunnel: token=" << (token_str.size() > 8 ? token_str.substr(0, 8) + "..." : "(short)");
           if (token_str.empty()) {
             CROW_LOG_WARNING << "Tunnel: rejected - no token";
             return false;
@@ -41,8 +40,7 @@ void register_tunnel_routes(crow::SimpleApp &app, AppContext &ctx) {
 
           auto auth = ctx.find_auth_by_token(token_str);
           if (!auth) {
-            CROW_LOG_WARNING << "Tunnel: rejected - invalid token: "
-                             << token_str;
+            CROW_LOG_WARNING << "Tunnel: rejected - invalid token";
             return false;
           }
           CROW_LOG_INFO << "Tunnel: auth OK user=" << auth->user
@@ -127,7 +125,7 @@ void register_tunnel_routes(crow::SimpleApp &app, AppContext &ctx) {
           CROW_LOG_INFO << "Tunnel: connecting TCP to " << target_host << ":"
                         << target_port;
 
-          // Connect upstream
+          // Connect upstream — using thread-safe getaddrinfo
           int sock = ::socket(AF_INET, SOCK_STREAM, 0);
           if (sock < 0) {
             CROW_LOG_ERROR << "Tunnel: failed to create socket errno=" << errno;
@@ -143,23 +141,22 @@ void register_tunnel_routes(crow::SimpleApp &app, AppContext &ctx) {
           recv_tv.tv_usec = 0;
           setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_tv, sizeof(recv_tv));
 
-          struct hostent *server_entry = gethostbyname(target_host.c_str());
-          if (!server_entry) {
+          struct addrinfo hints{}, *result = nullptr;
+          hints.ai_family = AF_INET;
+          hints.ai_socktype = SOCK_STREAM;
+          std::string port_str = std::to_string(target_port);
+          int gai_err = getaddrinfo(target_host.c_str(), port_str.c_str(), &hints, &result);
+          if (gai_err != 0 || !result) {
             CROW_LOG_ERROR << "Tunnel: failed to resolve " << target_host;
             ::close(sock);
+            if (result) freeaddrinfo(result);
             return false;
           }
           CROW_LOG_INFO << "Tunnel: resolved " << target_host;
 
-          struct sockaddr_in server_addr;
-          memset(&server_addr, 0, sizeof(server_addr));
-          server_addr.sin_family = AF_INET;
-          server_addr.sin_port = htons(target_port);
-          memcpy(&server_addr.sin_addr.s_addr, server_entry->h_addr,
-                 server_entry->h_length);
-
-          if (::connect(sock, (struct sockaddr *)&server_addr,
-                        sizeof(server_addr)) < 0) {
+          int conn_err = ::connect(sock, result->ai_addr, result->ai_addrlen);
+          freeaddrinfo(result);
+          if (conn_err < 0) {
             CROW_LOG_ERROR << "Tunnel: failed to connect to " << target_host
                            << ":" << target_port << " errno=" << errno;
             ::close(sock);
@@ -187,7 +184,7 @@ void register_tunnel_routes(crow::SimpleApp &app, AppContext &ctx) {
           event.createdAt = now_utc();
           event.payloadJson =
               "{\"resourceId\":" + std::to_string(resource_id) +
-              ",\"target\":\"" + target_host + ":" +
+              ",\"target\":\"" + json_escape(target_host) + ":" +
               std::to_string(target_port) + "\"}";
           event.payloadIsJson = true;
           ctx.append_audit(event);
@@ -297,7 +294,7 @@ void register_tunnel_routes(crow::SimpleApp &app, AppContext &ctx) {
           event.createdAt = now_utc();
           event.payloadJson =
               "{\"resourceId\":" + std::to_string(state->resource_id) +
-              ",\"reason\":\"" + reason + "\"}";
+              ",\"reason\":\"" + json_escape(reason) + "\"}";
           event.payloadIsJson = true;
           ctx.append_audit(event);
         }

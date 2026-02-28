@@ -10,20 +10,92 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
+#else
+#include <arpa/inet.h>
 #endif
 
-// ── Token generation ────────────────────────────────────────────────────
+// ── Secure token generation (using /dev/urandom on Linux/macOS) ─────────
 
 std::string AppContext::generate_token() {
+#ifndef _WIN32
+  unsigned char bytes[32];
+  std::ifstream urandom("/dev/urandom", std::ios::binary);
+  if (urandom.good()) {
+    urandom.read(reinterpret_cast<char *>(bytes), sizeof(bytes));
+    if (urandom.gcount() == sizeof(bytes)) {
+      char buf[70];
+      int offset = snprintf(buf, sizeof(buf), "eft_");
+      for (size_t i = 0; i < sizeof(bytes); ++i)
+        offset += snprintf(buf + offset, sizeof(buf) - offset, "%02x", bytes[i]);
+      return std::string(buf);
+    }
+  }
+#endif
+  // Fallback (Windows or /dev/urandom failure)
   std::random_device rd;
-  std::mt19937_64 gen(rd());
-  std::uniform_int_distribution<uint64_t> dist;
-  uint64_t a = dist(gen);
-  uint64_t b = dist(gen);
-  char buf[40];
-  snprintf(buf, sizeof(buf), "eft_%016llx%016llx",
-           (unsigned long long)a, (unsigned long long)b);
+  unsigned char fbytes[32];
+  for (size_t i = 0; i < sizeof(fbytes); i += 4) {
+    uint32_t val = rd();
+    memcpy(fbytes + i, &val, std::min(sizeof(val), sizeof(fbytes) - i));
+  }
+  char buf[70];
+  int offset = snprintf(buf, sizeof(buf), "eft_");
+  for (size_t i = 0; i < sizeof(fbytes); ++i)
+    offset += snprintf(buf + offset, sizeof(buf) - offset, "%02x", fbytes[i]);
   return std::string(buf);
+}
+
+// ── Rate limiting ───────────────────────────────────────────────────────
+
+bool AppContext::check_rate_limit(const std::string &key) {
+  std::lock_guard<std::mutex> lock(rate_limit_mutex);
+  auto now = std::chrono::steady_clock::now();
+
+  // Cleanup old entries (older than window)
+  auto &entry = rate_limit_map[key];
+  while (!entry.attempts.empty() &&
+         (now - entry.attempts.front()) > rate_limit_window) {
+    entry.attempts.pop();
+  }
+
+  if (static_cast<int>(entry.attempts.size()) >= rate_limit_max_attempts) {
+    return false;  // Rate limited
+  }
+
+  entry.attempts.push(now);
+  return true;
+}
+
+// ── SSRF protection ─────────────────────────────────────────────────────
+
+bool AppContext::is_safe_target(const std::string &host) {
+  // Block obvious loopback
+  if (host == "localhost" || host == "127.0.0.1" || host == "::1" ||
+      host == "0.0.0.0") {
+    return false;
+  }
+
+  // Block metadata endpoints (cloud providers)
+  if (host == "169.254.169.254" || host == "metadata.google.internal" ||
+      host == "metadata.internal") {
+    return false;
+  }
+
+#ifndef _WIN32
+  // Check if it's an IP address in blocked ranges
+  struct in_addr addr;
+  if (inet_pton(AF_INET, host.c_str(), &addr) == 1) {
+    uint32_t ip = ntohl(addr.s_addr);
+    // 127.0.0.0/8 (loopback)
+    if ((ip >> 24) == 127) return false;
+    // 169.254.0.0/16 (link-local)
+    if ((ip >> 16) == 0xA9FE) return false;
+    // 0.0.0.0/8
+    if ((ip >> 24) == 0) return false;
+  }
+#endif
+
+  return true;
 }
 
 // ── Auth helpers ────────────────────────────────────────────────────────
@@ -79,6 +151,16 @@ std::optional<AuthSession> AppContext::find_auth_by_token(
 bool AppContext::invalidate_token(const std::string &token) {
   std::lock_guard<std::mutex> lock(auth_mutex);
   return auth_sessions.erase(token) > 0;
+}
+
+void AppContext::invalidate_user_tokens(int user_id) {
+  std::lock_guard<std::mutex> lock(auth_mutex);
+  for (auto it = auth_sessions.begin(); it != auth_sessions.end();) {
+    if (it->second.userId == user_id)
+      it = auth_sessions.erase(it);
+    else
+      ++it;
+  }
 }
 
 void AppContext::cleanup_expired_tokens() {
@@ -246,13 +328,15 @@ void AppContext::seed_default_admin() {
   UserAccount admin;
   admin.id = next_user_id.fetch_add(1);
   admin.username = "admin";
-  admin.password = crypto::hash_password("admin");
+  admin.password = crypto::hash_password("Admin123");
   admin.role = "admin";
   admin.createdAt = now_utc();
   admin.updatedAt = admin.createdAt;
   users[admin.id] = admin;
   if (!insert_user(admin))
     std::cerr << "Failed to persist default admin user" << '\n';
+  else
+    std::cerr << "[SECURITY] Default admin created — change password immediately!" << '\n';
 }
 
 // ── Session CRUD ────────────────────────────────────────────────────────

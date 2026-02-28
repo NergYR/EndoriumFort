@@ -2,7 +2,7 @@
 // ─── EndoriumFort — SSH proxy (libssh2) ─────────────────────────────────
 // TCP socket helpers, SSH connect/disconnect, and the /api/ws/ssh route.
 
-#include "crow.h"
+#include "security_middleware.h"
 #include "models.h"
 
 #include <string>
@@ -24,4 +24,4 @@ void ssh_disconnect(SshConnection &connection);
 #endif
 
 // Registers /api/ws/ssh WebSocket route (or 501 stub on unsupported platforms).
-void register_ssh_routes(crow::SimpleApp &app, AppContext &ctx);
+void register_ssh_routes(CrowApp &app, AppContext &ctx);

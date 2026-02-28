@@ -41,26 +41,21 @@ HttpProxyResponse http_proxy_request(
     return response;
   }
 
-  struct hostent *server_entry = gethostbyname(host.c_str());
-  if (!server_entry) {
+  struct addrinfo hints{}, *result = nullptr;
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  std::string port_str = std::to_string(port);
+  int gai_err = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result);
+  if (gai_err != 0 || !result) {
     error = "Failed to resolve hostname";
     close(sock);
+    if (result) freeaddrinfo(result);
     return response;
   }
 
-  struct sockaddr_in server_addr;
-  memset(&server_addr, 0, sizeof(server_addr));
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(port);
-  memcpy(&server_addr.sin_addr.s_addr, server_entry->h_addr,
-         server_entry->h_length);
-
-  struct timeval connect_tv;
-  connect_tv.tv_sec = 10;
-  connect_tv.tv_usec = 0;
-  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &connect_tv, sizeof(connect_tv));
-
-  if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+  int conn_err = connect(sock, result->ai_addr, result->ai_addrlen);
+  freeaddrinfo(result);
+  if (conn_err < 0) {
     error = "Failed to connect to server";
     close(sock);
     return response;
@@ -733,7 +728,7 @@ crow::response handle_proxy_request(
     event.role = auth->role;
     event.createdAt = now_utc();
     event.payloadJson = "{\"resourceId\":" + std::to_string(resource_id) +
-                        ",\"error\":\"" + error + "\"}";
+                        ",\"error\":\"" + json_escape(error) + "\"}";
     event.payloadIsJson = true;
     ctx.append_audit(event);
     return crow::response(502, error);
@@ -750,9 +745,9 @@ crow::response handle_proxy_request(
     std::ostringstream oss;
     oss << "{"
         << "\"resourceId\":" << resource_id
-        << ",\"resourceName\":\"" << target_resource.name << "\""
-        << ",\"path\":\"" << path << "\""
-        << ",\"method\":\"" << method_name
+        << ",\"resourceName\":\"" << json_escape(target_resource.name) << "\""
+        << ",\"path\":\"" << json_escape(path) << "\""
+        << ",\"method\":\"" << json_escape(method_name)
         << "\",\"status\":" << proxy_response.status_code
         << ",\"responseSize\":" << proxy_response.body.length()
         << "}";
@@ -1019,7 +1014,7 @@ crow::response handle_proxy_request(
 //  Route registration
 // ═══════════════════════════════════════════════════════════════════════
 
-void register_proxy_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_proxy_routes(CrowApp &app, AppContext &ctx) {
   CROW_ROUTE(app, "/proxy/<int>")
       .methods(crow::HTTPMethod::Get, crow::HTTPMethod::Post,
                crow::HTTPMethod::Put, crow::HTTPMethod::Delete,
@@ -1037,7 +1032,7 @@ void register_proxy_routes(crow::SimpleApp &app, AppContext &ctx) {
       });
 }
 
-void register_web_resource_routes(crow::SimpleApp &app, AppContext &ctx) {
+void register_web_resource_routes(CrowApp &app, AppContext &ctx) {
   CROW_ROUTE(app, "/api/web/resources/<int>/url")
       .methods(crow::HTTPMethod::Get)
       ([&ctx](const crow::request &request, int resource_id) {
@@ -1072,9 +1067,8 @@ void register_web_resource_routes(crow::SimpleApp &app, AppContext &ctx) {
         payload["status"] = "ok";
         payload["resourceId"] = resource_id;
         payload["resourceName"] = target_resource.name;
-        payload["proxyUrl"] =
-            "/proxy/" + std::to_string(resource_id) + "?ef_token=" + auth->token;
-        payload["token"] = auth->token;
+        payload["proxyUrl"] = "/proxy/" + std::to_string(resource_id) + "/";
+        // Token is NOT included in response — use cookie-based auth instead
         return crow::response{payload};
       });
 
@@ -1083,13 +1077,24 @@ void register_web_resource_routes(crow::SimpleApp &app, AppContext &ctx) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
 
+        // Filter by user permissions (same as /api/resources)
+        std::vector<int> allowed_resource_ids;
+        if (auth->role == "admin") {
+          std::lock_guard<std::mutex> lock(ctx.resource_mutex);
+          for (const auto &entry : ctx.resources)
+            allowed_resource_ids.push_back(entry.first);
+        } else {
+          allowed_resource_ids = ctx.get_resource_permissions(auth->userId);
+        }
+
         std::vector<Resource> web_resources;
         {
           std::lock_guard<std::mutex> lock(ctx.resource_mutex);
-          for (const auto &entry : ctx.resources) {
-            if (entry.second.protocol == "http" ||
-                entry.second.protocol == "https") {
-              web_resources.push_back(entry.second);
+          for (int rid : allowed_resource_ids) {
+            auto it = ctx.resources.find(rid);
+            if (it != ctx.resources.end() &&
+                (it->second.protocol == "http" || it->second.protocol == "https")) {
+              web_resources.push_back(it->second);
             }
           }
         }
