@@ -35,6 +35,10 @@ increment_patch() {
   echo "${major}.${minor}.${patch}"
 }
 
+# Track whether any component changed during this build
+CHANGE_FLAG="$ROOT_DIR/.build_changed"
+rm -f "$CHANGE_FLAG"
+
 # Check if sources changed; if so, increment version and return new version.
 # Usage: maybe_bump <VERSION_file> <hash_cache_file> <new_hash>
 maybe_bump() {
@@ -55,6 +59,7 @@ maybe_bump() {
     new_ver="$(increment_patch "$current_ver")"
     echo "$new_ver" > "$version_file"
     echo "$new_hash" > "$hash_file"
+    touch "$CHANGE_FLAG"
     echo "$new_ver"
   else
     echo "$current_ver"
@@ -153,9 +158,35 @@ else
   fi
 fi
 
+# ─── Global version & Git ────────────────────────────────────────────────
+GLOBAL_VER_FILE="$ROOT_DIR/VERSION"
+GLOBAL_VER=$(read_version "$GLOBAL_VER_FILE")
+
+if [[ -f "$CHANGE_FLAG" ]]; then
+  GLOBAL_VER=$(increment_patch "$GLOBAL_VER")
+  echo "$GLOBAL_VER" > "$GLOBAL_VER_FILE"
+  echo "  Global version bumped → v$GLOBAL_VER"
+
+  # Git commit & tag (only if inside a git repo)
+  if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    info "Git commit & tag"
+    cd "$ROOT_DIR"
+    git add -A
+    git commit -m "build: v${GLOBAL_VER} — backend v${BACKEND_VER}, frontend v${FRONTEND_VER}, agent v${AGENT_VER}" \
+      --allow-empty 2>/dev/null || true
+    git tag -f "v${GLOBAL_VER}" -m "Release v${GLOBAL_VER}" 2>/dev/null || true
+    echo "  Commit: build v${GLOBAL_VER}"
+    echo "  Tag:    v${GLOBAL_VER}"
+  fi
+  rm -f "$CHANGE_FLAG"
+else
+  echo "  No source changes — global version stays at v$GLOBAL_VER"
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────
 info "Build completed"
 echo
+echo "  Global:   v$GLOBAL_VER"
 echo "  Backend:  v$BACKEND_VER"
 echo "  Frontend: v$FRONTEND_VER"
 echo "  Agent:    v$AGENT_VER"

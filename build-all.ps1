@@ -38,6 +38,8 @@ function Increment-Patch {
   return "$($parts[0]).$($parts[1]).$($parts[2])"
 }
 
+$script:anyChanged = $false
+
 function Maybe-Bump {
   param([string]$VersionFile, [string]$HashFile, [string]$NewHash)
   $oldHash = ""
@@ -47,6 +49,7 @@ function Maybe-Bump {
     $newVer = Increment-Patch $currentVer
     Set-Content -Path $VersionFile -Value $newVer -NoNewline
     Set-Content -Path $HashFile -Value $NewHash -NoNewline
+    $script:anyChanged = $true
     return $newVer
   }
   return $currentVer
@@ -104,9 +107,34 @@ if ($goPath) {
 }
 Pop-Location
 
+# ─── Global version & Git ────────────────────────────────────────────────
+$globalVerFile = "$RootDir\VERSION"
+$globalVer = Read-Version $globalVerFile
+
+if ($script:anyChanged) {
+  $globalVer = Increment-Patch $globalVer
+  Set-Content -Path $globalVerFile -Value $globalVer -NoNewline
+  Write-Host "  Global version bumped -> v$globalVer"
+
+  # Git commit & tag
+  $gitDir = Get-Command git -ErrorAction SilentlyContinue
+  if ($gitDir) {
+    Push-Location $RootDir
+    git add -A
+    git commit -m "build: v${globalVer} — backend v${backendVer}, frontend v${frontendVer}, agent v${agentVer}" --allow-empty 2>$null
+    git tag -f "v${globalVer}" -m "Release v${globalVer}" 2>$null
+    Write-Host "  Commit: build v${globalVer}"
+    Write-Host "  Tag:    v${globalVer}"
+    Pop-Location
+  }
+} else {
+  Write-Host "  No source changes — global version stays at v$globalVer"
+}
+
 # ─── Summary ─────────────────────────────────────────────────────────────
 Write-Host "`n==> Build completed" -ForegroundColor Cyan
 Write-Host ""
+Write-Host "  Global:   v$globalVer"
 Write-Host "  Backend:  v$backendVer"
 Write-Host "  Frontend: v$frontendVer"
 Write-Host "  Agent:    v$agentVer"
