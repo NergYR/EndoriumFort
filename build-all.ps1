@@ -116,19 +116,35 @@ if ($script:anyChanged) {
   Set-Content -Path $globalVerFile -Value $globalVer -NoNewline
   Write-Host "  Global version bumped -> v$globalVer"
 
-  # Git commit & tag
+  # Git commit
   $gitDir = Get-Command git -ErrorAction SilentlyContinue
   if ($gitDir) {
     Push-Location $RootDir
     git add -A
     git commit -m "build: v${globalVer} — backend v${backendVer}, frontend v${frontendVer}, agent v${agentVer}" --allow-empty 2>$null
-    git tag -f "v${globalVer}" -m "Release v${globalVer}" 2>$null
     Write-Host "  Commit: build v${globalVer}"
-    Write-Host "  Tag:    v${globalVer}"
     Pop-Location
   }
 } else {
   Write-Host "  No source changes — global version stays at v$globalVer"
+}
+
+# ─── Ensure Git tag for current global version ──────────────────────────
+$gitCmd = Get-Command git -ErrorAction SilentlyContinue
+if ($gitCmd) {
+  Push-Location $RootDir
+  $tagName = "v${globalVer}"
+  $tagExists = git rev-parse $tagName 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host "  Tag $tagName already exists — skipping"
+  } else {
+    Write-Host "`n==> Creating Git tag $tagName" -ForegroundColor Cyan
+    git tag -a $tagName -m "Release ${tagName} — backend v${backendVer}, frontend v${frontendVer}, agent v${agentVer}"
+    Write-Host "  Tag created: $tagName"
+    Write-Host ""
+    Write-Host "  -> Push tag to trigger release:  git push origin $tagName"
+  }
+  Pop-Location
 }
 
 # ─── Summary ─────────────────────────────────────────────────────────────

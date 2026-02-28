@@ -167,20 +167,33 @@ if [[ -f "$CHANGE_FLAG" ]]; then
   echo "$GLOBAL_VER" > "$GLOBAL_VER_FILE"
   echo "  Global version bumped → v$GLOBAL_VER"
 
-  # Git commit & tag (only if inside a git repo)
+  # Git commit (only if inside a git repo)
   if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-    info "Git commit & tag"
+    info "Git commit"
     cd "$ROOT_DIR"
     git add -A
     git commit -m "build: v${GLOBAL_VER} — backend v${BACKEND_VER}, frontend v${FRONTEND_VER}, agent v${AGENT_VER}" \
       --allow-empty 2>/dev/null || true
-    git tag -f "v${GLOBAL_VER}" -m "Release v${GLOBAL_VER}" 2>/dev/null || true
     echo "  Commit: build v${GLOBAL_VER}"
-    echo "  Tag:    v${GLOBAL_VER}"
   fi
   rm -f "$CHANGE_FLAG"
 else
   echo "  No source changes — global version stays at v$GLOBAL_VER"
+fi
+
+# ─── Ensure Git tag for current global version ──────────────────────────
+if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  cd "$ROOT_DIR"
+  TAG_NAME="v${GLOBAL_VER}"
+  if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+    echo "  Tag $TAG_NAME already exists — skipping"
+  else
+    info "Creating Git tag $TAG_NAME"
+    git tag -a "$TAG_NAME" -m "Release ${TAG_NAME} — backend v${BACKEND_VER}, frontend v${FRONTEND_VER}, agent v${AGENT_VER}"
+    echo "  Tag created: $TAG_NAME"
+    echo
+    echo "  → Push tag to trigger release:  git push origin $TAG_NAME"
+  fi
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────
