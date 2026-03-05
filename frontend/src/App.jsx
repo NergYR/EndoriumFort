@@ -64,6 +64,7 @@ export default function App() {
   const [auditFilter, setAuditFilter] = useState(null);
   const [resources, setResources] = useState([]);
   const [loadingResources, setLoadingResources] = useState(false);
+  const [savingResource, setSavingResource] = useState(false);
   const [resourceError, setResourceError] = useState('');
   const [resourceForm, setResourceForm] = useState({
     name: '',
@@ -483,6 +484,18 @@ export default function App() {
     setTerminalStatus('idle');
   };
 
+  const buildWebSocketUrl = (path, params = {}) => {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = new URL(path, window.location.origin);
+    url.protocol = wsProtocol;
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        url.searchParams.set(key, String(value));
+      }
+    });
+    return url.toString();
+  };
+
   const connectTerminal = () => {
     if (!activeTerminalSession) {
       setTerminalError('Pick a session to connect.');
@@ -503,10 +516,7 @@ export default function App() {
       return;
     }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${protocol}://${window.location.host}/api/ws/ssh?token=${encodeURIComponent(
-      auth.token
-    )}`;
+    const wsUrl = buildWebSocketUrl('/api/ws/ssh', { token: auth.token });
     const socket = new WebSocket(wsUrl);
     socket.binaryType = 'arraybuffer';
     socketRef.current = socket;
@@ -553,7 +563,7 @@ export default function App() {
 
     socket.addEventListener('error', () => {
       setTerminalStatus('error');
-      setTerminalError('WebSocket error.');
+      setTerminalError('WebSocket error. Vérifie HTTPS/WSS, token et proxy Nginx.');
     });
   };
 
@@ -612,11 +622,23 @@ export default function App() {
 
   const onSubmitResource = async (event) => {
     event.preventDefault();
+    if (savingResource) {
+      return;
+    }
     setResourceError('');
+
+    const trimmedName = resourceForm.name.trim();
+    const trimmedTarget = resourceForm.target.trim();
+    const selectedProtocol = (resourceForm.protocol || '').trim();
+    if (!trimmedName || !trimmedTarget || !selectedProtocol) {
+      setResourceError('Name, target and protocol are required.');
+      return;
+    }
+
     const payload = {
-      name: resourceForm.name.trim(),
-      target: resourceForm.target.trim(),
-      protocol: resourceForm.protocol,
+      name: trimmedName,
+      target: trimmedTarget,
+      protocol: selectedProtocol,
       port: Number.parseInt(resourceForm.port, 10) || 22,
       description: resourceForm.description.trim(),
       imageUrl: resourceForm.imageUrl.trim(),
@@ -626,6 +648,7 @@ export default function App() {
       sshPassword: resourceForm.sshPassword
     };
     try {
+      setSavingResource(true);
       if (editingResourceId) {
         const updated = await updateResource(editingResourceId, payload);
         setResources((prev) =>
@@ -650,6 +673,8 @@ export default function App() {
       });
     } catch (error) {
       setResourceError(error.message || 'Unable to save resource');
+    } finally {
+      setSavingResource(false);
     }
   };
 
@@ -950,10 +975,10 @@ export default function App() {
       shadowTermInstanceRef.current = terminal;
       shadowFitRef.current = fitAddon;
 
-      const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const wsUrl = `${protocol}://${window.location.host}/api/ws/shadow?token=${encodeURIComponent(
-        auth.token
-      )}&sessionId=${session.id}`;
+      const wsUrl = buildWebSocketUrl('/api/ws/shadow', {
+        token: auth.token,
+        sessionId: session.id
+      });
       const socket = new WebSocket(wsUrl);
       socket.binaryType = 'arraybuffer';
       shadowSocketRef.current = socket;
@@ -1295,7 +1320,9 @@ export default function App() {
               )}
               <div className="resource-actions">
                 <button type="submit">
-                  {editingResourceId ? 'Update' : 'Create'} resource
+                  {savingResource
+                    ? (editingResourceId ? 'Updating...' : 'Creating...')
+                    : (editingResourceId ? 'Update' : 'Create') + ' resource'}
                 </button>
                 {editingResourceId && (
                   <button
