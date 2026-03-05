@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -83,13 +84,18 @@ Commandes:
 Exemples CLI:
   endoriumfort-agent login   --server http://bastion:8080 --user admin --password secret
   endoriumfort-agent list    --server http://bastion:8080 --token eft_xxxx
-  endoriumfort-agent connect --server http://bastion:8080 --token eft_xxxx --resource 3 --local-port 8888`)
+	endoriumfort-agent connect --server http://bastion:8080 --token eft_xxxx --resource 3 --local-port 8888
+
+Options TLS:
+	--insecure   Ignore la validation TLS (certificat auto-signé, lab uniquement)
+	EF_INSECURE_TLS=1  Active aussi le mode insecure en interactif`)
 }
 
 // ─── INTERACTIVE MODE ───────────────────────────────────────────────────
 
 func interactiveMode() {
 	reader := bufio.NewReader(os.Stdin)
+	insecureTLS := envBool("EF_INSECURE_TLS")
 
 	printBanner()
 
@@ -100,7 +106,7 @@ func interactiveMode() {
 	// Verify server is reachable
 	fmt.Printf("\n  Vérification du serveur... ")
 	healthURL := serverURL + "/api/health"
-	healthResp, err := http.Get(healthURL)
+	healthResp, err := httpClient(insecureTLS).Get(healthURL)
 	if err != nil {
 		fmt.Printf("✗\n")
 		log.Fatalf("  Impossible de contacter le serveur: %v", err)
@@ -114,9 +120,12 @@ func interactiveMode() {
 	// Step 2: Login
 	username := prompt(reader, "Nom d'utilisateur")
 	password := promptPassword(reader, "Mot de passe")
+	if insecureTLS {
+		warnTLSBypass()
+	}
 
 	fmt.Printf("\n  Authentification... ")
-	token, role, err := apiLogin(serverURL, username, password)
+	token, role, err := apiLogin(serverURL, username, password, insecureTLS)
 	if err != nil {
 		fmt.Printf("✗\n")
 		log.Fatalf("  Échec: %v", err)
@@ -126,7 +135,7 @@ func interactiveMode() {
 
 	// Step 3: List resources
 	fmt.Printf("  Chargement des ressources... ")
-	resources, err := apiListResources(serverURL, token)
+	resources, err := apiListResources(serverURL, token, insecureTLS)
 	if err != nil {
 		fmt.Printf("✗\n")
 		log.Fatalf("  Échec: %v", err)
@@ -191,7 +200,7 @@ func interactiveMode() {
 
 	// Step 6: Start tunnel
 	fmt.Println()
-	startTunnel(serverURL, token, selected, localPort)
+	startTunnel(serverURL, token, selected, localPort, insecureTLS)
 }
 
 // ─── Security helpers ───────────────────────────────────────────────────
@@ -206,15 +215,46 @@ func warnIfInsecure(serverURL string) {
 	}
 }
 
+func warnTLSBypass() {
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "⚠️  ATTENTION: Vérification TLS désactivée (--insecure)")
+	fmt.Fprintln(os.Stderr, "   Utiliser uniquement en environnement de test/lab.")
+	fmt.Fprintln(os.Stderr, "")
+}
+
+func envBool(name string) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func httpClient(insecureTLS bool) *http.Client {
+	if !insecureTLS {
+		return http.DefaultClient
+	}
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	return &http.Client{Transport: transport, Timeout: 30 * time.Second}
+}
+
+func wsDialer(insecureTLS bool) *websocket.Dialer {
+	return &websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		ReadBufferSize:   16384,
+		WriteBufferSize:  16384,
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureTLS},
+	}
+}
+
 // ─── API helpers ────────────────────────────────────────────────────────
 
-func apiLogin(serverURL, user, password string) (token, role string, err error) {
+func apiLogin(serverURL, user, password string, insecureTLS bool) (token, role string, err error) {
 	body, _ := json.Marshal(map[string]string{
 		"user":     user,
 		"password": password,
 	})
 
-	resp, err := http.Post(
+	resp, err := httpClient(insecureTLS).Post(
 		serverURL+"/api/auth/login",
 		"application/json",
 		bytes.NewReader(body),
@@ -242,11 +282,11 @@ func apiLogin(serverURL, user, password string) (token, role string, err error) 
 	return token, role, nil
 }
 
-func apiListResources(serverURL, token string) ([]Resource, error) {
+func apiListResources(serverURL, token string, insecureTLS bool) ([]Resource, error) {
 	req, _ := http.NewRequest("GET", serverURL+"/api/resources", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient(insecureTLS).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("connexion impossible: %v", err)
 	}
@@ -268,13 +308,14 @@ func apiListResources(serverURL, token string) ([]Resource, error) {
 
 // ─── Tunnel ─────────────────────────────────────────────────────────────
 
-func startTunnel(serverURL, token string, resource Resource, localPort int) {
+func startTunnel(serverURL, token string, resource Resource, localPort int, insecureTLS bool) {
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", localPort)
 	wsURL := buildWSURL(serverURL, token, resource.ID)
+	dialer := wsDialer(insecureTLS)
 
 	// Test connection
 	log.Printf("Vérification du tunnel vers %s...", resource.Name)
-	testConn, httpResp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	testConn, httpResp, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		if httpResp != nil {
 			body, _ := io.ReadAll(httpResp.Body)
@@ -323,7 +364,7 @@ func startTunnel(serverURL, token string, resource Resource, localPort int) {
 			continue
 		}
 		connID++
-		go handleTunnelConnection(tcpConn, wsURL, connID)
+		go handleTunnelConnection(tcpConn, wsURL, connID, insecureTLS)
 	}
 }
 
@@ -334,6 +375,7 @@ func cmdLogin(args []string) {
 	server := fs.String("server", "", "Backend URL (ex: http://bastion:8080)")
 	user := fs.String("user", "", "Nom d'utilisateur")
 	password := fs.String("password", "", "Mot de passe (prefer EF_PASSWORD env var)")
+	insecure := fs.Bool("insecure", false, "Ignorer la validation TLS (certificat auto-signé)")
 	fs.Parse(args)
 
 	// Allow password from env var for security (avoids ps aux leak)
@@ -349,8 +391,11 @@ func cmdLogin(args []string) {
 	}
 
 	warnIfInsecure(*server)
+	if *insecure {
+		warnTLSBypass()
+	}
 
-	token, role, err := apiLogin(strings.TrimRight(*server, "/"), *user, *password)
+	token, role, err := apiLogin(strings.TrimRight(*server, "/"), *user, *password, *insecure)
 	if err != nil {
 		log.Fatalf("Échec de connexion: %v", err)
 	}
@@ -379,6 +424,7 @@ func cmdList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	server := fs.String("server", "", "Backend URL")
 	token := fs.String("token", "", "Token d'authentification (prefer EF_TOKEN env var)")
+	insecure := fs.Bool("insecure", false, "Ignorer la validation TLS (certificat auto-signé)")
 	fs.Parse(args)
 
 	// Allow token from env var or saved file
@@ -402,7 +448,11 @@ func cmdList(args []string) {
 		os.Exit(1)
 	}
 
-	resources, err := apiListResources(strings.TrimRight(*server, "/"), *token)
+	if *insecure {
+		warnTLSBypass()
+	}
+
+	resources, err := apiListResources(strings.TrimRight(*server, "/"), *token, *insecure)
 	if err != nil {
 		log.Fatalf("Échec: %v", err)
 	}
@@ -421,6 +471,7 @@ func cmdConnect(args []string) {
 	token := fs.String("token", "", "Token d'authentification (prefer EF_TOKEN env var)")
 	resourceID := fs.Int("resource", 0, "ID de la ressource")
 	localPort := fs.Int("local-port", 0, "Port local d'écoute")
+	insecure := fs.Bool("insecure", false, "Ignorer la validation TLS (certificat auto-signé)")
 	fs.Parse(args)
 
 	// Allow token from env var or saved file
@@ -445,21 +496,20 @@ func cmdConnect(args []string) {
 	}
 
 	resource := Resource{ID: *resourceID, Name: fmt.Sprintf("resource-%d", *resourceID)}
-	startTunnel(strings.TrimRight(*server, "/"), *token, resource, *localPort)
+	if *insecure {
+		warnTLSBypass()
+	}
+	startTunnel(strings.TrimRight(*server, "/"), *token, resource, *localPort, *insecure)
 }
 
 // ─── Connection handler ─────────────────────────────────────────────────
 
-func handleTunnelConnection(tcpConn net.Conn, wsURL string, id int) {
+func handleTunnelConnection(tcpConn net.Conn, wsURL string, id int, insecureTLS bool) {
 	defer tcpConn.Close()
 
 	log.Printf("[conn-%d] Nouvelle connexion depuis %s", id, tcpConn.RemoteAddr())
 
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-		ReadBufferSize:   16384,
-		WriteBufferSize:  16384,
-	}
+	dialer := wsDialer(insecureTLS)
 
 	wsConn, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
