@@ -11,10 +11,65 @@ echo "╚═══════════════════════�
 # Ensure data directory is writable
 cd /app/data
 
+ACME_ENABLED="${ACME_ENABLED:-0}"
+ACME_DOMAIN="${ACME_DOMAIN:-}"
+ACME_EMAIL="${ACME_EMAIL:-}"
+
+refresh_tls_from_letsencrypt() {
+  domain="$1"
+  src_dir="/etc/letsencrypt/live/$domain"
+  if [ ! -f "$src_dir/fullchain.pem" ] || [ ! -f "$src_dir/privkey.pem" ]; then
+    return 1
+  fi
+  cp "$src_dir/fullchain.pem" /etc/nginx/tls/tls.crt
+  cp "$src_dir/privkey.pem" /etc/nginx/tls/tls.key
+  chmod 644 /etc/nginx/tls/tls.crt
+  chmod 600 /etc/nginx/tls/tls.key
+  return 0
+}
+
+configure_acme() {
+  if [ "$ACME_ENABLED" != "1" ]; then
+    return
+  fi
+
+  if [ -z "$ACME_DOMAIN" ] || [ -z "$ACME_EMAIL" ]; then
+    echo "[entrypoint] ACME_ENABLED=1 requires ACME_DOMAIN and ACME_EMAIL"
+    exit 1
+  fi
+
+  echo "[entrypoint] ACME enabled for domain: $ACME_DOMAIN"
+  mkdir -p /var/www/certbot /etc/letsencrypt
+
+  if certbot certonly --webroot -w /var/www/certbot \
+      -d "$ACME_DOMAIN" \
+      --email "$ACME_EMAIL" \
+      --agree-tos --non-interactive --keep-until-expiring; then
+    if refresh_tls_from_letsencrypt "$ACME_DOMAIN"; then
+      echo "[entrypoint] ACME certificate installed for $ACME_DOMAIN"
+      nginx -s reload >/dev/null 2>&1 || true
+    else
+      echo "[entrypoint] ACME cert obtained but copy failed for domain $ACME_DOMAIN"
+      exit 1
+    fi
+  else
+    echo "[entrypoint] ACME issuance failed, keeping current certificate"
+  fi
+
+  (
+    while true; do
+      sleep 12h
+      certbot renew --webroot -w /var/www/certbot --quiet \
+        --deploy-hook "/bin/sh -c 'cp /etc/letsencrypt/live/$ACME_DOMAIN/fullchain.pem /etc/nginx/tls/tls.crt && cp /etc/letsencrypt/live/$ACME_DOMAIN/privkey.pem /etc/nginx/tls/tls.key && chmod 644 /etc/nginx/tls/tls.crt && chmod 600 /etc/nginx/tls/tls.key && nginx -s reload'" || true
+    done
+  ) &
+  ACME_RENEW_PID=$!
+}
+
 # Handle shutdown gracefully
 shutdown() {
   echo "[entrypoint] Shutting down..."
-  kill "$BACKEND_PID" "$NGINX_PID" 2>/dev/null || true
+  kill "$BACKEND_PID" "$NGINX_PID" "$ACME_RENEW_PID" 2>/dev/null || true
   wait
   exit 0
 }
@@ -44,6 +99,8 @@ done
 echo "[entrypoint] Starting Nginx on :443 (TLS) and :80 (redirect)..."
 nginx -g "daemon off;" &
 NGINX_PID=$!
+
+configure_acme
 
 # Wait for either process to exit
 wait "$BACKEND_PID" "$NGINX_PID" 2>/dev/null || true

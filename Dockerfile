@@ -54,7 +54,7 @@ RUN npm run build
 FROM debian:bookworm-slim AS production
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  nginx libsqlite3-0 libssh2-1 ca-certificates curl openssl \
+  nginx libsqlite3-0 libssh2-1 ca-certificates curl openssl certbot \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --system --shell /usr/sbin/nologin --home-dir /app endoriumfort
 
@@ -86,6 +86,7 @@ RUN chmod 755 /app/entrypoint.sh
 
 # Create data directories
 RUN mkdir -p /app/data /app/recordings /app/logs \
+  /var/www/certbot \
   && chown -R endoriumfort:endoriumfort /app/data /app/recordings /app/logs
 
 # Volumes for persistent data

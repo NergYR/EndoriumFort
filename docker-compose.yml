@@ -16,13 +16,18 @@ services:
     container_name: endoriumfort
     restart: unless-stopped
     ports:
-      - "${EF_PORT:-8080}:443"
+      - "${EF_HTTP_PORT:-80}:80"
+      - "${EF_HTTPS_PORT:-443}:443"
     volumes:
       - ef-data:/app/data
       - ef-recordings:/app/recordings
-      - ${EF_CERTS_PATH:-./certs}:/etc/nginx/tls:ro
+      - ef-letsencrypt:/etc/letsencrypt
+      - ef-certbot-www:/var/www/certbot
     environment:
       - TZ=${TZ:-Europe/Paris}
+      - ACME_ENABLED=${ACME_ENABLED:-0}
+      - ACME_DOMAIN=${ACME_DOMAIN:-}
+      - ACME_EMAIL=${ACME_EMAIL:-}
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/api/health"]
       interval: 30s
@@ -34,4 +39,8 @@ volumes:
   ef-data:
     driver: local
   ef-recordings:
+    driver: local
+  ef-letsencrypt:
+    driver: local
+  ef-certbot-www:
     driver: local
