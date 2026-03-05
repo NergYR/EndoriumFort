@@ -16,12 +16,17 @@ services:
     container_name: endoriumfort
     restart: unless-stopped
     ports:
-      - "${EF_PORT:-80}:80"
+      - "${EF_PORT:-8080}:443"
     volumes:
       - ef-data:/app/data
       - ef-recordings:/app/recordings
+      - ${EF_CERTS_PATH:-./certs}:/app/certs:ro
     environment:
       - TZ=${TZ:-Europe/Paris}
+      - TLS_CERT_PATH=${TLS_CERT_PATH:-/app/certs/tls.crt}
+      - TLS_KEY_PATH=${TLS_KEY_PATH:-/app/certs/tls.key}
+      - TLS_SELF_SIGNED_DAYS=${TLS_SELF_SIGNED_DAYS:-365}
+      - TLS_SUBJECT=${TLS_SUBJECT:-/C=FR/ST=IDF/L=Paris/O=EndoriumFort/OU=Ops/CN=endorium.space}
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/api/health"]
       interval: 30s

@@ -11,6 +11,22 @@ echo "╚═══════════════════════�
 # Ensure data directory is writable
 cd /app/data
 
+TLS_CERT_PATH="${TLS_CERT_PATH:-/app/certs/tls.crt}"
+TLS_KEY_PATH="${TLS_KEY_PATH:-/app/certs/tls.key}"
+TLS_CERT_DIR="$(dirname "$TLS_CERT_PATH")"
+
+mkdir -p "$TLS_CERT_DIR"
+
+if [ ! -f "$TLS_CERT_PATH" ] || [ ! -f "$TLS_KEY_PATH" ]; then
+  echo "[entrypoint] No TLS certificate found, generating self-signed cert..."
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "$TLS_KEY_PATH" \
+    -out "$TLS_CERT_PATH" \
+    -days "${TLS_SELF_SIGNED_DAYS:-365}" \
+    -subj "${TLS_SUBJECT:-/C=FR/ST=IDF/L=Paris/O=EndoriumFort/OU=Ops/CN=localhost}" >/dev/null 2>&1
+  echo "[entrypoint] Self-signed TLS certificate generated at $TLS_CERT_PATH"
+fi
+
 # Handle shutdown gracefully
 shutdown() {
   echo "[entrypoint] Shutting down..."
@@ -41,7 +57,7 @@ while [ "$i" -lt 30 ]; do
 done
 
 # Start Nginx in background
-echo "[entrypoint] Starting Nginx on :80..."
+echo "[entrypoint] Starting Nginx on :443 (TLS) and :80 (redirect)..."
 nginx -g "daemon off;" &
 NGINX_PID=$!
 
