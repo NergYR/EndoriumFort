@@ -485,7 +485,9 @@ export default function App() {
   };
 
   const buildWebSocketUrl = (path, params = {}) => {
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.hostname || '';
+    const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    const wsProtocol = (window.location.protocol === 'https:' || !isLocalHost) ? 'wss:' : 'ws:';
     const url = new URL(path, window.location.origin);
     url.protocol = wsProtocol;
     Object.entries(params).forEach(([key, value]) => {
