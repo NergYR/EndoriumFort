@@ -9,6 +9,34 @@ let authToken = (() => {
   return '';
 })();
 
+let lastUnauthorizedAt = 0;
+
+function notifyUnauthorized() {
+  const now = Date.now();
+  if (now - lastUnauthorizedAt < 1500) {
+    return;
+  }
+  lastUnauthorizedAt = now;
+  authToken = '';
+  try {
+    localStorage.removeItem('endoriumfort_auth');
+  } catch (_) {}
+  try {
+    window.dispatchEvent(new CustomEvent('endoriumfort:unauthorized'));
+  } catch (_) {}
+}
+
+async function ensureResponseOk(response, fallbackMessage) {
+  if (response.status === 401) {
+    notifyUnauthorized();
+    throw new Error('Session expired. Please login again.');
+  }
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || fallbackMessage);
+  }
+}
+
 export function setAuthToken(token) {
   authToken = token || '';
 }
@@ -78,9 +106,7 @@ export async function fetchSessions() {
   const response = await fetch('/api/sessions', {
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    throw new Error('Failed to fetch sessions');
-  }
+  await ensureResponseOk(response, 'Failed to fetch sessions');
   return response.json();
 }
 
@@ -127,10 +153,7 @@ export async function fetchResources() {
   const response = await fetch('/api/resources', {
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to fetch resources');
-  }
+  await ensureResponseOk(response, 'Failed to fetch resources');
   return response.json();
 }
 
@@ -354,9 +377,7 @@ export async function fetchStats() {
   const response = await fetch('/api/stats', {
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    throw new Error('Failed to fetch stats');
-  }
+  await ensureResponseOk(response, 'Failed to fetch stats');
   return response.json();
 }
 

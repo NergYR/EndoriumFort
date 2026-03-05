@@ -168,6 +168,18 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
+  useEffect(() => {
+    const onUnauthorized = () => {
+      setAuth((prev) => ({ ...prev, token: '', password: '' }));
+      setAuthError('Session expirée. Veuillez vous reconnecter.');
+      setTokenExpiresAt('');
+      setAuthToken('');
+      navigate('/login');
+    };
+    window.addEventListener('endoriumfort:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('endoriumfort:unauthorized', onUnauthorized);
+  }, []);
+
   // Dark mode effect
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
