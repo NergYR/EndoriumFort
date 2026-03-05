@@ -11,26 +11,6 @@ echo "╚═══════════════════════�
 # Ensure data directory is writable
 cd /app/data
 
-TLS_CERT_PATH="${TLS_CERT_PATH:-/app/data/certs/tls.crt}"
-TLS_KEY_PATH="${TLS_KEY_PATH:-/app/data/certs/tls.key}"
-TLS_CERT_DIR="$(dirname "$TLS_CERT_PATH")"
-
-mkdir -p "$TLS_CERT_DIR"
-
-if [ ! -f "$TLS_CERT_PATH" ] || [ ! -f "$TLS_KEY_PATH" ]; then
-  echo "[entrypoint] No TLS certificate found, generating self-signed cert..."
-  if ! openssl req -x509 -nodes -newkey rsa:2048 \
-    -keyout "$TLS_KEY_PATH" \
-    -out "$TLS_CERT_PATH" \
-    -days "${TLS_SELF_SIGNED_DAYS:-365}" \
-    -subj "${TLS_SUBJECT:-/C=FR/ST=IDF/L=Paris/O=EndoriumFort/OU=Ops/CN=localhost}"; then
-    echo "[entrypoint] ERROR: Failed to generate TLS certificate at $TLS_CERT_PATH"
-    echo "[entrypoint] Check write permissions or mount valid cert/key via TLS_CERT_PATH and TLS_KEY_PATH"
-    exit 1
-  fi
-  echo "[entrypoint] Self-signed TLS certificate generated at $TLS_CERT_PATH"
-fi
-
 # Handle shutdown gracefully
 shutdown() {
   echo "[entrypoint] Shutting down..."

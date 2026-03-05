@@ -70,13 +70,23 @@ COPY --from=frontend-build /build/frontend/dist /app/frontend
 # Nginx config
 COPY docker/nginx.conf /etc/nginx/sites-available/default
 
+# Default TLS certificate (self-signed) generated at build time
+RUN mkdir -p /etc/nginx/tls \
+  && openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout /etc/nginx/tls/tls.key \
+    -out /etc/nginx/tls/tls.crt \
+    -days 3650 \
+    -subj "/C=FR/ST=IDF/L=Paris/O=EndoriumFort/OU=Docker/CN=localhost" \
+  && chmod 600 /etc/nginx/tls/tls.key \
+  && chmod 644 /etc/nginx/tls/tls.crt
+
 # Entrypoint
 COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod 755 /app/entrypoint.sh
 
 # Create data directories
-RUN mkdir -p /app/data /app/recordings /app/logs /app/certs \
-  && chown -R endoriumfort:endoriumfort /app/data /app/recordings /app/logs /app/certs
+RUN mkdir -p /app/data /app/recordings /app/logs \
+  && chown -R endoriumfort:endoriumfort /app/data /app/recordings /app/logs
 
 # Volumes for persistent data
 VOLUME ["/app/data", "/app/recordings"]
