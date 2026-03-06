@@ -68,10 +68,15 @@ bool AppContext::check_rate_limit(const std::string &key) {
 
 // ── SSRF protection ─────────────────────────────────────────────────────
 
-bool AppContext::is_safe_target(const std::string &host) {
-  // Block obvious loopback
-  if (host == "localhost" || host == "127.0.0.1" || host == "::1" ||
-      host == "0.0.0.0") {
+bool AppContext::is_safe_target(const std::string &host, bool allow_loopback) {
+  // Block obvious loopback unless explicitly allowed (e.g. SSH dev jump hosts).
+  if (!allow_loopback &&
+      (host == "localhost" || host == "127.0.0.1" || host == "::1")) {
+    return false;
+  }
+
+  // Always block unspecified address.
+  if (host == "0.0.0.0") {
     return false;
   }
 
@@ -87,7 +92,7 @@ bool AppContext::is_safe_target(const std::string &host) {
   if (inet_pton(AF_INET, host.c_str(), &addr) == 1) {
     uint32_t ip = ntohl(addr.s_addr);
     // 127.0.0.0/8 (loopback)
-    if ((ip >> 24) == 127) return false;
+    if (!allow_loopback && (ip >> 24) == 127) return false;
     // 169.254.0.0/16 (link-local)
     if ((ip >> 16) == 0xA9FE) return false;
     // 0.0.0.0/8

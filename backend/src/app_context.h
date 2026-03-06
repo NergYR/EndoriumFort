@@ -110,7 +110,7 @@ struct AppContext {
 
   // ── Security ──
   bool check_rate_limit(const std::string &key);
-  bool is_safe_target(const std::string &host);
+  bool is_safe_target(const std::string &host, bool allow_loopback = false);
 
   // ── DB init ──
   void init_database();

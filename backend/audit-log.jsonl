@@ -36,3 +36,9 @@
 {"id":8,"type":"web.proxy_access","actor":"admin","role":"admin","createdAt":"2026-02-15T23:26:40Z","payload":{"resourceId":1,"resourceName":"OpenWRT","path":"cgi-bin/luci/","method":"GET","status":403,"responseSize":2497}}
 {"id":1,"type":"web.proxy_access","actor":"admin","role":"admin","createdAt":"2026-02-16T11:10:30Z","payload":{"resourceId":1,"resourceName":"OpenWRT","path":"","method":"GET","status":200,"responseSize":664}}
 {"id":2,"type":"web.proxy_access","actor":"admin","role":"admin","createdAt":"2026-02-16T20:41:46Z","payload":{"resourceId":1,"resourceName":"OpenWRT","path":"","method":"GET","status":200,"responseSize":664}}
+{"id":1,"type":"auth.login.failure","actor":"admin","role":"","createdAt":"2026-03-06T14:13:51Z","payload":{"reason":"invalid_credentials","username":"admin"}}
+{"id":2,"type":"auth.login.failure","actor":"admin","role":"","createdAt":"2026-03-06T14:13:55Z","payload":{"reason":"invalid_credentials","username":"admin"}}
+{"id":3,"type":"auth.login.failure","actor":"admin","role":"","createdAt":"2026-03-06T14:13:56Z","payload":{"reason":"invalid_credentials","username":"admin"}}
+{"id":4,"type":"auth.login.failure","actor":"admin","role":"","createdAt":"2026-03-06T14:13:56Z","payload":{"reason":"invalid_credentials","username":"admin"}}
+{"id":5,"type":"auth.login.failure","actor":"admin","role":"","createdAt":"2026-03-06T14:13:56Z","payload":{"reason":"invalid_credentials","username":"admin"}}
+{"id":6,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-06T14:14:01Z","payload":{"userId":1,"username":"admin"}}

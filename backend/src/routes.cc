@@ -556,9 +556,9 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
         if (name.size() > 255 || target.size() > 255 || description.size() > 1024)
           return crow::response(400, "Field too long");
 
-        // SSRF protection: validate target is not a dangerous address
-        if (!ctx.is_safe_target(target))
-          return crow::response(400, "Target address is not allowed (loopback/metadata/reserved)");
+        // SSRF protection: allow loopback only for SSH resources.
+        if (!ctx.is_safe_target(target, protocol == "ssh"))
+          return crow::response(400, "Target address is not allowed for this protocol");
 
         // Validate imageUrl scheme if provided
         if (!image_url.empty() && image_url.rfind("http", 0) != 0 && image_url.rfind("/", 0) != 0)
@@ -642,9 +642,9 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
             if (name.size() > 255 || target.size() > 255 || description.size() > 1024)
               return crow::response(400, "Field too long");
 
-            // SSRF protection
-            if (!ctx.is_safe_target(target))
-              return crow::response(400, "Target address is not allowed");
+            // SSRF protection: allow loopback only for SSH resources.
+            if (!ctx.is_safe_target(target, protocol == "ssh"))
+              return crow::response(400, "Target address is not allowed for this protocol");
 
             Resource resource;
             {
