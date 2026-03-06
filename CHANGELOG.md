@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.5.14 - 2026-03-06
+### Security Hardening: Auth Transport and WebSocket Hygiene
+- **Auth cookie hardened at login/logout**:
+  - `HttpOnly` session cookie for `endoriumfort_token`
+  - `SameSite=Strict` by default
+  - `Secure` automatically applied when request is HTTPS (via forwarded proto/origin/referer detection)
+  - logout and password-change now explicitly clear the auth cookie
+- **WebSocket token leakage reduced**:
+  - frontend no longer sends auth token in WebSocket query strings for `/api/ws/ssh` and `/api/ws/shadow`
+  - backend WebSocket auth now uses centralized header/cookie token extraction
+- **Token extraction centralized**:
+  - shared helpers introduced for bearer/cookie parsing, HTTPS detection, and auth-cookie creation/clearing
+  - proxy/tunnel/RDP paths aligned to favor header/cookie auth over legacy query-token patterns
+
+### Files Updated
+- `backend/src/utils.h`: secure auth helpers (`extract_auth_token_from_request`, cookie parsing, cookie builders)
+- `backend/src/routes.cc`: secure cookie set/clear + no-store cache directive on auth routes
+- `backend/src/app_context.cc`: centralized auth token extraction usage
+- `backend/src/ssh.cc`, `backend/src/tunnel.cc`, `backend/src/rdp.cc`: WebSocket auth extraction hardening
+- `backend/src/http_proxy.cc`: auth-token extraction path tightened (header/cookie first)
+- `frontend/src/App.jsx`: removed WS token query parameters for SSH and shadow sockets
+
+## v0.5.13 - 2026-03-06
+### Feature: RBAC Clarity and Console Orientation
+- **RBAC clarity pass** with explicit role naming in UI:
+  - `Platform Admin` (governance), `Session Operator` (operations), `Security Auditor` (traceability)
+  - Added a dedicated **RBAC Blueprint** panel in the Admin Console with role descriptions and permission scope
+- **Backend role alias compatibility**:
+  - API now accepts and normalizes aliases such as `platform_admin`, `session_operator`, `security_auditor`
+  - Existing role checks remain backward compatible through centralized normalization helpers
+- **Console orientation improvement**:
+  - Added a **Tab Compass** strip under the navbar to explain the objective of each workspace
+  - Upgraded tab labels with action-oriented context (`Plan`, `Operate`, `Trace`, `Replay`, `Explore`)
+
+### Fixes
+- **Permission UX consistency**: session actions in the UI are now disabled when the current role cannot operate sessions
+- **Role-aware filtering consistency**: audit and recordings visibility now rely on capability checks instead of scattered string comparisons
+
+### Files Updated
+- `backend/src/utils.h`: role normalization helpers and role-aware permission checks
+- `backend/src/routes.cc`: role checks migrated to normalized helpers; user role persistence normalized
+- `backend/src/http_proxy.cc`, `backend/src/tunnel.cc`, `backend/src/ssh.cc`, `backend/src/rdp.cc`: normalized role checks for access gates
+- `frontend/src/App.jsx`: capability helpers, role labels, tab compass, RBAC blueprint panel, role-aware action gating
+- `frontend/src/styles.css`: styles for enhanced tabs, tab compass, and RBAC cards
+- `README.md`: documentation updates for role model and workspace orientation
+
 ## v0.5.12 - 2026-03-06
 ### Feature: Tabbed Console Navigation Redesign
 - **Major UI refactor**: main console moved from toggled cards to a **persistent tabbed navbar** model

@@ -106,20 +106,7 @@ bool AppContext::is_safe_target(const std::string &host, bool allow_loopback) {
 // ── Auth helpers ────────────────────────────────────────────────────────
 
 std::optional<AuthSession> AppContext::find_auth(const crow::request &request) {
-  auto token = extract_bearer_token(request);
-
-  if (!token) {
-    auto cookie = request.get_header_value("Cookie");
-    if (!cookie.empty()) {
-      size_t pos = cookie.find("endoriumfort_token=");
-      if (pos != std::string::npos) {
-        size_t start = pos + 19;
-        size_t end = cookie.find(';', start);
-        if (end == std::string::npos) end = cookie.length();
-        token = cookie.substr(start, end - start);
-      }
-    }
-  }
+  auto token = extract_auth_token_from_request(request);
 
   if (!token) return std::nullopt;
   std::lock_guard<std::mutex> lock(auth_mutex);

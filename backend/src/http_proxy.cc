@@ -475,48 +475,26 @@ crow::response handle_proxy_request(
   }
 
   // ── Extract auth token ──
-  auto auth_header = request.get_header_value("Authorization");
   std::string token;
-
-  if (auth_header.find("Bearer ") != std::string::npos) {
-    token = auth_header.substr(7);
-  } else {
+  auto request_token = extract_auth_token_from_request(request);
+  if (request_token && !request_token->empty()) {
+    token = *request_token;
+  }
+  if (token.empty()) {
     const char *ef_token_param = request.url_params.get("ef_token");
     if (ef_token_param && is_bastion_token(ef_token_param)) {
       token = ef_token_param;
     }
-    if (token.empty()) {
-      const char *token_param = request.url_params.get("token");
-      if (token_param && is_bastion_token(token_param)) {
-        token = token_param;
-      }
-    }
-    if (token.empty()) {
-      auto cookie = request.get_header_value("Cookie");
-      if (!cookie.empty()) {
-        size_t pos = cookie.find("endoriumfort_token=");
-        if (pos != std::string::npos) {
-          size_t start = pos + 19;
-          size_t end = cookie.find(';', start);
-          if (end == std::string::npos) end = cookie.length();
-          token = cookie.substr(start, end - start);
-        }
-      }
-    }
-    if (token.empty()) {
-      auto referer = request.get_header_value("Referer");
-      if (!referer.empty()) {
-        size_t qpos = referer.find('?');
-        if (qpos != std::string::npos && qpos + 1 < referer.size()) {
-          std::string query = referer.substr(qpos + 1);
-          auto referer_token = get_query_param_value(query, "ef_token");
-          if (!referer_token) {
-            auto legacy_token = get_query_param_value(query, "token");
-            if (legacy_token && is_bastion_token(*legacy_token)) {
-              referer_token = legacy_token;
-            }
-          }
-          if (referer_token) token = *referer_token;
+  }
+  if (token.empty()) {
+    auto referer = request.get_header_value("Referer");
+    if (!referer.empty()) {
+      size_t qpos = referer.find('?');
+      if (qpos != std::string::npos && qpos + 1 < referer.size()) {
+        std::string query = referer.substr(qpos + 1);
+        auto referer_token = get_query_param_value(query, "ef_token");
+        if (referer_token && is_bastion_token(*referer_token)) {
+          token = *referer_token;
         }
       }
     }
@@ -530,7 +508,7 @@ crow::response handle_proxy_request(
 
   // ── Check resource permissions ──
   std::vector<int> allowed_resource_ids;
-  if (auth->role == "admin") {
+  if (is_user_role(auth->role, "admin")) {
     std::lock_guard<std::mutex> lock(ctx.resource_mutex);
     for (const auto &entry : ctx.resources) {
       allowed_resource_ids.push_back(entry.first);
@@ -1040,7 +1018,7 @@ void register_web_resource_routes(CrowApp &app, AppContext &ctx) {
         if (!auth) return crow::response(401, "Unauthorized");
 
         std::vector<int> allowed_resource_ids;
-        if (auth->role == "admin") {
+        if (is_user_role(auth->role, "admin")) {
           std::lock_guard<std::mutex> lock(ctx.resource_mutex);
           for (const auto &entry : ctx.resources)
             allowed_resource_ids.push_back(entry.first);
@@ -1079,7 +1057,7 @@ void register_web_resource_routes(CrowApp &app, AppContext &ctx) {
 
         // Filter by user permissions (same as /api/resources)
         std::vector<int> allowed_resource_ids;
-        if (auth->role == "admin") {
+        if (is_user_role(auth->role, "admin")) {
           std::lock_guard<std::mutex> lock(ctx.resource_mutex);
           for (const auto &entry : ctx.resources)
             allowed_resource_ids.push_back(entry.first);

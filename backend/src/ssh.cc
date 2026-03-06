@@ -164,32 +164,23 @@ void register_ssh_routes(CrowApp &app, AppContext &ctx) {
   CROW_WEBSOCKET_ROUTE(app, "/api/ws/ssh")
       .onaccept([&ctx](const crow::request &request, void **userdata) {
         if (userdata) *userdata = nullptr;
-        std::string token;
-        const char *token_param = request.url_params.get("token");
-        token = token_param ? token_param : "";
-
-        if (token.empty()) {
-          auto cookie = request.get_header_value("Cookie");
-          if (!cookie.empty()) {
-            size_t pos = cookie.find("endoriumfort_token=");
-            if (pos != std::string::npos) {
-              size_t start = pos + 19;
-              size_t end = cookie.find(';', start);
-              if (end == std::string::npos) end = cookie.length();
-              token = cookie.substr(start, end - start);
-            }
-          }
+        auto token = extract_auth_token_from_request(request);
+        if (!token || token->empty()) {
+          std::cerr << "[WS] onaccept: missing auth token" << std::endl;
+          return false;
         }
 
-        std::cerr << "[WS] onaccept: token=" << (token.size() > 8 ? token.substr(0, 8) + "..." : "(short)") << std::endl;
-        auto auth = ctx.find_auth_by_token(token);
+        std::cerr << "[WS] onaccept: token="
+                  << (token->size() > 8 ? token->substr(0, 8) + "..." : "(short)")
+                  << std::endl;
+        auto auth = ctx.find_auth_by_token(*token);
         if (!auth) {
           std::cerr << "[WS] onaccept: auth not found" << std::endl;
           return false;
         }
         std::cerr << "[WS] onaccept: auth found, user=" << auth->user
                   << " role=" << auth->role << std::endl;
-        bool allowed = is_allowed_role(auth->role, {"operator", "admin"});
+        bool allowed = is_allowed_user_role(auth->role, {"operator", "admin"});
         std::cerr << "[WS] onaccept: allowed=" << allowed << std::endl;
         return allowed;
       })
@@ -408,15 +399,13 @@ void register_ssh_routes(CrowApp &app, AppContext &ctx) {
   CROW_WEBSOCKET_ROUTE(app, "/api/ws/shadow")
       .onaccept([&ctx](const crow::request &request, void **userdata) {
         if (userdata) *userdata = nullptr;
-        std::string token;
-        const char *tp = request.url_params.get("token");
-        token = tp ? tp : "";
-        if (token.empty()) return false;
+        auto token = extract_auth_token_from_request(request);
+        if (!token || token->empty()) return false;
 
-        auto auth = ctx.find_auth_by_token(token);
+        auto auth = ctx.find_auth_by_token(*token);
         if (!auth) return false;
         // Only admin and auditor can shadow
-        if (!is_allowed_role(auth->role, {"admin", "auditor"})) return false;
+        if (!is_allowed_user_role(auth->role, {"admin", "auditor"})) return false;
 
         const char *sid_param = request.url_params.get("sessionId");
         if (!sid_param) return false;

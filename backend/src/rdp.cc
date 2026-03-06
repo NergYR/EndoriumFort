@@ -35,13 +35,11 @@
 void register_rdp_routes(CrowApp &app, AppContext &ctx) {
   CROW_WEBSOCKET_ROUTE(app, "/api/ws/rdp")
       .onaccept([&ctx](const crow::request &request, void **) {
-        std::string token;
-        const char *p = request.url_params.get("token");
-        if (p) token = p;
-        if (token.empty()) return false;
-        auto auth = ctx.find_auth_by_token(token);
+        auto token = extract_auth_token_from_request(request);
+        if (!token || token->empty()) return false;
+        auto auth = ctx.find_auth_by_token(*token);
         if (!auth) return false;
-        return is_allowed_role(auth->role, {"operator", "admin"});
+        return is_allowed_user_role(auth->role, {"operator", "admin"});
       })
       .onopen([](crow::websocket::connection &conn) {
         conn.send_text(

@@ -26,7 +26,7 @@
 | 👁️ **Session Shadowing** | Real-time read-only observation of active sessions |
 | 🎬 **Session Recording** | Asciinema v2 format with animated in-browser replay |
 | 🔑 **2FA / TOTP** | RFC 6238 two-factor authentication with QR setup |
-| 🛡️ **RBAC** | Role-based access control (admin, operator, auditor) |
+| 🛡️ **RBAC Blueprint** | Clear role model: Platform Admin, Session Operator, Security Auditor (legacy aliases supported) |
 | 📊 **Live Dashboard** | Real-time KPI stats, session monitoring, security alerts |
 | 🧭 **Tabbed Console Navbar** | Persistent workspaces: Overview, Sessions, Audit, Recordings, Innovation Lab |
 | 🚨 **Security Center** | Live anomaly hints (login failures, stale sessions, admin-change activity, MFA posture) |
@@ -160,6 +160,7 @@ Opens:
   - **Audit** — Dedicated event investigation workspace
   - **Recordings** — Dedicated replay workspace (admin/auditor)
   - **Innovation Lab** — Smart launcher + exposure analytics + favorites
+  - **Tab Compass** (under the navbar) explains the goal of the selected workspace
 3. **Dashboard/Overview** — View live KPI stats, active sessions, and security alerts
   - Use **Security Center** for anomaly triage and posture checks
   - Use **Quick Refresh** to force sync all operational data instantly
@@ -168,7 +169,7 @@ Opens:
   - Use **Recent Sessions** for fast intervention on the latest access events
 6. **Recordings** — Replay past SSH sessions with the animated Asciinema player
 7. **Audit** — Search and filter all security events
-8. **Admin** — Manage users, resources, permissions, and credentials
+8. **Admin** — Manage users, resources, permissions, credentials, and review the RBAC blueprint panel
 
 ### Agent Tunnel
 
@@ -202,11 +203,17 @@ Or simply **click a resource tile** with the 🚀 agent protocol — the fronten
 |---------|---------|
 | **Password Hashing** | SHA-256 with random 128-bit salt, 10,000 iterations |
 | **Token Expiration** | Bearer tokens expire after 1 hour, server-side invalidation |
+| **Auth Cookie Security** | `HttpOnly` + `SameSite=Strict`; `Secure` automatically enabled on HTTPS deployments |
 | **2FA / TOTP** | RFC 6238, QR code setup, compatible with Google Authenticator |
-| **RBAC** | 3 roles — admin (full), operator (sessions), auditor (read-only + shadow) |
+| **RBAC** | Blueprint roles: Platform Admin (governance), Session Operator (operations), Security Auditor (traceability) |
 | **Credential Vault** | SSH passwords stored in DB, never exposed in standard API |
 | **Session Recording** | All SSH I/O recorded in Asciinema v2 format |
 | **Audit Trail** | Every action logged to JSONL — login, logout, connect, shadow, proxy |
+
+### WebSocket Auth Hardening
+
+- SSH and shadow WebSocket connections now authenticate via secure cookie/header extraction on the backend.
+- Frontend no longer appends auth token to WebSocket URLs, reducing token exposure in logs and browser history.
 | **Cookie Auth** | HttpOnly cookies for web proxy, no tokens in URLs |
 
 ---

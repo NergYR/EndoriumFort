@@ -151,7 +151,13 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
         payload["issuedAt"] = auth.issuedAt;
         payload["expiresAt"] = auth.expiresAt;
         payload["totpEnabled"] = matched->totpEnabled;
-        return crow::response{payload};
+        crow::response response{payload};
+        response.add_header(
+            "Set-Cookie",
+            build_auth_cookie(auth.token, request_uses_https(request),
+                              ctx.token_ttl_seconds));
+        response.add_header("Cache-Control", "no-store");
+        return response;
       });
 
   // POST /api/auth/logout
@@ -176,7 +182,11 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
         crow::json::wvalue payload;
         payload["status"] = "ok";
         payload["message"] = "Logged out";
-        return crow::response{payload};
+        crow::response response{payload};
+        response.add_header("Set-Cookie",
+                            build_cleared_auth_cookie(request_uses_https(request)));
+        response.add_header("Cache-Control", "no-store");
+        return response;
       });
 
   // POST /api/auth/change-password
@@ -232,7 +242,11 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
         crow::json::wvalue payload;
         payload["status"] = "ok";
         payload["message"] = "Password changed. All sessions invalidated — please log in again.";
-        return crow::response{payload};
+        crow::response response{payload};
+        response.add_header("Set-Cookie",
+                            build_cleared_auth_cookie(request_uses_https(request)));
+        response.add_header("Cache-Control", "no-store");
+        return response;
       });
 }
 
@@ -246,7 +260,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"admin"}))
+        if (!is_allowed_user_role(auth->role, {"admin"}))
           return crow::response(403, "Forbidden");
 
         std::vector<UserAccount> snapshot;
@@ -273,7 +287,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"admin"}))
+        if (!is_allowed_user_role(auth->role, {"admin"}))
           return crow::response(403, "Forbidden");
         auto body = crow::json::load(request.body);
         if (!body) return crow::response(400, "Invalid JSON body");
@@ -283,7 +297,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
         std::string role = body["role"].s();
         if (username.empty() || password.empty() || role.empty())
           return crow::response(400, "Missing username, password, or role");
-        if (!is_allowed_role(role, {"operator", "admin", "auditor"}))
+        if (!is_allowed_user_role(role, {"operator", "admin", "auditor"}))
           return crow::response(400, "Invalid role");
 
         // Validate password policy
@@ -303,7 +317,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
         user.id = ctx.next_user_id.fetch_add(1);
         user.username = username;
         user.password = crypto::hash_password(password);
-        user.role = role;
+        user.role = normalize_user_role(role);
         user.createdAt = now_utc();
         user.updatedAt = user.createdAt;
 
@@ -334,7 +348,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
           [&ctx](const crow::request &request, int user_id) {
             auto auth = ctx.find_auth(request);
             if (!auth) return crow::response(401, "Unauthorized");
-            if (!is_allowed_role(auth->role, {"admin"}))
+            if (!is_allowed_user_role(auth->role, {"admin"}))
               return crow::response(403, "Forbidden");
             auto body = crow::json::load(request.body);
             if (!body) return crow::response(400, "Invalid JSON body");
@@ -343,7 +357,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
             std::string role = body["role"].s();
             if (password.empty() || role.empty())
               return crow::response(400, "Missing password or role");
-            if (!is_allowed_role(role, {"operator", "admin", "auditor"}))
+            if (!is_allowed_user_role(role, {"operator", "admin", "auditor"}))
               return crow::response(400, "Invalid role");
 
             // Validate password policy
@@ -359,7 +373,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
                 return crow::response(404, "User not found");
               user = it->second;
               user.password = crypto::hash_password(password);
-              user.role = role;
+              user.role = normalize_user_role(role);
               user.updatedAt = now_utc();
               it->second = user;
             }
@@ -386,7 +400,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
           [&ctx](const crow::request &request, int user_id) {
             auto auth = ctx.find_auth(request);
             if (!auth) return crow::response(401, "Unauthorized");
-            if (!is_allowed_role(auth->role, {"admin"}))
+            if (!is_allowed_user_role(auth->role, {"admin"}))
               return crow::response(403, "Forbidden");
 
             UserAccount user;
@@ -423,7 +437,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
           [&ctx](const crow::request &request, int user_id) {
             auto auth = ctx.find_auth(request);
             if (!auth) return crow::response(401, "Unauthorized");
-            if (!is_allowed_role(auth->role, {"admin"}))
+            if (!is_allowed_user_role(auth->role, {"admin"}))
               return crow::response(403, "Forbidden");
 
             auto allowed_ids = ctx.get_resource_permissions(user_id);
@@ -442,7 +456,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
           [&ctx](const crow::request &request, int user_id, int resource_id) {
             auto auth = ctx.find_auth(request);
             if (!auth) return crow::response(401, "Unauthorized");
-            if (!is_allowed_role(auth->role, {"admin"}))
+            if (!is_allowed_user_role(auth->role, {"admin"}))
               return crow::response(403, "Forbidden");
             if (!ctx.grant_resource_permission(user_id, resource_id))
               return crow::response(500, "Failed to grant permission");
@@ -461,7 +475,7 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
           [&ctx](const crow::request &request, int user_id, int resource_id) {
             auto auth = ctx.find_auth(request);
             if (!auth) return crow::response(401, "Unauthorized");
-            if (!is_allowed_role(auth->role, {"admin"}))
+            if (!is_allowed_user_role(auth->role, {"admin"}))
               return crow::response(403, "Forbidden");
             if (!ctx.revoke_resource_permission(user_id, resource_id))
               return crow::response(500, "Failed to revoke permission");
@@ -487,7 +501,7 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
         if (!auth) return crow::response(401, "Unauthorized");
 
         std::vector<int> allowed_resource_ids;
-        if (auth->role == "admin") {
+        if (is_user_role(auth->role, "admin")) {
           std::lock_guard<std::mutex> lock(ctx.resource_mutex);
           for (const auto &entry : ctx.resources)
             allowed_resource_ids.push_back(entry.first);
@@ -520,7 +534,7 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"admin"}))
+        if (!is_allowed_user_role(auth->role, {"admin"}))
           return crow::response(403, "Forbidden");
         auto body = crow::json::load(request.body);
         if (!body) return crow::response(400, "Invalid JSON body");
@@ -606,7 +620,7 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
           [&ctx](const crow::request &request, int resource_id) {
             auto auth = ctx.find_auth(request);
             if (!auth) return crow::response(401, "Unauthorized");
-            if (!is_allowed_role(auth->role, {"admin"}))
+            if (!is_allowed_user_role(auth->role, {"admin"}))
               return crow::response(403, "Forbidden");
             auto body = crow::json::load(request.body);
             if (!body) return crow::response(400, "Invalid JSON body");
@@ -690,7 +704,7 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
           [&ctx](const crow::request &request, int resource_id) {
             auto auth = ctx.find_auth(request);
             if (!auth) return crow::response(401, "Unauthorized");
-            if (!is_allowed_role(auth->role, {"admin"}))
+            if (!is_allowed_user_role(auth->role, {"admin"}))
               return crow::response(403, "Forbidden");
 
             Resource resource;
@@ -731,7 +745,7 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
   CROW_ROUTE(app, "/api/sessions")([&ctx](const crow::request &request) {
     auto auth = ctx.find_auth(request);
     if (!auth) return crow::response(401, "Unauthorized");
-    if (!is_allowed_role(auth->role, {"admin", "auditor", "operator"}))
+    if (!is_allowed_user_role(auth->role, {"admin", "auditor", "operator"}))
       return crow::response(403, "Forbidden");
 
     const char *status_param = request.url_params.get("status");
@@ -793,7 +807,7 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"operator", "admin"}))
+        if (!is_allowed_user_role(auth->role, {"operator", "admin"}))
           return crow::response(403, "Forbidden");
         auto body = crow::json::load(request.body);
         if (!body) return crow::response(400, "Invalid JSON body");
@@ -844,7 +858,7 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request, int session_id) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"admin", "auditor", "operator"}))
+        if (!is_allowed_user_role(auth->role, {"admin", "auditor", "operator"}))
           return crow::response(403, "Forbidden");
         std::lock_guard<std::mutex> lock(ctx.session_mutex);
         auto it = ctx.sessions.find(session_id);
@@ -860,7 +874,7 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
           [&ctx](const crow::request &request, int session_id) {
             auto auth = ctx.find_auth(request);
             if (!auth) return crow::response(401, "Unauthorized");
-            if (!is_allowed_role(auth->role, {"operator", "admin"}))
+            if (!is_allowed_user_role(auth->role, {"operator", "admin"}))
               return crow::response(403, "Forbidden");
             {
               std::lock_guard<std::mutex> lock(ctx.session_mutex);
@@ -886,7 +900,7 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"admin", "auditor", "operator"}))
+        if (!is_allowed_user_role(auth->role, {"admin", "auditor", "operator"}))
           return crow::response(403, "Forbidden");
         const char *since_param = request.url_params.get("since");
         auto since = parse_int_param(since_param).value_or(0);
@@ -935,7 +949,7 @@ void register_audit_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"auditor", "admin"}))
+        if (!is_allowed_user_role(auth->role, {"auditor", "admin"}))
           return crow::response(403, "Forbidden");
 
         AuditEvent event;
@@ -964,7 +978,7 @@ void register_audit_routes(CrowApp &app, AppContext &ctx) {
   CROW_ROUTE(app, "/api/audit")([&ctx](const crow::request &request) {
     auto auth = ctx.find_auth(request);
     if (!auth) return crow::response(401, "Unauthorized");
-    if (!is_allowed_role(auth->role, {"auditor", "admin"}))
+    if (!is_allowed_user_role(auth->role, {"auditor", "admin"}))
       return crow::response(403, "Forbidden");
 
     crow::json::wvalue payload;
@@ -1154,7 +1168,7 @@ void register_recording_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"auditor", "admin"}))
+        if (!is_allowed_user_role(auth->role, {"auditor", "admin"}))
           return crow::response(403, "Forbidden");
 
         // Optional filter by sessionId
@@ -1197,7 +1211,7 @@ void register_recording_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request, int rec_id) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"auditor", "admin"}))
+        if (!is_allowed_user_role(auth->role, {"auditor", "admin"}))
           return crow::response(403, "Forbidden");
 
         SessionRecording rec;
@@ -1224,7 +1238,7 @@ void register_recording_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request, int rec_id) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"auditor", "admin"}))
+        if (!is_allowed_user_role(auth->role, {"auditor", "admin"}))
           return crow::response(403, "Forbidden");
 
         SessionRecording rec;
@@ -1263,7 +1277,7 @@ void register_stats_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"admin", "auditor"}))
+        if (!is_allowed_user_role(auth->role, {"admin", "auditor"}))
           return crow::response(403, "Forbidden");
 
         int total_sessions = 0, active_sessions = 0, terminated_sessions = 0;
@@ -1292,7 +1306,7 @@ void register_stats_routes(CrowApp &app, AppContext &ctx) {
           std::lock_guard<std::mutex> lock(ctx.user_mutex);
           total_users = static_cast<int>(ctx.users.size());
           for (const auto &entry : ctx.users)
-            if (entry.second.role == "admin") ++admin_users;
+            if (is_user_role(entry.second.role, "admin")) ++admin_users;
         }
 
         int total_recordings = 0;
@@ -1335,12 +1349,12 @@ void register_stats_routes(CrowApp &app, AppContext &ctx) {
       [&ctx](const crow::request &request, int resource_id) {
         auto auth = ctx.find_auth(request);
         if (!auth) return crow::response(401, "Unauthorized");
-        if (!is_allowed_role(auth->role, {"operator", "admin"}))
+        if (!is_allowed_user_role(auth->role, {"operator", "admin"}))
           return crow::response(403, "Forbidden");
 
         // Permission check
         std::vector<int> allowed_ids;
-        if (auth->role == "admin") {
+        if (is_user_role(auth->role, "admin")) {
           std::lock_guard<std::mutex> lock(ctx.resource_mutex);
           for (const auto &r : ctx.resources) allowed_ids.push_back(r.first);
         } else {

@@ -33,6 +33,53 @@ import {
   verify2FA
 } from './api.js';
 
+const ROLE_BLUEPRINTS = [
+  {
+    id: 'operator',
+    label: 'Session Operator',
+    description: 'Launch and manage remote sessions on authorized resources.',
+    permissions: ['Start and terminate sessions', 'Use SSH/web/agent access paths', 'View personal operations data']
+  },
+  {
+    id: 'admin',
+    label: 'Platform Admin',
+    description: 'Govern users, resources, and assignment policies.',
+    permissions: ['Create and edit users', 'Manage resources and credentials', 'Assign resource permissions']
+  },
+  {
+    id: 'auditor',
+    label: 'Security Auditor',
+    description: 'Monitor traceability and investigate security events.',
+    permissions: ['Read audit events', 'Replay session recordings', 'Access governance metrics']
+  }
+];
+
+const normalizeRole = (role) => {
+  const value = String(role || '').toLowerCase();
+  if (value === 'platform_admin' || value === 'access_admin') return 'admin';
+  if (value === 'session_operator') return 'operator';
+  if (value === 'security_auditor' || value === 'security_analyst') return 'auditor';
+  return value || 'operator';
+};
+
+const roleLabel = (role) => {
+  const mapped = normalizeRole(role);
+  const found = ROLE_BLUEPRINTS.find((item) => item.id === mapped);
+  return found ? found.label : mapped;
+};
+
+const hasRoleCapability = (role, capability) => {
+  const mapped = normalizeRole(role);
+  if (mapped === 'admin') return true;
+  if (mapped === 'operator') {
+    return ['operateSessions', 'viewStats'].includes(capability);
+  }
+  if (mapped === 'auditor') {
+    return ['viewAudit', 'viewRecordings', 'viewStats'].includes(capability);
+  }
+  return false;
+};
+
 export default function App() {
   const [status, setStatus] = useState('loading');
   const [detail, setDetail] = useState('');
@@ -43,7 +90,7 @@ export default function App() {
         const parsed = JSON.parse(saved);
         if (parsed.token) {
           setAuthToken(parsed.token);
-          return { user: parsed.user || '', password: '', role: parsed.role || 'operator', token: parsed.token };
+          return { user: parsed.user || '', password: '', role: normalizeRole(parsed.role), token: parsed.token };
         }
       }
     } catch (_) {}
@@ -57,6 +104,8 @@ export default function App() {
   const [terminalStatus, setTerminalStatus] = useState('idle');
   const [terminalError, setTerminalError] = useState('');
   const [sshPassword, setSshPassword] = useState('');
+  const [terminalReady, setTerminalReady] = useState(false);
+  const [autoConnectSessionId, setAutoConnectSessionId] = useState(null);
   const [auditOpen, setAuditOpen] = useState(false);
   const [auditItems, setAuditItems] = useState([]);
   const [loadingAudit, setLoadingAudit] = useState(false);
@@ -169,6 +218,42 @@ export default function App() {
   const terminalInstanceRef = useRef(null);
   const fitAddonRef = useRef(null);
   const socketRef = useRef(null);
+
+  const canManagePlatform = hasRoleCapability(auth.role, 'manageResources');
+  const canViewAudit = hasRoleCapability(auth.role, 'viewAudit');
+  const canViewRecordings = hasRoleCapability(auth.role, 'viewRecordings');
+  const canOperateSessions = hasRoleCapability(auth.role, 'operateSessions');
+  const roleName = roleLabel(auth.role);
+  const tabGuide = useMemo(() => {
+    const base = {
+      overview: {
+        title: 'Overview',
+        hint: 'Use this page for global posture and rapid checks.',
+        focus: 'Review posture, recent sessions, and launcher shortcuts.'
+      },
+      sessions: {
+        title: 'Sessions',
+        hint: 'Operate live access and intervene when needed.',
+        focus: 'Start, monitor, and terminate active sessions.'
+      },
+      audit: {
+        title: 'Audit',
+        hint: 'Investigate events and validate user actions.',
+        focus: 'Filter and inspect traceability records.'
+      },
+      recordings: {
+        title: 'Recordings',
+        hint: 'Replay session evidence for forensic analysis.',
+        focus: 'Open SSH cast files and inspect timelines.'
+      },
+      innovations: {
+        title: 'Innovation Lab',
+        hint: 'Try workflow accelerators and exposure analytics.',
+        focus: 'Use smart launcher, favorites, and anomaly signals.'
+      }
+    };
+    return base[mainTab] || base.overview;
+  }, [mainTab]);
 
   const navigate = (path) => {
     if (window.location.pathname !== path) {
@@ -304,7 +389,7 @@ export default function App() {
   }, [auth.token]);
 
   useEffect(() => {
-    if (!auth.token || auth.role !== 'admin') {
+    if (!auth.token || !canManagePlatform) {
       setUsers([]);
       setLoadingUsers(false);
       return;
@@ -328,7 +413,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [auth.token, auth.role]);
+  }, [auth.token, canManagePlatform]);
 
   // Fetch dashboard stats periodically
   useEffect(() => {
@@ -347,7 +432,7 @@ export default function App() {
   }, [auth.token]);
 
   useEffect(() => {
-    if (!auth.token || (auth.role !== 'admin' && auth.role !== 'auditor')) {
+    if (!auth.token || !canViewAudit) {
       setSecurityAuditItems([]);
       setSecurityAuditError('');
       return;
@@ -375,7 +460,7 @@ export default function App() {
       active = false;
       clearInterval(interval);
     };
-  }, [auth.token, auth.role]);
+  }, [auth.token, canViewAudit]);
 
   const onAuthChange = (event) => {
     const { name, value } = event.target;
@@ -414,7 +499,7 @@ export default function App() {
       setAuth((prev) => ({
         ...prev,
         token: payload.token,
-        role: payload.role,
+        role: normalizeRole(payload.role),
         user: payload.user,
         password: ''
       }));
@@ -424,7 +509,7 @@ export default function App() {
       localStorage.setItem('endoriumfort_auth', JSON.stringify({
         token: payload.token,
         user: payload.user,
-        role: payload.role
+        role: normalizeRole(payload.role)
       }));
       setAuthError('');
       navigate('/');
@@ -449,10 +534,10 @@ export default function App() {
     setQuickRefreshing(true);
     try {
       const requests = [fetchSessions(), fetchResources(), fetchStats()];
-      if (auth.role === 'admin') {
+      if (canManagePlatform) {
         requests.push(fetchUsers());
       }
-      if (auth.role === 'admin' || auth.role === 'auditor') {
+      if (canViewAudit) {
         requests.push(fetchAudit());
       }
       const results = await Promise.all(requests);
@@ -461,11 +546,11 @@ export default function App() {
       setSessions(Array.isArray(sessionData?.items) ? sessionData.items : []);
       setResources(Array.isArray(resourceData?.items) ? resourceData.items : []);
       setStats(statsData || null);
-      if (auth.role === 'admin') {
+      if (canManagePlatform) {
         setUsers(Array.isArray(maybeUsersOrAudit?.items) ? maybeUsersOrAudit.items : []);
       }
-      if (auth.role === 'admin' || auth.role === 'auditor') {
-        const auditData = auth.role === 'admin' ? maybeAudit : maybeUsersOrAudit;
+      if (canViewAudit) {
+        const auditData = canManagePlatform ? maybeAudit : maybeUsersOrAudit;
         const items = Array.isArray(auditData?.items) ? auditData.items : [];
         setSecurityAuditItems(items);
         if (auditOpen) {
@@ -519,7 +604,8 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!activeTerminalSession || !terminalRef.current) {
+    // Terminal DOM node exists only in the Sessions tab.
+    if (mainTab !== 'sessions' || !activeTerminalSession || !terminalRef.current) {
       return undefined;
     }
 
@@ -540,6 +626,7 @@ export default function App() {
 
     terminalInstanceRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    setTerminalReady(true);
 
     const handleResize = () => {
       if (!fitAddonRef.current || !terminalInstanceRef.current) {
@@ -567,14 +654,34 @@ export default function App() {
       terminal.dispose();
       terminalInstanceRef.current = null;
       fitAddonRef.current = null;
+      setTerminalReady(false);
     };
-  }, [activeTerminalSession]);
+  }, [activeTerminalSession, mainTab]);
+
+  useEffect(() => {
+    if (!autoConnectSessionId) return;
+    if (mainTab !== 'sessions') return;
+    if (!terminalReady) return;
+    if (!auth.token || !sshPassword) return;
+    if (!activeTerminalSession || activeTerminalSession.id !== autoConnectSessionId) return;
+
+    setAutoConnectSessionId(null);
+    connectTerminal();
+  }, [
+    autoConnectSessionId,
+    mainTab,
+    terminalReady,
+    auth.token,
+    sshPassword,
+    activeTerminalSession
+  ]);
 
   const openTerminal = (session) => {
     setActiveTerminalSession(session);
     setSshPassword('');
     setTerminalError('');
     setTerminalStatus('idle');
+    setTerminalReady(false);
   };
 
   const buildWebSocketUrl = (path, params = {}) => {
@@ -616,7 +723,7 @@ export default function App() {
       return;
     }
 
-    const wsUrl = buildWebSocketUrl('/api/ws/ssh', { token: auth.token });
+    const wsUrl = buildWebSocketUrl('/api/ws/ssh');
     const socket = new WebSocket(wsUrl);
     socket.binaryType = 'arraybuffer';
     socketRef.current = socket;
@@ -710,6 +817,8 @@ export default function App() {
           const creds = await fetchResourceCredentials(resource.id);
           if (creds.sshPassword) {
             setSshPassword(creds.sshPassword);
+            setMainTab('sessions');
+            setAutoConnectSessionId(created.id);
           }
         } catch (_) {
           // Silently fallback to manual password entry
@@ -938,10 +1047,10 @@ export default function App() {
     if (mainTab === 'audit') {
       loadAudit();
     }
-    if (mainTab === 'recordings' && (auth.role === 'admin' || auth.role === 'auditor')) {
+    if (mainTab === 'recordings' && canViewRecordings) {
       loadRecordings();
     }
-  }, [mainTab, auth.token, auth.role]);
+  }, [mainTab, auth.token, canViewRecordings]);
 
   // ── Recording handlers ──
 
@@ -1087,7 +1196,6 @@ export default function App() {
       shadowFitRef.current = fitAddon;
 
       const wsUrl = buildWebSocketUrl('/api/ws/shadow', {
-        token: auth.token,
         sessionId: session.id
       });
       const socket = new WebSocket(wsUrl);
@@ -1419,7 +1527,7 @@ export default function App() {
           <img src="/assets/logo-icon-dark.png" alt="EndoriumFort" className="brand-logo" />
           <div>
             <h1>Admin Console</h1>
-            <p>Manage resources available for operators.</p>
+            <p>Govern users, resources, and role-based permissions.</p>
           </div>
         </div>
         <div className="top-actions">
@@ -1436,10 +1544,10 @@ export default function App() {
         </div>
       </header>
 
-      {auth.role !== 'admin' ? (
+      {!canManagePlatform ? (
         <div className="panel reveal">
-          <h3>Admin access required</h3>
-          <p className="muted">Sign in with the admin role to manage resources.</p>
+          <h3>Platform admin access required</h3>
+          <p className="muted">Sign in with the Platform Admin role to manage users and resources.</p>
         </div>
       ) : (
         <div className="admin-grid">
@@ -1677,9 +1785,9 @@ export default function App() {
                   value={userForm.role}
                   onChange={onUserFieldChange}
                 >
-                  <option value="operator">operator</option>
-                  <option value="admin">admin</option>
-                  <option value="auditor">auditor</option>
+                  <option value="operator">Session Operator</option>
+                  <option value="admin">Platform Admin</option>
+                  <option value="auditor">Security Auditor</option>
                 </select>
               </label>
               <div className="resource-actions">
@@ -1711,7 +1819,7 @@ export default function App() {
                   <article className="resource-row" key={user.id}>
                     <div>
                       <h4>{user.username}</h4>
-                      <p className="muted">Role: {user.role}</p>
+                      <p className="muted">Role: {roleLabel(user.role)}</p>
                     </div>
                     <div className="resource-actions">
                       <button
@@ -1741,6 +1849,28 @@ export default function App() {
               ) : (
                 <p className="muted">No users created yet.</p>
               )}
+            </div>
+          </div>
+
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>RBAC Blueprint</h3>
+                <p>Operational role model and expected permissions.</p>
+              </div>
+            </div>
+            <div className="rbac-grid">
+              {ROLE_BLUEPRINTS.map((role) => (
+                <article className="rbac-card" key={role.id}>
+                  <h4>{role.label}</h4>
+                  <p className="muted">{role.description}</p>
+                  <ul>
+                    {role.permissions.map((permission) => (
+                      <li key={`${role.id}-${permission}`}>{permission}</li>
+                    ))}
+                  </ul>
+                </article>
+              ))}
             </div>
           </div>
 
@@ -1913,9 +2043,10 @@ export default function App() {
           <div className="health">
             <span className={`pill ${status}`}>{status}</span>
             <span className="detail">{detail}</span>
+            <span className="pill monitor">{roleName}</span>
           </div>
           <div className="nav-actions">
-            {auth.role === 'admin' && (
+            {canManagePlatform && (
               <button
                 type="button"
                 className="secondary"
@@ -1927,7 +2058,7 @@ export default function App() {
             <button type="button" className="ghost" onClick={() => setMainTab('audit')}>
               Audit
             </button>
-            {(auth.role === 'admin' || auth.role === 'auditor') && (
+            {canViewRecordings && (
               <button type="button" className="ghost" onClick={() => setMainTab('recordings')}>
                 Recordings
               </button>
@@ -1954,29 +2085,33 @@ export default function App() {
           className={mainTab === 'overview' ? 'tab-btn active' : 'tab-btn'}
           onClick={() => setMainTab('overview')}
         >
-          Overview
+          <span className="tab-kicker">Plan</span>
+          <strong>Overview</strong>
         </button>
         <button
           type="button"
           className={mainTab === 'sessions' ? 'tab-btn active' : 'tab-btn'}
           onClick={() => setMainTab('sessions')}
         >
-          Sessions
+          <span className="tab-kicker">Operate</span>
+          <strong>Sessions</strong>
         </button>
         <button
           type="button"
           className={mainTab === 'audit' ? 'tab-btn active' : 'tab-btn'}
           onClick={() => setMainTab('audit')}
         >
-          Audit
+          <span className="tab-kicker">Trace</span>
+          <strong>Audit</strong>
         </button>
-        {(auth.role === 'admin' || auth.role === 'auditor') && (
+        {canViewRecordings && (
           <button
             type="button"
             className={mainTab === 'recordings' ? 'tab-btn active' : 'tab-btn'}
             onClick={() => setMainTab('recordings')}
           >
-            Recordings
+            <span className="tab-kicker">Replay</span>
+            <strong>Recordings</strong>
           </button>
         )}
         <button
@@ -1984,9 +2119,18 @@ export default function App() {
           className={mainTab === 'innovations' ? 'tab-btn active' : 'tab-btn'}
           onClick={() => setMainTab('innovations')}
         >
-          Innovation Lab
+          <span className="tab-kicker">Explore</span>
+          <strong>Innovation Lab</strong>
         </button>
       </nav>
+
+      <section className="tab-compass reveal" aria-live="polite">
+        <div>
+          <h3>{tabGuide.title}</h3>
+          <p>{tabGuide.hint}</p>
+        </div>
+        <p className="muted">{tabGuide.focus}</p>
+      </section>
 
       {/* ── Dashboard Stats ── */}
       {mainTab === 'overview' && stats && (
@@ -2045,7 +2189,7 @@ export default function App() {
               <p>Live posture and anomaly hints from audit and session activity.</p>
             </div>
             <div className="status-row">
-              {(auth.role === 'admin' || auth.role === 'auditor') ? (
+              {canViewAudit ? (
                 <span className={`pill ${loadingSecurityAudit ? 'loading' : 'ok'}`}>
                   {loadingSecurityAudit ? 'syncing' : `${securityAuditItems.length} feed items`}
                 </span>
@@ -2069,7 +2213,7 @@ export default function App() {
             <button type="button" className="secondary" onClick={() => openAudit()}>
               Investigate in audit
             </button>
-            {!totpEnabled && auth.role === 'admin' && (
+            {!totpEnabled && canManagePlatform && (
               <button type="button" className="ghost" onClick={() => navigate('/admin')}>
                 Configure MFA
               </button>
@@ -2228,7 +2372,7 @@ export default function App() {
                     type="button"
                     className="secondary"
                     onClick={() => onTerminate(session.id)}
-                    disabled={session.status !== 'active'}
+                    disabled={session.status !== 'active' || !canOperateSessions}
                   >
                     Terminate
                   </button>
@@ -2239,7 +2383,7 @@ export default function App() {
                   >
                     Open audit
                   </button>
-                  {(auth.role === 'admin' || auth.role === 'auditor') && (
+                  {canViewAudit && (
                     <button
                       type="button"
                       className="ghost"
@@ -2252,11 +2396,11 @@ export default function App() {
                     type="button"
                     className="ghost"
                     onClick={() => openTerminal(session)}
-                    disabled={session.status !== 'active'}
+                    disabled={session.status !== 'active' || !canOperateSessions}
                   >
                     Open live
                   </button>
-                  {(auth.role === 'admin' || auth.role === 'auditor') &&
+                  {canViewAudit &&
                     session.status === 'active' && (
                       <button
                         type="button"
@@ -2337,10 +2481,10 @@ export default function App() {
               </select>
             </div>
             {auditError && <p className="error">{auditError}</p>}
-            {auth.role !== 'admin' && auth.role !== 'auditor' && (
-              <p className="muted">Sign in with auditor or admin role.</p>
+            {!canViewAudit && (
+              <p className="muted">Sign in with Security Auditor or Platform Admin role.</p>
             )}
-            {(auth.role === 'admin' || auth.role === 'auditor') && (
+            {canViewAudit && (
               <div className="audit-list">
                 {filteredAuditItems.length ? (
                   filteredAuditItems.map((item) => (
@@ -2368,7 +2512,7 @@ export default function App() {
       )}
 
       {/* Recordings panel */}
-      {mainTab === 'recordings' && (auth.role === 'admin' || auth.role === 'auditor') && (
+      {mainTab === 'recordings' && canViewRecordings && (
         <section className="panel reveal" style={{ marginBottom: '24px' }}>
           <div className="panel-header">
             <div>

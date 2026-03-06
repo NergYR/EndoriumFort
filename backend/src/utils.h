@@ -109,6 +109,39 @@ inline bool is_allowed_role(const std::string &role,
   return false;
 }
 
+inline std::string normalize_user_role(const std::string &role) {
+  std::string lowered = role;
+  std::transform(
+      lowered.begin(), lowered.end(), lowered.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+  if (lowered == "admin" || lowered == "platform_admin" ||
+      lowered == "access_admin") {
+    return "admin";
+  }
+  if (lowered == "operator" || lowered == "session_operator") {
+    return "operator";
+  }
+  if (lowered == "auditor" || lowered == "security_auditor" ||
+      lowered == "security_analyst") {
+    return "auditor";
+  }
+  return lowered;
+}
+
+inline bool is_user_role(const std::string &role, const std::string &expected) {
+  return normalize_user_role(role) == normalize_user_role(expected);
+}
+
+inline bool is_allowed_user_role(const std::string &role,
+                                 const std::vector<std::string> &allowed) {
+  const std::string normalized_role = normalize_user_role(role);
+  for (const auto &item : allowed) {
+    if (normalized_role == normalize_user_role(item)) return true;
+  }
+  return false;
+}
+
 inline std::optional<std::string> extract_bearer_token(
     const crow::request &request) {
   auto header = request.get_header_value("Authorization");
@@ -117,6 +150,89 @@ inline std::optional<std::string> extract_bearer_token(
     return header.substr(prefix.size());
   }
   return std::nullopt;
+}
+
+inline std::optional<std::string> extract_cookie_value(
+    const crow::request &request, const std::string &name) {
+  const std::string cookie_header = request.get_header_value("Cookie");
+  if (cookie_header.empty() || name.empty()) return std::nullopt;
+
+  size_t start = 0;
+  while (start < cookie_header.size()) {
+    size_t end = cookie_header.find(';', start);
+    if (end == std::string::npos) end = cookie_header.size();
+
+    size_t eq = cookie_header.find('=', start);
+    if (eq != std::string::npos && eq < end) {
+      std::string key = cookie_header.substr(start, eq - start);
+      while (!key.empty() && std::isspace(static_cast<unsigned char>(key.front()))) {
+        key.erase(key.begin());
+      }
+      while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) {
+        key.pop_back();
+      }
+      if (key == name) {
+        return cookie_header.substr(eq + 1, end - (eq + 1));
+      }
+    }
+
+    start = end + 1;
+  }
+
+  return std::nullopt;
+}
+
+inline std::optional<std::string> extract_auth_token_from_request(
+    const crow::request &request) {
+  auto bearer = extract_bearer_token(request);
+  if (bearer && !bearer->empty()) return bearer;
+  return extract_cookie_value(request, "endoriumfort_token");
+}
+
+inline bool request_uses_https(const crow::request &request) {
+  auto lower_copy = [](std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+  };
+
+  std::string proto = lower_copy(request.get_header_value("X-Forwarded-Proto"));
+  if (!proto.empty()) {
+    size_t comma = proto.find(',');
+    if (comma != std::string::npos) proto = proto.substr(0, comma);
+    while (!proto.empty() && std::isspace(static_cast<unsigned char>(proto.front()))) {
+      proto.erase(proto.begin());
+    }
+    while (!proto.empty() && std::isspace(static_cast<unsigned char>(proto.back()))) {
+      proto.pop_back();
+    }
+    if (proto == "https") return true;
+  }
+
+  std::string origin = lower_copy(request.get_header_value("Origin"));
+  if (origin.rfind("https://", 0) == 0) return true;
+
+  std::string referer = lower_copy(request.get_header_value("Referer"));
+  if (referer.rfind("https://", 0) == 0) return true;
+
+  return false;
+}
+
+inline std::string build_auth_cookie(const std::string &token, bool secure,
+                                     int max_age_seconds) {
+  std::ostringstream oss;
+  oss << "endoriumfort_token=" << token
+      << "; Path=/; HttpOnly; SameSite=Strict; Max-Age="
+      << max_age_seconds;
+  if (secure) oss << "; Secure";
+  return oss.str();
+}
+
+inline std::string build_cleared_auth_cookie(bool secure) {
+  std::string value =
+      "endoriumfort_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
+  if (secure) value += "; Secure";
+  return value;
 }
 
 inline std::string base64_encode(const std::string &input) {

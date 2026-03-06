@@ -26,8 +26,8 @@ void register_tunnel_routes(CrowApp &app, AppContext &ctx) {
 
           // Authenticate
           std::string token_str;
-          const char *token_param = req.url_params.get("token");
-          if (token_param) token_str = token_param;
+          auto auth_token = extract_auth_token_from_request(req);
+          if (auth_token && !auth_token->empty()) token_str = *auth_token;
           if (token_str.empty()) {
             const char *ef_token_param = req.url_params.get("ef_token");
             if (ef_token_param) token_str = ef_token_param;
@@ -79,7 +79,7 @@ void register_tunnel_routes(CrowApp &app, AppContext &ctx) {
 
           // Check permission
           std::vector<int> allowed_ids;
-          if (auth->role == "admin") {
+          if (is_user_role(auth->role, "admin")) {
             std::lock_guard<std::mutex> lock(ctx.resource_mutex);
             for (const auto &r : ctx.resources)
               allowed_ids.push_back(r.first);
