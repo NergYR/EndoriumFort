@@ -1,0 +1,7 @@
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-06T14:23:54Z","payload":{"userId":1,"username":"admin"}}
+{"id":2,"type":"session.terminate","actor":"admin","role":"admin","createdAt":"2026-03-06T14:23:58Z","payload":{"sessionId":5,"target":"192.168.0.31","user":"admin","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-02-13T15:49:10Z","terminatedAt":"2026-03-06T14:23:58Z"}}
+{"id":3,"type":"session.terminate","actor":"admin","role":"admin","createdAt":"2026-03-06T14:23:59Z","payload":{"sessionId":4,"target":"192.168.0.31","user":"louis","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-02-13T15:39:26Z","terminatedAt":"2026-03-06T14:23:59Z"}}
+{"id":4,"type":"resource.create","actor":"admin","role":"admin","createdAt":"2026-03-06T14:24:28Z","payload":{"resourceId":3,"name":"VM","target":"127.0.1.1","protocol":"ssh","port":2222,"createdAt":"2026-03-06T14:24:28Z","updatedAt":"2026-03-06T14:24:28Z"}}
+{"id":5,"type":"session.create","actor":"admin","role":"admin","createdAt":"2026-03-06T14:24:45Z","payload":{"sessionId":6,"target":"127.0.1.1","user":"energetiq","protocol":"ssh","port":2222,"status":"active","createdAt":"2026-03-06T14:24:45Z"}}
+{"id":6,"type":"credential.access","actor":"admin","role":"admin","createdAt":"2026-03-06T14:24:45Z","payload":{"resourceId":3,"resourceName":"VM"}}
+{"id":7,"type":"session.shadow","actor":"admin","role":"admin","createdAt":"2026-03-06T14:25:07Z","payload":{"sessionId":6}}

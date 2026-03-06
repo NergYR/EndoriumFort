@@ -71,10 +71,7 @@ export async function logout() {
     method: 'POST',
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Logout failed');
-  }
+  await ensureResponseOk(response, 'Logout failed');
   return response.json();
 }
 
@@ -87,10 +84,7 @@ export async function changePassword(currentPassword, newPassword) {
     },
     body: JSON.stringify({ currentPassword, newPassword })
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to change password');
-  }
+  await ensureResponseOk(response, 'Failed to change password');
   return response.json();
 }
 
@@ -119,10 +113,7 @@ export async function createSession(payload) {
     },
     body: JSON.stringify(payload)
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to create session');
-  }
+  await ensureResponseOk(response, 'Failed to create session');
   return response.json();
 }
 
@@ -131,10 +122,7 @@ export async function terminateSession(sessionId) {
     method: 'POST',
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to terminate session');
-  }
+  await ensureResponseOk(response, 'Failed to terminate session');
   return response.json();
 }
 
@@ -142,10 +130,7 @@ export async function fetchAudit() {
   const response = await fetch('/api/audit', {
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to fetch audit log');
-  }
+  await ensureResponseOk(response, 'Failed to fetch audit log');
   return response.json();
 }
 
@@ -166,10 +151,7 @@ export async function createResource(payload) {
     },
     body: JSON.stringify(payload)
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to create resource');
-  }
+  await ensureResponseOk(response, 'Failed to create resource');
   return response.json();
 }
 
@@ -182,10 +164,7 @@ export async function updateResource(resourceId, payload) {
     },
     body: JSON.stringify(payload)
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to update resource');
-  }
+  await ensureResponseOk(response, 'Failed to update resource');
   return response.json();
 }
 
@@ -194,10 +173,7 @@ export async function deleteResource(resourceId) {
     method: 'DELETE',
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to delete resource');
-  }
+  await ensureResponseOk(response, 'Failed to delete resource');
   return response.json();
 }
 
@@ -205,10 +181,7 @@ export async function fetchUsers() {
   const response = await fetch('/api/users', {
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to fetch users');
-  }
+  await ensureResponseOk(response, 'Failed to fetch users');
   return response.json();
 }
 
@@ -221,10 +194,7 @@ export async function createUser(payload) {
     },
     body: JSON.stringify(payload)
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to create user');
-  }
+  await ensureResponseOk(response, 'Failed to create user');
   return response.json();
 }
 
@@ -237,10 +207,7 @@ export async function updateUser(userId, payload) {
     },
     body: JSON.stringify(payload)
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to update user');
-  }
+  await ensureResponseOk(response, 'Failed to update user');
   return response.json();
 }
 
@@ -249,10 +216,7 @@ export async function deleteUser(userId) {
     method: 'DELETE',
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to delete user');
-  }
+  await ensureResponseOk(response, 'Failed to delete user');
   return response.json();
 }
 
@@ -260,9 +224,7 @@ export async function getUserResourcePermissions(userId) {
   const response = await fetch(`/api/users/${userId}/resources`, {
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    throw new Error('Failed to fetch permissions');
-  }
+  await ensureResponseOk(response, 'Failed to fetch permissions');
   return response.json();
 }
 
@@ -271,10 +233,7 @@ export async function grantResourcePermission(userId, resourceId) {
     method: 'POST',
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to grant permission');
-  }
+  await ensureResponseOk(response, 'Failed to grant permission');
   return response.json();
 }
 
@@ -283,10 +242,7 @@ export async function revokeResourcePermission(userId, resourceId) {
     method: 'DELETE',
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to revoke permission');
-  }
+  await ensureResponseOk(response, 'Failed to revoke permission');
   return response.json();
 }
 
@@ -297,10 +253,7 @@ export async function setup2FA() {
     method: 'POST',
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to setup 2FA');
-  }
+  await ensureResponseOk(response, 'Failed to setup 2FA');
   return response.json();
 }
 
@@ -313,10 +266,7 @@ export async function verify2FA(code) {
     },
     body: JSON.stringify({ code })
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to verify 2FA');
-  }
+  await ensureResponseOk(response, 'Failed to verify 2FA');
   return response.json();
 }
 
@@ -329,10 +279,7 @@ export async function disable2FA(code) {
     },
     body: JSON.stringify({ code })
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to disable 2FA');
-  }
+  await ensureResponseOk(response, 'Failed to disable 2FA');
   return response.json();
 }
 
@@ -340,9 +287,7 @@ export async function get2FAStatus() {
   const response = await fetch('/api/auth/2fa-status', {
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    throw new Error('Failed to fetch 2FA status');
-  }
+  await ensureResponseOk(response, 'Failed to fetch 2FA status');
   return response.json();
 }
 
@@ -353,10 +298,7 @@ export async function fetchRecordings(sessionId = null) {
   const response = await fetch(`/api/recordings${params}`, {
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to fetch recordings');
-  }
+  await ensureResponseOk(response, 'Failed to fetch recordings');
   return response.json();
 }
 
@@ -364,10 +306,7 @@ export async function fetchRecordingCast(recordingId) {
   const response = await fetch(`/api/recordings/${recordingId}/cast`, {
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to fetch recording data');
-  }
+  await ensureResponseOk(response, 'Failed to fetch recording data');
   return response.text();
 }
 
@@ -387,9 +326,6 @@ export async function fetchResourceCredentials(resourceId) {
   const response = await fetch(`/api/resources/${resourceId}/credentials`, {
     headers: withAuthHeaders()
   });
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Failed to fetch credentials');
-  }
+  await ensureResponseOk(response, 'Failed to fetch credentials');
   return response.json();
 }

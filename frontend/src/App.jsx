@@ -607,7 +607,12 @@ export default function App() {
 
     const terminal = terminalInstanceRef.current;
     if (!terminal) {
-      setTerminalError('Terminal not ready.');
+      setTerminalError('Terminal is initializing... retrying.');
+      window.setTimeout(() => {
+        if (terminalInstanceRef.current && auth.token && activeTerminalSession) {
+          connectTerminal();
+        }
+      }, 150);
       return;
     }
 
