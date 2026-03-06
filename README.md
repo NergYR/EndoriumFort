@@ -28,6 +28,11 @@
 | 🔑 **2FA / TOTP** | RFC 6238 two-factor authentication with QR setup |
 | 🛡️ **RBAC** | Role-based access control (admin, operator, auditor) |
 | 📊 **Live Dashboard** | Real-time KPI stats, session monitoring, security alerts |
+| 🧭 **Tabbed Console Navbar** | Persistent workspaces: Overview, Sessions, Audit, Recordings, Innovation Lab |
+| 🚨 **Security Center** | Live anomaly hints (login failures, stale sessions, admin-change activity, MFA posture) |
+| ⚡ **Quick Refresh** | One-click synchronization of sessions, resources, KPIs, users, and audit feed |
+| 🕒 **Recent Sessions Queue** | Prioritized latest sessions with direct terminate/audit actions |
+| 🧪 **Innovation Lab** | Smart Launcher, favorites, and protocol exposure analytics |
 | 🌙 **Dark Mode** | Full dark theme with localStorage persistence |
 
 ---
@@ -149,12 +154,21 @@ Opens:
 ### Web Dashboard
 
 1. Login at `http://localhost:5173`
-2. **Dashboard** — View live KPI stats, active sessions, and security alerts
-3. **Resources** — Click a resource tile to connect (SSH terminal, web proxy, or agent tunnel)
-4. **Sessions** — Monitor, shadow (👁), or terminate active sessions
-5. **Recordings** — Replay past SSH sessions with the animated Asciinema player
-6. **Audit** — Search and filter all security events
-7. **Admin** — Manage users, resources, permissions, and credentials
+2. **Use the tabbed navbar** to switch workspaces without collapsing panels:
+  - **Overview** — KPI stats, security center, resources, recent sessions
+  - **Sessions** — Live operations, session controls, SSH console, shadow mode
+  - **Audit** — Dedicated event investigation workspace
+  - **Recordings** — Dedicated replay workspace (admin/auditor)
+  - **Innovation Lab** — Smart launcher + exposure analytics + favorites
+3. **Dashboard/Overview** — View live KPI stats, active sessions, and security alerts
+  - Use **Security Center** for anomaly triage and posture checks
+  - Use **Quick Refresh** to force sync all operational data instantly
+4. **Resources** — Click a resource tile to connect (SSH terminal, web proxy, or agent tunnel)
+5. **Sessions** — Monitor, shadow (👁), or terminate active sessions
+  - Use **Recent Sessions** for fast intervention on the latest access events
+6. **Recordings** — Replay past SSH sessions with the animated Asciinema player
+7. **Audit** — Search and filter all security events
+8. **Admin** — Manage users, resources, permissions, and credentials
 
 ### Agent Tunnel
 

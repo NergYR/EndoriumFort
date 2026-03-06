@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.5.12 - 2026-03-06
+### Feature: Tabbed Console Navigation Redesign
+- **Major UI refactor**: main console moved from toggled cards to a **persistent tabbed navbar** model
+  - Tabs: `Overview`, `Sessions`, `Audit`, `Recordings`, `Innovation Lab`
+  - Improved operator flow: no more hide/show card juggling while investigating incidents
+- **Audit and recordings become first-class workspaces** with dedicated tabs and auto-refresh on tab entry
+- **Cross-tab actions**: session actions can jump directly to audit/recordings context
+
+### Feature: Innovation Lab
+- **Smart Launcher**: unified search to find and connect resources by name/target/protocol
+- **Resource Favorites**: pin preferred resources with local persistence (`localStorage`)
+- **Exposure Analytics**: protocol distribution + runtime risk index based on resources and active sessions
+
+### Frontend Changes
+- `frontend/src/App.jsx`: added tab state machine, tab-aware data loading, innovation modules, and refactored main rendering flow
+- `frontend/src/styles.css`: added navbar/tab UI styles, innovation panel styles, and responsive/dark mode variants
+
+## v0.5.11 - 2026-03-06
+### Feature: Security Operations Dashboard Enhancements
+- **New: Security Center panel** on the main console with live posture cards:
+  - Login failures in the last 30 minutes
+  - Long-running active sessions detection
+  - Admin changes over 24h (resource/user governance activity)
+  - MFA posture visibility (enabled/disabled)
+- **New: Background security feed polling** (admin/auditor) from audit logs every 20s for near-real-time anomaly hints
+- **New: Quick Refresh action** in top navigation to synchronize sessions, resources, stats, users (admin), and audit feed in one click
+- **New: Recent Sessions panel** with last opened sessions, relative timestamps, and direct intervention actions (Terminate/Audit)
+- **Responsive + dark mode support** added for all new dashboard panels
+
+### Frontend Changes
+- `frontend/src/App.jsx`: Added security feed state, polling logic, quick refresh workflow, derived security signals, and new dashboard sections
+- `frontend/src/styles.css`: Added styles for Security Center and Recent Sessions, plus responsive and dark-theme variants
+
 ## v0.5.0 - 2025-07-17
 ### Feature: Docker & Production Deployment
 - **Docker multi-stage build**: 3-stage Dockerfile (C++ backend build → React frontend build → production image with nginx)

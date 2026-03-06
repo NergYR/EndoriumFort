@@ -98,6 +98,18 @@ export default function App() {
   const [route, setRoute] = useState(() =>
     window.location.pathname ? window.location.pathname : '/'
   );
+  const [mainTab, setMainTab] = useState('overview');
+  const [launcherQuery, setLauncherQuery] = useState('');
+  const [favoriteResourceIds, setFavoriteResourceIds] = useState(() => {
+    try {
+      const raw = localStorage.getItem('endoriumfort_favorites');
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  });
   // 2FA state
   const [twoFARequired, setTwoFARequired] = useState(false);
   const [totpCode, setTotpCode] = useState('');
@@ -116,6 +128,10 @@ export default function App() {
   // Dashboard stats
   const [stats, setStats] = useState(null);
   const [loadingStats, setLoadingStats] = useState(false);
+  const [quickRefreshing, setQuickRefreshing] = useState(false);
+  const [securityAuditItems, setSecurityAuditItems] = useState([]);
+  const [loadingSecurityAudit, setLoadingSecurityAudit] = useState(false);
+  const [securityAuditError, setSecurityAuditError] = useState('');
   // Audit search
   const [auditSearchQuery, setAuditSearchQuery] = useState('');
   const [auditTypeFilter, setAuditTypeFilter] = useState('');
@@ -186,6 +202,10 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light');
     localStorage.setItem('endoriumfort_darkmode', darkMode ? 'true' : 'false');
   }, [darkMode]);
+
+  useEffect(() => {
+    localStorage.setItem('endoriumfort_favorites', JSON.stringify(favoriteResourceIds));
+  }, [favoriteResourceIds]);
 
   // Token expiry auto-logout
   useEffect(() => {
@@ -326,6 +346,37 @@ export default function App() {
     return () => { active = false; clearInterval(interval); };
   }, [auth.token]);
 
+  useEffect(() => {
+    if (!auth.token || (auth.role !== 'admin' && auth.role !== 'auditor')) {
+      setSecurityAuditItems([]);
+      setSecurityAuditError('');
+      return;
+    }
+    let active = true;
+    const load = () => {
+      setLoadingSecurityAudit(true);
+      fetchAudit()
+        .then((data) => {
+          if (!active) return;
+          setSecurityAuditItems(Array.isArray(data.items) ? data.items : []);
+          setSecurityAuditError('');
+        })
+        .catch((error) => {
+          if (!active) return;
+          setSecurityAuditError(error.message || 'Unable to load security feed');
+        })
+        .finally(() => {
+          if (active) setLoadingSecurityAudit(false);
+        });
+    };
+    load();
+    const interval = setInterval(load, 20000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [auth.token, auth.role]);
+
   const onAuthChange = (event) => {
     const { name, value } = event.target;
     setAuth((prev) => ({ ...prev, [name]: value }));
@@ -391,6 +442,47 @@ export default function App() {
     navigate('/login');
   };
 
+  const onQuickRefresh = async () => {
+    if (!auth.token || quickRefreshing) {
+      return;
+    }
+    setQuickRefreshing(true);
+    try {
+      const requests = [fetchSessions(), fetchResources(), fetchStats()];
+      if (auth.role === 'admin') {
+        requests.push(fetchUsers());
+      }
+      if (auth.role === 'admin' || auth.role === 'auditor') {
+        requests.push(fetchAudit());
+      }
+      const results = await Promise.all(requests);
+      const [sessionData, resourceData, statsData, maybeUsersOrAudit, maybeAudit] = results;
+
+      setSessions(Array.isArray(sessionData?.items) ? sessionData.items : []);
+      setResources(Array.isArray(resourceData?.items) ? resourceData.items : []);
+      setStats(statsData || null);
+      if (auth.role === 'admin') {
+        setUsers(Array.isArray(maybeUsersOrAudit?.items) ? maybeUsersOrAudit.items : []);
+      }
+      if (auth.role === 'admin' || auth.role === 'auditor') {
+        const auditData = auth.role === 'admin' ? maybeAudit : maybeUsersOrAudit;
+        const items = Array.isArray(auditData?.items) ? auditData.items : [];
+        setSecurityAuditItems(items);
+        if (auditOpen) {
+          setAuditItems(items);
+        }
+      }
+      setSessionError('');
+      setResourceError('');
+      setUserError('');
+      setSecurityAuditError('');
+    } catch (error) {
+      setSessionError(error.message || 'Unable to refresh data');
+    } finally {
+      setQuickRefreshing(false);
+    }
+  };
+
   const onTerminate = async (sessionId) => {
     try {
       const updated = await terminateSession(sessionId);
@@ -420,6 +512,7 @@ export default function App() {
   };
 
   const openAudit = (sessionId = null) => {
+    setMainTab('audit');
     setAuditOpen(true);
     setAuditFilter(sessionId);
     loadAudit();
@@ -835,6 +928,16 @@ export default function App() {
     if (auth.token) onLoad2FAStatus();
   }, [auth.token]);
 
+  useEffect(() => {
+    if (!auth.token) return;
+    if (mainTab === 'audit') {
+      loadAudit();
+    }
+    if (mainTab === 'recordings' && (auth.role === 'admin' || auth.role === 'auditor')) {
+      loadRecordings();
+    }
+  }, [mainTab, auth.token, auth.role]);
+
   // ── Recording handlers ──
 
   const loadRecordings = async (sessionId = null) => {
@@ -851,6 +954,7 @@ export default function App() {
   };
 
   const openRecordings = (sessionId = null) => {
+    setMainTab('recordings');
     setRecordingsOpen(true);
     setCastData(null);
     setCastRecordingId(null);
@@ -1052,6 +1156,129 @@ export default function App() {
     [sessions]
   );
 
+  const toggleFavoriteResource = (resourceId) => {
+    setFavoriteResourceIds((prev) => {
+      if (prev.includes(resourceId)) {
+        return prev.filter((id) => id !== resourceId);
+      }
+      return [...prev, resourceId];
+    });
+  };
+
+  const favoriteResources = useMemo(
+    () => resources.filter((resource) => favoriteResourceIds.includes(resource.id)),
+    [resources, favoriteResourceIds]
+  );
+
+  const smartLaunchCandidates = useMemo(() => {
+    const query = launcherQuery.trim().toLowerCase();
+    if (!query) {
+      return resources.slice(0, 8);
+    }
+    return resources
+      .filter((resource) => {
+        const haystack = `${resource.name || ''} ${resource.target || ''} ${resource.protocol || ''}`.toLowerCase();
+        return haystack.includes(query);
+      })
+      .slice(0, 8);
+  }, [resources, launcherQuery]);
+
+  const protocolInsights = useMemo(() => {
+    const buckets = {};
+    resources.forEach((resource) => {
+      const protocol = (resource.protocol || 'unknown').toLowerCase();
+      buckets[protocol] = (buckets[protocol] || 0) + 1;
+    });
+    return Object.entries(buckets)
+      .map(([protocol, count]) => ({ protocol, count }))
+      .sort((a, b) => b.count - a.count);
+  }, [resources]);
+
+  const riskIndex = useMemo(() => {
+    const weights = {
+      ssh: 2,
+      rdp: 3,
+      vnc: 3,
+      http: 2,
+      https: 1,
+      agent: 1
+    };
+    let score = 0;
+    resources.forEach((resource) => {
+      const protocol = (resource.protocol || '').toLowerCase();
+      score += weights[protocol] || 1;
+    });
+    score += activeSessions.length * 2;
+    return score;
+  }, [resources, activeSessions.length]);
+
+  const sortedSessions = useMemo(() => {
+    return [...sessions].sort((a, b) => {
+      const ta = Date.parse(a.createdAt || '') || 0;
+      const tb = Date.parse(b.createdAt || '') || 0;
+      return tb - ta;
+    });
+  }, [sessions]);
+
+  const recentSessions = useMemo(
+    () => sortedSessions.slice(0, 6),
+    [sortedSessions]
+  );
+
+  const securityAlerts = useMemo(() => {
+    const now = Date.now();
+    const audits = securityAuditItems;
+    const loginFailures30m = audits.filter((item) => {
+      if (!item?.type || !item?.createdAt) return false;
+      const t = Date.parse(item.createdAt) || 0;
+      if (t < now - 30 * 60 * 1000) return false;
+      return item.type.includes('auth.login.failure') || item.type.includes('auth.rate_limit');
+    }).length;
+
+    const staleActiveCount = activeSessions.filter((session) => {
+      const t = Date.parse(session.createdAt || '') || 0;
+      return t > 0 && t < now - 6 * 60 * 60 * 1000;
+    }).length;
+
+    const adminOps24h = audits.filter((item) => {
+      if (!item?.type || !item?.createdAt) return false;
+      const t = Date.parse(item.createdAt) || 0;
+      if (t < now - 24 * 60 * 60 * 1000) return false;
+      return item.type.startsWith('resource.') || item.type.startsWith('user.');
+    }).length;
+
+    return [
+      {
+        key: 'failures',
+        severity: loginFailures30m >= 5 ? 'critical' : loginFailures30m > 0 ? 'warning' : 'ok',
+        title: 'Login failures (30m)',
+        value: loginFailures30m,
+        hint: loginFailures30m > 0 ? 'Investigate source IP and actor patterns in audit logs.' : 'No unusual authentication noise detected.'
+      },
+      {
+        key: 'stale',
+        severity: staleActiveCount > 0 ? 'warning' : 'ok',
+        title: 'Long-running active sessions',
+        value: staleActiveCount,
+        hint: staleActiveCount > 0 ? 'Consider reviewing or rotating long-lived sessions.' : 'All active sessions are recent.'
+      },
+      {
+        key: 'adminops',
+        severity: adminOps24h >= 10 ? 'warning' : 'ok',
+        title: 'Admin changes (24h)',
+        value: adminOps24h,
+        hint: 'User/resource changes tracked for governance and forensics.'
+      },
+      {
+        key: '2fa',
+        severity: totpEnabled ? 'ok' : 'warning',
+        title: 'MFA posture',
+        value: totpEnabled ? 'enabled' : 'disabled',
+        hint: totpEnabled ? 'Your account is protected with TOTP.' : 'Enable TOTP to strengthen operator authentication.'
+      }
+    ];
+  }, [securityAuditItems, activeSessions, totpEnabled]);
+
   const filteredAuditItems = useMemo(() => {
     let items = auditItems;
     if (auditFilter) {
@@ -1098,6 +1325,16 @@ export default function App() {
       }
     }
     return item.payloadRaw || '';
+  };
+
+  const formatRelativeDate = (value) => {
+    const timestamp = Date.parse(value || '');
+    if (!timestamp) return value || 'n/a';
+    const diffSec = Math.floor((Date.now() - timestamp) / 1000);
+    if (diffSec < 60) return 'just now';
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+    return `${Math.floor(diffSec / 86400)}d ago`;
   };
 
   const renderLogin = () => (
@@ -1682,16 +1919,19 @@ export default function App() {
                 Admin
               </button>
             )}
-            <button type="button" className="ghost" onClick={() => openAudit()}>
-              View audit log
+            <button type="button" className="ghost" onClick={() => setMainTab('audit')}>
+              Audit
             </button>
             {(auth.role === 'admin' || auth.role === 'auditor') && (
-              <button type="button" className="ghost" onClick={() => openRecordings()}>
+              <button type="button" className="ghost" onClick={() => setMainTab('recordings')}>
                 Recordings
               </button>
             )}
             <button type="button" className="ghost" onClick={() => setChangePwOpen(true)}>
               Change password
+            </button>
+            <button type="button" className="ghost" onClick={onQuickRefresh} disabled={quickRefreshing}>
+              {quickRefreshing ? 'Refreshing...' : 'Quick refresh'}
             </button>
             <button type="button" className="ghost icon-btn" title={darkMode ? 'Light mode' : 'Dark mode'} onClick={toggleDarkMode}>
               {darkMode ? '☀️' : '🌙'}
@@ -1703,8 +1943,48 @@ export default function App() {
         </div>
       </header>
 
+      <nav className="console-tabs" aria-label="Main console tabs">
+        <button
+          type="button"
+          className={mainTab === 'overview' ? 'tab-btn active' : 'tab-btn'}
+          onClick={() => setMainTab('overview')}
+        >
+          Overview
+        </button>
+        <button
+          type="button"
+          className={mainTab === 'sessions' ? 'tab-btn active' : 'tab-btn'}
+          onClick={() => setMainTab('sessions')}
+        >
+          Sessions
+        </button>
+        <button
+          type="button"
+          className={mainTab === 'audit' ? 'tab-btn active' : 'tab-btn'}
+          onClick={() => setMainTab('audit')}
+        >
+          Audit
+        </button>
+        {(auth.role === 'admin' || auth.role === 'auditor') && (
+          <button
+            type="button"
+            className={mainTab === 'recordings' ? 'tab-btn active' : 'tab-btn'}
+            onClick={() => setMainTab('recordings')}
+          >
+            Recordings
+          </button>
+        )}
+        <button
+          type="button"
+          className={mainTab === 'innovations' ? 'tab-btn active' : 'tab-btn'}
+          onClick={() => setMainTab('innovations')}
+        >
+          Innovation Lab
+        </button>
+      </nav>
+
       {/* ── Dashboard Stats ── */}
-      {stats && (
+      {mainTab === 'overview' && stats && (
         <section className="stats-grid reveal">
           <div className="stat-card">
             <div className="stat-icon stat-sessions">⚡</div>
@@ -1751,6 +2031,83 @@ export default function App() {
         </section>
       )}
 
+      {mainTab === 'overview' && (
+      <section className="ops-grid">
+        <div className="panel reveal">
+          <div className="panel-header">
+            <div>
+              <h3>Security center</h3>
+              <p>Live posture and anomaly hints from audit and session activity.</p>
+            </div>
+            <div className="status-row">
+              {(auth.role === 'admin' || auth.role === 'auditor') ? (
+                <span className={`pill ${loadingSecurityAudit ? 'loading' : 'ok'}`}>
+                  {loadingSecurityAudit ? 'syncing' : `${securityAuditItems.length} feed items`}
+                </span>
+              ) : (
+                <span className="pill loading">operator scope</span>
+              )}
+            </div>
+          </div>
+          <div className="security-alert-grid">
+            {securityAlerts.map((alert) => (
+              <article className={`security-alert ${alert.severity}`} key={alert.key}>
+                <div className="security-alert-head">
+                  <h4>{alert.title}</h4>
+                  <span>{alert.value}</span>
+                </div>
+                <p className="muted">{alert.hint}</p>
+              </article>
+            ))}
+          </div>
+          <div className="security-actions">
+            <button type="button" className="secondary" onClick={() => openAudit()}>
+              Investigate in audit
+            </button>
+            {!totpEnabled && auth.role === 'admin' && (
+              <button type="button" className="ghost" onClick={() => navigate('/admin')}>
+                Configure MFA
+              </button>
+            )}
+          </div>
+          {securityAuditError && <p className="error">{securityAuditError}</p>}
+        </div>
+
+        <div className="panel reveal">
+          <div className="panel-header">
+            <div>
+              <h3>Recent sessions</h3>
+              <p>Last opened sessions, prioritized for fast intervention.</p>
+            </div>
+            <span className="pill ok">{recentSessions.length} shown</span>
+          </div>
+          <div className="recent-session-list">
+            {recentSessions.length ? (
+              recentSessions.map((session) => (
+                <article className="recent-session-item" key={`recent-${session.id}`}>
+                  <div>
+                    <h4>#{session.id} {session.user} -&gt; {session.target}</h4>
+                    <p className="muted">{session.protocol}:{session.port} - opened {formatRelativeDate(session.createdAt)}</p>
+                  </div>
+                  <div className="recent-session-actions">
+                    <span className={`pill ${session.status}`}>{session.status}</span>
+                    {session.status === 'active' ? (
+                      <button type="button" className="ghost" onClick={() => onTerminate(session.id)}>Terminate</button>
+                    ) : (
+                      <button type="button" className="ghost" onClick={() => openAudit(session.id)}>Audit</button>
+                    )}
+                  </div>
+                </article>
+              ))
+            ) : (
+              <p className="muted">No sessions yet.</p>
+            )}
+          </div>
+        </div>
+      </section>
+      )}
+
+      {mainTab === 'overview' && (
       <section className="panel resources-panel reveal">
         <div className="panel-header">
           <div>
@@ -1815,8 +2172,11 @@ export default function App() {
           )}
         </div>
       </section>
+      )}
 
+      {(mainTab === 'sessions' || mainTab === 'audit') && (
       <section className="main-grid">
+        {mainTab === 'sessions' && (
         <div className="panel reveal">
           <div className="panel-header">
             <div>
@@ -1907,7 +2267,8 @@ export default function App() {
             ))}
           </div>
         </div>
-        {auditOpen && (
+        )}
+        {mainTab === 'audit' && (
           <div className="panel audit-panel reveal">
             <div className="panel-header">
               <div>
@@ -1940,12 +2301,8 @@ export default function App() {
                   Clear filter
                 </button>
               )}
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => setAuditOpen(false)}
-              >
-                Hide
+              <button type="button" className="ghost" onClick={() => setAuditFilter(null)}>
+                Clear view
               </button>
             </div>
             <div className="audit-search-row">
@@ -2003,9 +2360,10 @@ export default function App() {
           </div>
         )}
       </section>
+      )}
 
       {/* Recordings panel */}
-      {recordingsOpen && (
+      {mainTab === 'recordings' && (auth.role === 'admin' || auth.role === 'auditor') && (
         <section className="panel reveal" style={{ marginBottom: '24px' }}>
           <div className="panel-header">
             <div>
@@ -2024,9 +2382,7 @@ export default function App() {
             <button type="button" className="secondary" onClick={() => loadRecordings()} disabled={loadingRecordings}>
               Refresh
             </button>
-            <button type="button" className="ghost" onClick={() => { setRecordingsOpen(false); setCastData(null); }}>
-              Hide
-            </button>
+            <button type="button" className="ghost" onClick={closePlayer}>Reset player</button>
           </div>
           {recordingsError && <p className="error">{recordingsError}</p>}
           <div className="audit-list">
@@ -2106,6 +2462,93 @@ export default function App() {
         </section>
       )}
 
+      {mainTab === 'innovations' && (
+        <section className="innov-grid">
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>Smart Launcher</h3>
+                <p>Find and connect to resources instantly from a unified query bar.</p>
+              </div>
+              <span className="pill ok">{smartLaunchCandidates.length} matches</span>
+            </div>
+            <label>
+              Search target, protocol or resource name
+              <input
+                type="text"
+                value={launcherQuery}
+                onChange={(event) => setLauncherQuery(event.target.value)}
+                placeholder="ex: ssh prod bastion"
+              />
+            </label>
+            <div className="recent-session-list" style={{ marginTop: '1rem' }}>
+              {smartLaunchCandidates.map((resource) => (
+                <article className="recent-session-item" key={`launch-${resource.id}`}>
+                  <div>
+                    <h4>{resource.name}</h4>
+                    <p className="muted">{resource.protocol} {resource.target}:{resource.port}</p>
+                  </div>
+                  <div className="recent-session-actions">
+                    <button
+                      type="button"
+                      className={favoriteResourceIds.includes(resource.id) ? 'secondary' : 'ghost'}
+                      onClick={() => toggleFavoriteResource(resource.id)}
+                    >
+                      {favoriteResourceIds.includes(resource.id) ? '★ Favorited' : '☆ Favorite'}
+                    </button>
+                    <button type="button" onClick={() => onConnectResource(resource)}>
+                      Launch
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>Exposure Analytics</h3>
+                <p>Protocol exposure mix and global runtime risk index.</p>
+              </div>
+              <span className={`pill ${riskIndex >= 24 ? 'offline' : riskIndex >= 14 ? 'loading' : 'ok'}`}>
+                risk {riskIndex}
+              </span>
+            </div>
+            <div className="insight-list">
+              {protocolInsights.length ? (
+                protocolInsights.map((insight) => (
+                  <div className="insight-row" key={`insight-${insight.protocol}`}>
+                    <span className="muted">{insight.protocol.toUpperCase()}</span>
+                    <strong>{insight.count}</strong>
+                  </div>
+                ))
+              ) : (
+                <p className="muted">No resources available.</p>
+              )}
+            </div>
+            <div style={{ marginTop: '1rem' }}>
+              <h4 style={{ margin: '0 0 0.6rem' }}>Favorites</h4>
+              <div className="insight-list">
+                {favoriteResources.length ? (
+                  favoriteResources.map((resource) => (
+                    <div className="insight-row" key={`fav-${resource.id}`}>
+                      <span className="muted">{resource.name}</span>
+                      <button type="button" className="ghost" onClick={() => onConnectResource(resource)}>
+                        Open
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <p className="muted">No favorite resources yet.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {mainTab === 'sessions' && (
       <section className="panel terminal-panel reveal">
         <div className="panel-header">
           <div>
@@ -2141,9 +2584,10 @@ export default function App() {
         {terminalError && <p className="error">{terminalError}</p>}
         <div className="terminal-shell" ref={terminalRef} />
       </section>
+      )}
 
       {/* Shadow session panel */}
-      {shadowSession && (
+      {mainTab === 'sessions' && shadowSession && (
         <section className="panel terminal-panel shadow-panel reveal">
           <div className="panel-header">
             <div>
