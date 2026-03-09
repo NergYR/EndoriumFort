@@ -28,11 +28,15 @@
 | 🔑 **2FA / TOTP** | RFC 6238 two-factor authentication with QR setup |
 | 🛡️ **RBAC Blueprint** | Clear role model: Platform Admin, Session Operator, Security Auditor (legacy aliases supported) |
 | 📊 **Live Dashboard** | Real-time KPI stats, session monitoring, security alerts |
-| 🧭 **Tabbed Console Navbar** | Persistent workspaces: Overview, Sessions, Audit, Recordings, Innovation Lab |
+| 🧭 **Access-First Workspace** | Open resources and operate sessions from one page without context switching |
 | 🚨 **Security Center** | Live anomaly hints (login failures, stale sessions, admin-change activity, MFA posture) |
 | ⚡ **Quick Refresh** | One-click synchronization of sessions, resources, KPIs, users, and audit feed |
 | 🕒 **Recent Sessions Queue** | Prioritized latest sessions with direct terminate/audit actions |
-| 🧪 **Innovation Lab** | Smart Launcher, favorites, and protocol exposure analytics |
+| 🧾 **Access Justification Trail** | Admin-configurable per-resource reason popup + ticket ID attached to session creation audits |
+| ✅ **Dual Approval Workflow** | Per-resource 4-eyes control with operator request submission and admin approve/deny queue |
+| 🚫 **SSH Command Guard** | Optional server-side dangerous command blocking with dedicated audit events |
+| 📈 **Adaptive Risk Policy** | Per-resource risk level + ticket requirements for high-risk access |
+| 🧠 **Behavior Anomaly Signal** | Command-volume spike detection on session close (`behavior.anomaly.command_spike`) |
 | 🌙 **Dark Mode** | Full dark theme with localStorage persistence |
 
 ---
@@ -154,22 +158,22 @@ Opens:
 ### Web Dashboard
 
 1. Login at `http://localhost:5173`
-2. **Use the tabbed navbar** to switch workspaces without collapsing panels:
-  - **Overview** — KPI stats, security center, resources, recent sessions
-  - **Sessions** — Live operations, session controls, SSH console, shadow mode
-  - **Audit** — Dedicated event investigation workspace
-  - **Recordings** — Dedicated replay workspace (admin/auditor)
-  - **Innovation Lab** — Smart launcher + exposure analytics + favorites
-  - **Tab Compass** (under the navbar) explains the goal of the selected workspace
-3. **Dashboard/Overview** — View live KPI stats, active sessions, and security alerts
-  - Use **Security Center** for anomaly triage and posture checks
-  - Use **Quick Refresh** to force sync all operational data instantly
-4. **Resources** — Click a resource tile to connect (SSH terminal, web proxy, or agent tunnel)
+2. **User console is access-first**:
+  - open a resource tile and access it directly on the **same page**
+  - web resources are rendered inline through the embedded bastion proxy view
+  - SSH sessions and live terminal stay in the same workspace (no page switching)
+3. **Access traceability**:
+  - admins can enable a per-resource popup requiring **Access Reason** (and optional **Ticket ID**)
+  - metadata is attached to bastion audit events for compliance and investigations
+4. **Dual control and adaptive policy**:
+  - admins can enforce **dual approval** per resource
+  - operators submit access requests from the same connect modal (reason + optional ticket)
+  - admins approve/deny from the built-in Access Requests queue
+  - for high-risk adaptive resources, `ticketId` is enforced server-side
 5. **Sessions** — Monitor, shadow (👁), or terminate active sessions
-  - Use **Recent Sessions** for fast intervention on the latest access events
-6. **Recordings** — Replay past SSH sessions with the animated Asciinema player
-7. **Audit** — Search and filter all security events
-8. **Admin** — Manage users, resources, permissions, credentials, and review the RBAC blueprint panel
+6. **Audit** — Search and filter all security events
+7. **Recordings** — Replay past SSH sessions with the animated Asciinema player (admin/auditor)
+8. **Admin dashboard** — Manage users/resources/permissions and view platform stats
 
 ### Agent Tunnel
 
@@ -237,7 +241,7 @@ Or simply **click a resource tile** with the 🚀 agent protocol — the fronten
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET`  | `/api/sessions` | List sessions (filterable) |
-| `POST` | `/api/sessions` | Create new session |
+| `POST` | `/api/sessions` | Create new session (`resourceId`, `justification`, `ticketId`, optional `accessRequestId`) |
 | `GET`  | `/api/sessions/:id` | Get session details |
 | `POST` | `/api/sessions/:id/terminate` | Terminate session |
 | `GET`  | `/api/sessions/stream` | SSE event stream |
@@ -251,6 +255,15 @@ Or simply **click a resource tile** with the 🚀 agent protocol — the fronten
 | `PUT`    | `/api/resources/:id` | Update resource (admin) |
 | `DELETE` | `/api/resources/:id` | Delete resource (admin) |
 | `GET`    | `/api/resources/:id/credentials` | Get stored credentials (admin/auditor) |
+
+### Access Requests
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`  | `/api/access-requests` | List access requests (admin/auditor: all, operator: own) |
+| `POST` | `/api/access-requests` | Create access request (operator/admin) |
+| `POST` | `/api/access-requests/:id/approve` | Approve request (admin) |
+| `POST` | `/api/access-requests/:id/deny` | Deny request (admin) |
 
 ### Users & Permissions
 

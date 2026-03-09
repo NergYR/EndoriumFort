@@ -1,5 +1,86 @@
 # Changelog
 
+## v0.5.17 - 2026-03-09
+### UX Refactor: Access-First User Console
+- Removed command palette workflow from user console.
+- Removed user-facing innovation-lab flow from primary navigation.
+- User experience now centers on **single-page direct access**:
+  - resources remain visible while operating
+  - web resources open inline in an embedded proxy frame
+  - SSH live console remains in-place (no route changes needed)
+- User-facing platform stats removed from the regular console.
+- Platform stats moved to the **Admin dashboard**.
+
+### Bastion Innovation: Access Justification Trail
+- Session creation now supports optional:
+  - `justification`
+  - `ticketId`
+- These fields are attached to `session.create` audit payloads.
+- New audit signal: `session.create.unjustified` is emitted when a session is opened without a reason.
+- Admins can now enable a per-resource policy: `requireAccessJustification`.
+- When enabled, operators must provide a reason in a connect popup before session start.
+- Backend now enforces this policy server-side when `resourceId` is provided at session creation.
+
+### Bastion Innovation: Dual Control, Adaptive Policy, and Guard Rails
+- Added per-resource governance flags:
+  - `requireDualApproval`
+  - `enableCommandGuard`
+  - `adaptiveAccessPolicy`
+  - `riskLevel` (`low`, `medium`, `high`, `critical`)
+- New dual-control API:
+  - `GET /api/access-requests`
+  - `POST /api/access-requests`
+  - `POST /api/access-requests/:id/approve`
+  - `POST /api/access-requests/:id/deny`
+- Session creation now enforces approved `accessRequestId` when dual approval is enabled on the target resource.
+- Adaptive policy now enforces `ticketId` on high/critical resources for non-admin operators.
+- SSH command guard now blocks high-risk command patterns and emits `command_guard.block` audit events.
+- Session close now updates user behavior baseline and emits `behavior.anomaly.command_spike` when command volume deviates strongly from historical averages.
+- Recording closure now emits a lightweight `recording.watermark` audit marker.
+
+### Files Updated
+- `frontend/src/App.jsx`: user flow redesign, inline web access, admin stats placement, resource-level justification popup
+- `backend/src/routes.cc`: session policy enforcement + access request routes + resource governance fields
+- `backend/src/app_context.cc`, `backend/src/models.h`, `backend/src/utils.h`: resource policy persistence, access-request persistence, behavior telemetry
+- `backend/src/ssh.cc`: command guard, runtime input counters, recording watermark audit event
+- `README.md`: updated usage model and bastion feature set
+
+## v0.5.16 - 2026-03-06
+### UX Redesign: Mission Board + Command Palette (Option B)
+- **Radical navigation change**:
+  - removed tab/rail-style workspace navigation from the main console
+  - introduced a **Mission Board** with large stage cards for context switching
+  - each card exposes stage, mission intent, and keyboard shortcut (`Alt+1..5`)
+- **Command Palette introduced**:
+  - open with `Ctrl/Cmd+K`
+  - fuzzy-search command list for workspace jumps and operational actions
+  - direct commands for refresh, admin access, theme toggle, password flow, and logout
+- **Keyboard-first flow**:
+  - `Alt+1..5` quick workspace switching
+  - `Escape` closes command palette
+
+### Files Updated
+- `frontend/src/App.jsx`: mission board navigation, command palette state/actions, keyboard shortcuts
+- `frontend/src/styles.css`: mission board, command palette, responsive and dark-mode styling
+- `README.md`: navigation and usage model updated
+
+## v0.5.15 - 2026-03-06
+### UX Redesign: Workflow-First Navigation
+- **Navigation model replaced**: moved from flat tab strip to a **workflow rail** with staged workspaces:
+  - Stage 1: Command Deck
+  - Stage 2: Live Access
+  - Stage 3: Investigation
+  - Stage 4: Evidence Replay
+  - Stage 5: Innovation Lab
+- **Context panel added**: each workspace now exposes current mission context, objective hint, and immediate actions.
+- **Action decluttering**: removed duplicated top-level quick jumps (audit/recordings) and consolidated key actions in the workspace brief.
+- **Responsive behavior improved**: workflow rail adapts into compact grid/stack on tablet and mobile.
+
+### Files Updated
+- `frontend/src/App.jsx`: workflow rail state mapping, contextual brief, header action simplification
+- `frontend/src/styles.css`: new workflow layout/components + responsive/dark-mode support
+- `README.md`: usage flow and navigation documentation updated
+
 ## v0.5.14 - 2026-03-06
 ### Security Hardening: Auth Transport and WebSocket Hygiene
 - **Auth cookie hardened at login/logout**:

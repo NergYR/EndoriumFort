@@ -39,6 +39,7 @@ int main() {
   register_totp_routes(app, ctx);
   register_user_routes(app, ctx);
   register_resource_routes(app, ctx);
+  register_access_request_routes(app, ctx);
   register_session_routes(app, ctx);
   register_audit_routes(app, ctx);
   register_recording_routes(app, ctx);

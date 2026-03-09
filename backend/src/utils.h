@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cctype>
 #include <ctime>
 #include <iomanip>
@@ -23,6 +24,39 @@ inline std::string now_utc() {
   gmtime_s(&utc_tm, &now_time);
 #else
   gmtime_r(&now_time, &utc_tm);
+#endif
+  std::ostringstream oss;
+  oss << std::put_time(&utc_tm, "%Y-%m-%dT%H:%M:%SZ");
+  return oss.str();
+}
+
+inline std::optional<int64_t> parse_utc_epoch_seconds(
+    const std::string &timestamp) {
+  if (timestamp.empty()) return std::nullopt;
+  std::tm utc_tm{};
+  std::istringstream iss(timestamp);
+  iss >> std::get_time(&utc_tm, "%Y-%m-%dT%H:%M:%SZ");
+  if (iss.fail()) return std::nullopt;
+#ifdef _WIN32
+  const std::time_t epoch = _mkgmtime(&utc_tm);
+#else
+  const std::time_t epoch = timegm(&utc_tm);
+#endif
+  if (epoch < 0) return std::nullopt;
+  return static_cast<int64_t>(epoch);
+}
+
+inline int64_t now_epoch_seconds() {
+  return static_cast<int64_t>(std::time(nullptr));
+}
+
+inline std::string utc_from_epoch_seconds(int64_t epoch_seconds) {
+  std::time_t raw_time = static_cast<std::time_t>(epoch_seconds);
+  std::tm utc_tm{};
+#ifdef _WIN32
+  gmtime_s(&utc_tm, &raw_time);
+#else
+  gmtime_r(&raw_time, &utc_tm);
 #endif
   std::ostringstream oss;
   oss << std::put_time(&utc_tm, "%Y-%m-%dT%H:%M:%SZ");
@@ -69,6 +103,15 @@ inline std::string build_resource_payload_json(const Resource &resource) {
   oss << "\"target\":\"" << json_escape(resource.target) << "\",";
   oss << "\"protocol\":\"" << json_escape(resource.protocol) << "\",";
   oss << "\"port\":" << resource.port;
+  oss << ",\"requireAccessJustification\":"
+      << (resource.requireAccessJustification ? "true" : "false");
+    oss << ",\"requireDualApproval\":"
+      << (resource.requireDualApproval ? "true" : "false");
+    oss << ",\"enableCommandGuard\":"
+      << (resource.enableCommandGuard ? "true" : "false");
+    oss << ",\"adaptiveAccessPolicy\":"
+      << (resource.adaptiveAccessPolicy ? "true" : "false");
+    oss << ",\"riskLevel\":\"" << json_escape(resource.riskLevel) << "\"";
   if (!resource.description.empty()) {
     oss << ",\"description\":\"" << json_escape(resource.description) << "\"";
   }
@@ -293,8 +336,29 @@ inline crow::json::wvalue resource_to_json(const Resource &resource) {
   payload["httpUsername"] = resource.httpUsername;
   payload["sshUsername"] = resource.sshUsername;
   payload["hasCredentials"] = !resource.sshPassword.empty();
+  payload["requireAccessJustification"] = resource.requireAccessJustification;
+  payload["requireDualApproval"] = resource.requireDualApproval;
+  payload["enableCommandGuard"] = resource.enableCommandGuard;
+  payload["adaptiveAccessPolicy"] = resource.adaptiveAccessPolicy;
+  payload["riskLevel"] = resource.riskLevel;
   payload["createdAt"] = resource.createdAt;
   payload["updatedAt"] = resource.updatedAt;
+  return payload;
+}
+
+inline crow::json::wvalue access_request_to_json(const AccessRequest &request) {
+  crow::json::wvalue payload;
+  payload["id"] = request.id;
+  payload["resourceId"] = request.resourceId;
+  payload["resourceName"] = request.resourceName;
+  payload["requester"] = request.requester;
+  payload["requesterRole"] = request.requesterRole;
+  payload["status"] = request.status;
+  payload["justification"] = request.justification;
+  payload["ticketId"] = request.ticketId;
+  payload["createdAt"] = request.createdAt;
+  payload["reviewedAt"] = request.reviewedAt;
+  payload["reviewedBy"] = request.reviewedBy;
   return payload;
 }
 

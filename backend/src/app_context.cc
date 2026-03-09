@@ -261,6 +261,11 @@ void AppContext::init_database() {
   sqlite.exec("ALTER TABLE resources ADD COLUMN http_password TEXT;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN ssh_username TEXT;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN ssh_password TEXT;", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN require_access_justification INTEGER DEFAULT 0;", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN require_dual_approval INTEGER DEFAULT 0;", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN enable_command_guard INTEGER DEFAULT 0;", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN adaptive_access_policy INTEGER DEFAULT 0;", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN risk_level TEXT DEFAULT 'low';", err);
 
   const std::string user_schema =
       "CREATE TABLE IF NOT EXISTS users ("
@@ -302,6 +307,48 @@ void AppContext::init_database() {
   if (!sqlite.exec(rec_schema, err))
     std::cerr << "SQLite session_recordings schema failed: " << err << '\n';
 
+  const std::string access_req_schema =
+      "CREATE TABLE IF NOT EXISTS access_requests ("
+      "id INTEGER PRIMARY KEY,"
+      "resource_id INTEGER NOT NULL,"
+      "resource_name TEXT,"
+      "requester TEXT NOT NULL,"
+      "requester_role TEXT NOT NULL,"
+      "status TEXT NOT NULL,"
+      "justification TEXT,"
+      "ticket_id TEXT,"
+      "created_at TEXT NOT NULL,"
+      "reviewed_at TEXT,"
+      "reviewed_by TEXT"
+      ");";
+  if (!sqlite.exec(access_req_schema, err))
+    std::cerr << "SQLite access_requests schema failed: " << err << '\n';
+
+  const std::string behavior_schema =
+      "CREATE TABLE IF NOT EXISTS user_behavior_stats ("
+      "username TEXT PRIMARY KEY,"
+      "total_sessions INTEGER NOT NULL DEFAULT 0,"
+      "total_duration_ms INTEGER NOT NULL DEFAULT 0,"
+      "total_input_events INTEGER NOT NULL DEFAULT 0,"
+      "updated_at TEXT NOT NULL"
+      ");";
+  if (!sqlite.exec(behavior_schema, err))
+    std::cerr << "SQLite user_behavior_stats schema failed: " << err << '\n';
+
+  const std::string ephemeral_schema =
+      "CREATE TABLE IF NOT EXISTS ephemeral_credentials ("
+      "id INTEGER PRIMARY KEY,"
+      "resource_id INTEGER NOT NULL,"
+      "requester TEXT NOT NULL,"
+      "username TEXT NOT NULL,"
+      "status TEXT NOT NULL,"
+      "issued_at TEXT NOT NULL,"
+      "expires_at TEXT NOT NULL,"
+      "used_at TEXT"
+      ");";
+  if (!sqlite.exec(ephemeral_schema, err))
+    std::cerr << "SQLite ephemeral_credentials schema failed: " << err << '\n';
+
   // TOTP columns on users
   sqlite.exec("ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE users ADD COLUMN totp_secret TEXT;", err);
@@ -311,6 +358,8 @@ void AppContext::init_database() {
   load_resources_from_db();
   load_users_from_db();
   load_recordings_from_db();
+  load_access_requests_from_db();
+  load_ephemeral_credentials_from_db();
 }
 
 void AppContext::seed_default_admin() {
@@ -435,6 +484,78 @@ void AppContext::terminate_session(int session_id, const std::string &actor,
   event.payloadIsJson = true;
   append_audit(event);
   append_session_event(event_type, terminated);
+
+  // Behavioral baseline update: maintain per-user stats and emit anomaly
+  // events when command volume spikes significantly vs historical average.
+  const int64_t input_events = consume_session_input_events(session_id);
+  int prior_sessions = 0;
+  int64_t prior_inputs = 0;
+  bool behavior_ok = true;
+  if (sqlite.db) {
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    sqlite3_stmt *stmt = nullptr;
+    const char *select_sql =
+        "SELECT total_sessions, total_input_events FROM user_behavior_stats "
+        "WHERE username=?";
+    if (sqlite3_prepare_v2(sqlite.db, select_sql, -1, &stmt, nullptr) ==
+        SQLITE_OK) {
+      sqlite3_bind_text(stmt, 1, terminated.user.c_str(), -1, SQLITE_TRANSIENT);
+      if (sqlite3_step(stmt) == SQLITE_ROW) {
+        prior_sessions = sqlite3_column_int(stmt, 0);
+        prior_inputs = sqlite3_column_int64(stmt, 1);
+      }
+    }
+    sqlite3_finalize(stmt);
+
+    const char *upsert_sql =
+        "INSERT INTO user_behavior_stats "
+        "(username,total_sessions,total_duration_ms,total_input_events,"
+        "updated_at) "
+        "VALUES (?,1,?, ?,?) "
+        "ON CONFLICT(username) DO UPDATE SET "
+        "total_sessions=total_sessions+1,"
+        "total_duration_ms=total_duration_ms+excluded.total_duration_ms,"
+        "total_input_events=total_input_events+excluded.total_input_events,"
+        "updated_at=excluded.updated_at";
+    stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, upsert_sql, -1, &stmt, nullptr) !=
+        SQLITE_OK) {
+      behavior_ok = false;
+    } else {
+      int64_t duration_ms = 0;
+      if (!terminated.createdAt.empty() && !terminated.terminatedAt.empty()) {
+        duration_ms = 0;  // ISO conversion omitted; event counts are primary signal.
+      }
+      std::string updated_at = now_utc();
+      sqlite3_bind_text(stmt, 1, terminated.user.c_str(), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int64(stmt, 2, duration_ms);
+      sqlite3_bind_int64(stmt, 3, input_events);
+      sqlite3_bind_text(stmt, 4, updated_at.c_str(), -1, SQLITE_TRANSIENT);
+      behavior_ok = sqlite3_step(stmt) == SQLITE_DONE;
+    }
+    sqlite3_finalize(stmt);
+  }
+
+  if (behavior_ok && prior_sessions >= 5) {
+    const double avg_inputs =
+        static_cast<double>(prior_inputs) / static_cast<double>(prior_sessions);
+    if (input_events > 0 && avg_inputs > 0.0 &&
+        static_cast<double>(input_events) > avg_inputs * 3.0) {
+      AuditEvent anomaly;
+      anomaly.id = next_audit_id.fetch_add(1);
+      anomaly.type = "behavior.anomaly.command_spike";
+      anomaly.actor = terminated.user;
+      anomaly.role = "operator";
+      anomaly.createdAt = now_utc();
+      anomaly.payloadJson =
+          "{\"sessionId\":" + std::to_string(session_id) +
+          ",\"inputEvents\":" + std::to_string(input_events) +
+          ",\"historicalAvg\":" +
+          std::to_string(static_cast<int64_t>(avg_inputs)) + "}";
+      anomaly.payloadIsJson = true;
+      append_audit(anomaly);
+    }
+  }
 }
 
 // ── Resource CRUD ───────────────────────────────────────────────────────
@@ -445,7 +566,9 @@ void AppContext::load_resources_from_db() {
   const char *sql =
       "SELECT id, name, target, protocol, port, description, image_url, "
       "http_username, http_password, created_at, updated_at, "
-      "ssh_username, ssh_password FROM resources";
+      "ssh_username, ssh_password, require_access_justification, "
+      "require_dual_approval, enable_command_guard, adaptive_access_policy, "
+      "risk_level FROM resources";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite resource select failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -476,6 +599,13 @@ void AppContext::load_resources_from_db() {
       if (su) r.sshUsername = reinterpret_cast<const char *>(su);
       auto sp    = sqlite3_column_text(stmt, 12);
       if (sp) r.sshPassword = reinterpret_cast<const char *>(sp);
+      r.requireAccessJustification = sqlite3_column_int(stmt, 13) != 0;
+      r.requireDualApproval = sqlite3_column_int(stmt, 14) != 0;
+      r.enableCommandGuard = sqlite3_column_int(stmt, 15) != 0;
+      r.adaptiveAccessPolicy = sqlite3_column_int(stmt, 16) != 0;
+      auto rl = sqlite3_column_text(stmt, 17);
+      if (rl) r.riskLevel = reinterpret_cast<const char *>(rl);
+      if (r.riskLevel.empty()) r.riskLevel = "low";
       resources[r.id] = r;
       if (r.id > max_id) max_id = r.id;
     }
@@ -490,8 +620,10 @@ bool AppContext::insert_resource(const Resource &r) {
   const char *sql =
       "INSERT INTO resources (id, name, target, protocol, port, description, "
       "image_url, http_username, http_password, created_at, updated_at, "
-      "ssh_username, ssh_password) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      "ssh_username, ssh_password, require_access_justification, "
+      "require_dual_approval, enable_command_guard, adaptive_access_policy, "
+      "risk_level) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite resource insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -516,6 +648,11 @@ bool AppContext::insert_resource(const Resource &r) {
       : sqlite3_bind_text(stmt, 12, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
   r.sshPassword.empty() ? sqlite3_bind_null(stmt, 13)
       : sqlite3_bind_text(stmt, 13, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 14, r.requireAccessJustification ? 1 : 0);
+  sqlite3_bind_int(stmt, 15, r.requireDualApproval ? 1 : 0);
+  sqlite3_bind_int(stmt, 16, r.enableCommandGuard ? 1 : 0);
+  sqlite3_bind_int(stmt, 17, r.adaptiveAccessPolicy ? 1 : 0);
+  sqlite3_bind_text(stmt, 18, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite resource insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -528,7 +665,10 @@ bool AppContext::update_resource_db(const Resource &r) {
   const char *sql =
       "UPDATE resources SET name=?, target=?, protocol=?, port=?, "
       "description=?, image_url=?, http_username=?, http_password=?, "
-      "updated_at=?, ssh_username=?, ssh_password=? WHERE id=?";
+      "updated_at=?, ssh_username=?, ssh_password=?, "
+      "require_access_justification=?, require_dual_approval=?, "
+      "enable_command_guard=?, adaptive_access_policy=?, risk_level=? "
+      "WHERE id=?";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite resource update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -551,7 +691,12 @@ bool AppContext::update_resource_db(const Resource &r) {
       : sqlite3_bind_text(stmt, 10, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
   r.sshPassword.empty() ? sqlite3_bind_null(stmt, 11)
       : sqlite3_bind_text(stmt, 11, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 12, r.id);
+  sqlite3_bind_int(stmt, 12, r.requireAccessJustification ? 1 : 0);
+  sqlite3_bind_int(stmt, 13, r.requireDualApproval ? 1 : 0);
+  sqlite3_bind_int(stmt, 14, r.enableCommandGuard ? 1 : 0);
+  sqlite3_bind_int(stmt, 15, r.adaptiveAccessPolicy ? 1 : 0);
+  sqlite3_bind_text(stmt, 16, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 17, r.id);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite resource update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -882,6 +1027,251 @@ bool AppContext::update_recording_close(const SessionRecording &rec) {
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok)
     std::cerr << "SQLite recording update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+  sqlite3_finalize(stmt);
+  return ok;
+}
+
+// ── Access Requests ────────────────────────────────────────────────────
+
+void AppContext::load_access_requests_from_db() {
+  if (!sqlite.db) return;
+  std::lock_guard<std::mutex> db_lock(sqlite.mutex);
+  const char *sql =
+      "SELECT id, resource_id, resource_name, requester, requester_role, "
+      "status, justification, ticket_id, created_at, reviewed_at, reviewed_by "
+      "FROM access_requests";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite access request select failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return;
+  }
+
+  int max_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(access_request_mutex);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+      AccessRequest req;
+      req.id = sqlite3_column_int(stmt, 0);
+      req.resourceId = sqlite3_column_int(stmt, 1);
+      auto name = sqlite3_column_text(stmt, 2);
+      if (name) req.resourceName = reinterpret_cast<const char *>(name);
+      req.requester = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+      req.requesterRole =
+          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
+      req.status = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
+      auto just = sqlite3_column_text(stmt, 6);
+      if (just) req.justification = reinterpret_cast<const char *>(just);
+      auto ticket = sqlite3_column_text(stmt, 7);
+      if (ticket) req.ticketId = reinterpret_cast<const char *>(ticket);
+      req.createdAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 8));
+      auto reviewed_at = sqlite3_column_text(stmt, 9);
+      if (reviewed_at) req.reviewedAt = reinterpret_cast<const char *>(reviewed_at);
+      auto reviewed_by = sqlite3_column_text(stmt, 10);
+      if (reviewed_by) req.reviewedBy = reinterpret_cast<const char *>(reviewed_by);
+
+      access_requests[req.id] = req;
+      if (req.id > max_id) max_id = req.id;
+    }
+  }
+  sqlite3_finalize(stmt);
+  if (max_id > 0) next_access_request_id.store(max_id + 1);
+}
+
+bool AppContext::insert_access_request(const AccessRequest &req) {
+  if (!sqlite.db) return true;
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  const char *sql =
+      "INSERT INTO access_requests "
+      "(id, resource_id, resource_name, requester, requester_role, status, "
+      "justification, ticket_id, created_at, reviewed_at, reviewed_by) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite access request insert failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return false;
+  }
+  sqlite3_bind_int(stmt, 1, req.id);
+  sqlite3_bind_int(stmt, 2, req.resourceId);
+  req.resourceName.empty()
+      ? sqlite3_bind_null(stmt, 3)
+      : sqlite3_bind_text(stmt, 3, req.resourceName.c_str(), -1,
+                          SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 4, req.requester.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 5, req.requesterRole.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 6, req.status.c_str(), -1, SQLITE_TRANSIENT);
+  req.justification.empty()
+      ? sqlite3_bind_null(stmt, 7)
+      : sqlite3_bind_text(stmt, 7, req.justification.c_str(), -1,
+                          SQLITE_TRANSIENT);
+  req.ticketId.empty()
+      ? sqlite3_bind_null(stmt, 8)
+      : sqlite3_bind_text(stmt, 8, req.ticketId.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 9, req.createdAt.c_str(), -1, SQLITE_TRANSIENT);
+  req.reviewedAt.empty()
+      ? sqlite3_bind_null(stmt, 10)
+      : sqlite3_bind_text(stmt, 10, req.reviewedAt.c_str(), -1,
+                          SQLITE_TRANSIENT);
+  req.reviewedBy.empty()
+      ? sqlite3_bind_null(stmt, 11)
+      : sqlite3_bind_text(stmt, 11, req.reviewedBy.c_str(), -1,
+                          SQLITE_TRANSIENT);
+  bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+  if (!ok)
+    std::cerr << "SQLite access request insert failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+  sqlite3_finalize(stmt);
+  return ok;
+}
+
+bool AppContext::update_access_request(const AccessRequest &req) {
+  if (!sqlite.db) return true;
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  const char *sql =
+      "UPDATE access_requests SET status=?, reviewed_at=?, reviewed_by=? "
+      "WHERE id=?";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite access request update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return false;
+  }
+  sqlite3_bind_text(stmt, 1, req.status.c_str(), -1, SQLITE_TRANSIENT);
+  req.reviewedAt.empty()
+      ? sqlite3_bind_null(stmt, 2)
+      : sqlite3_bind_text(stmt, 2, req.reviewedAt.c_str(), -1,
+                          SQLITE_TRANSIENT);
+  req.reviewedBy.empty()
+      ? sqlite3_bind_null(stmt, 3)
+      : sqlite3_bind_text(stmt, 3, req.reviewedBy.c_str(), -1,
+                          SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 4, req.id);
+  bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+  if (!ok)
+    std::cerr << "SQLite access request update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+  sqlite3_finalize(stmt);
+  return ok;
+}
+
+// ── Runtime Behavior Counters ─────────────────────────────────────────
+
+void AppContext::increment_session_input_event(int session_id) {
+  if (session_id <= 0) return;
+  std::lock_guard<std::mutex> lock(behavior_mutex);
+  session_input_events[session_id] += 1;
+}
+
+int64_t AppContext::consume_session_input_events(int session_id) {
+  std::lock_guard<std::mutex> lock(behavior_mutex);
+  auto it = session_input_events.find(session_id);
+  if (it == session_input_events.end()) return 0;
+  const int64_t value = it->second;
+  session_input_events.erase(it);
+  return value;
+}
+
+// ── Ephemeral Credential Leases ───────────────────────────────────────
+
+void AppContext::load_ephemeral_credentials_from_db() {
+  if (!sqlite.db) return;
+  std::lock_guard<std::mutex> db_lock(sqlite.mutex);
+  const char *sql =
+      "SELECT id, resource_id, requester, username, status, issued_at, "
+      "expires_at, used_at FROM ephemeral_credentials";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite ephemeral credential select failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return;
+  }
+
+  int max_id = 0;
+  {
+    std::lock_guard<std::mutex> lock(ephemeral_credential_mutex);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+      EphemeralCredentialLease lease;
+      lease.id = sqlite3_column_int(stmt, 0);
+      lease.resourceId = sqlite3_column_int(stmt, 1);
+      lease.requester =
+          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+      lease.username =
+          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+      lease.status = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
+      lease.issuedAt =
+          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
+      lease.expiresAt =
+          reinterpret_cast<const char *>(sqlite3_column_text(stmt, 6));
+      auto used_at = sqlite3_column_text(stmt, 7);
+      if (used_at) lease.usedAt = reinterpret_cast<const char *>(used_at);
+      ephemeral_credentials[lease.id] = lease;
+      if (lease.id > max_id) max_id = lease.id;
+    }
+  }
+  sqlite3_finalize(stmt);
+  if (max_id > 0) next_ephemeral_credential_id.store(max_id + 1);
+}
+
+bool AppContext::insert_ephemeral_credential(
+    const EphemeralCredentialLease &lease) {
+  if (!sqlite.db) return true;
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  const char *sql =
+      "INSERT INTO ephemeral_credentials "
+      "(id, resource_id, requester, username, status, issued_at, expires_at, "
+      "used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite ephemeral credential insert failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return false;
+  }
+
+  sqlite3_bind_int(stmt, 1, lease.id);
+  sqlite3_bind_int(stmt, 2, lease.resourceId);
+  sqlite3_bind_text(stmt, 3, lease.requester.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 4, lease.username.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 5, lease.status.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 6, lease.issuedAt.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 7, lease.expiresAt.c_str(), -1, SQLITE_TRANSIENT);
+  lease.usedAt.empty()
+      ? sqlite3_bind_null(stmt, 8)
+      : sqlite3_bind_text(stmt, 8, lease.usedAt.c_str(), -1, SQLITE_TRANSIENT);
+
+  bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+  if (!ok)
+    std::cerr << "SQLite ephemeral credential insert failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+  sqlite3_finalize(stmt);
+  return ok;
+}
+
+bool AppContext::update_ephemeral_credential(
+    const EphemeralCredentialLease &lease) {
+  if (!sqlite.db) return true;
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  const char *sql =
+      "UPDATE ephemeral_credentials SET status=?, expires_at=?, used_at=? "
+      "WHERE id=?";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite ephemeral credential update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return false;
+  }
+
+  sqlite3_bind_text(stmt, 1, lease.status.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 2, lease.expiresAt.c_str(), -1, SQLITE_TRANSIENT);
+  lease.usedAt.empty()
+      ? sqlite3_bind_null(stmt, 3)
+      : sqlite3_bind_text(stmt, 3, lease.usedAt.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 4, lease.id);
+
+  bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+  if (!ok)
+    std::cerr << "SQLite ephemeral credential update failed: "
               << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
   return ok;

@@ -329,3 +329,62 @@ export async function fetchResourceCredentials(resourceId) {
   await ensureResponseOk(response, 'Failed to fetch credentials');
   return response.json();
 }
+
+export async function issueEphemeralCredential(resourceId) {
+  const response = await fetch(`/api/resources/${resourceId}/ephemeral-credentials`, {
+    method: 'POST',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to issue ephemeral credential lease');
+  return response.json();
+}
+
+export async function consumeEphemeralCredential(leaseId) {
+  const response = await fetch(`/api/ephemeral-credentials/${leaseId}/consume`, {
+    method: 'POST',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to consume ephemeral credential lease');
+  return response.json();
+}
+
+// ── Access Requests (Dual Control) ────────────────────────────────────
+
+export async function fetchAccessRequests() {
+  const response = await fetch('/api/access-requests', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch access requests');
+  return response.json();
+}
+
+export async function createAccessRequest(payload) {
+  const response = await fetch('/api/access-requests', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload)
+  });
+  await ensureResponseOk(response, 'Failed to create access request');
+  return response.json();
+}
+
+export async function approveAccessRequest(requestId) {
+  const response = await fetch(`/api/access-requests/${requestId}/approve`, {
+    method: 'POST',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to approve access request');
+  return response.json();
+}
+
+export async function denyAccessRequest(requestId) {
+  const response = await fetch(`/api/access-requests/${requestId}/deny`, {
+    method: 'POST',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to deny access request');
+  return response.json();
+}

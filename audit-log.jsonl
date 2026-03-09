@@ -27,3 +27,12 @@
 {"id":20,"type":"session.close","actor":"system","role":"system","createdAt":"2026-03-06T14:59:22Z","payload":{"sessionId":9,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-03-06T14:58:33Z","terminatedAt":"2026-03-06T14:59:22Z"}}
 {"id":21,"type":"session.create","actor":"jdoe","role":"operator","createdAt":"2026-03-06T14:59:42Z","payload":{"sessionId":10,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"active","createdAt":"2026-03-06T14:59:42Z"}}
 {"id":22,"type":"credential.access","actor":"jdoe","role":"operator","createdAt":"2026-03-06T14:59:42Z","payload":{"resourceId":4,"resourceName":"VM"}}
+{"id":1,"type":"auth.login.success","actor":"jdoe","role":"operator","createdAt":"2026-03-06T15:38:08Z","payload":{"userId":3,"username":"jdoe"}}
+{"id":2,"type":"auth.logout","actor":"jdoe","role":"operator","createdAt":"2026-03-06T15:42:21Z","payload":{"userId":3}}
+{"id":3,"type":"auth.login.success","actor":"jdoe","role":"operator","createdAt":"2026-03-06T15:42:26Z","payload":{"userId":3,"username":"jdoe"}}
+{"id":4,"type":"session.create","actor":"jdoe","role":"operator","createdAt":"2026-03-06T15:42:40Z","payload":{"sessionId":11,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"active","createdAt":"2026-03-06T15:42:40Z"}}
+{"id":5,"type":"credential.access","actor":"jdoe","role":"operator","createdAt":"2026-03-06T15:42:40Z","payload":{"resourceId":4,"resourceName":"VM"}}
+{"id":6,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-06T15:43:54Z","payload":{"userId":1,"username":"admin"}}
+{"id":7,"type":"session.terminate","actor":"admin","role":"admin","createdAt":"2026-03-06T15:44:00Z","payload":{"sessionId":10,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-03-06T14:59:42Z","terminatedAt":"2026-03-06T15:44:00Z"}}
+{"id":8,"type":"session.terminate","actor":"admin","role":"admin","createdAt":"2026-03-06T15:44:01Z","payload":{"sessionId":11,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-03-06T15:42:40Z","terminatedAt":"2026-03-06T15:44:01Z"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T14:00:26Z","payload":{"userId":1,"username":"admin"}}

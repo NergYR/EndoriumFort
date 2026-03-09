@@ -142,39 +142,90 @@ body::before {
   gap: 1rem;
 }
 
-.console-tabs {
+.workflow-kicker {
+  margin: 0;
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.mission-board {
   position: relative;
   z-index: 1;
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
-  flex-wrap: wrap;
-  padding: 0.4rem;
-  border-radius: 16px;
   border: 1px solid var(--stroke);
-  background: rgba(255, 255, 255, 0.72);
-  backdrop-filter: blur(6px);
+  border-radius: 16px;
+  background: linear-gradient(120deg, rgba(58, 100, 240, 0.08), rgba(38, 241, 255, 0.08));
+  padding: 1rem;
+  display: grid;
+  gap: 1rem;
 }
 
-.tab-btn {
-  border: 1px solid rgba(26, 43, 75, 0.2);
-  background: transparent;
-  color: var(--ink-2);
-  box-shadow: none;
-  padding: 0.5rem 0.9rem 0.6rem;
-  border-radius: 10px;
-  font-size: 0.86rem;
+.mission-headline {
   display: flex;
-  flex-direction: column;
+  justify-content: space-between;
   align-items: flex-start;
-  gap: 0.1rem;
+  gap: 1rem;
 }
 
-.tab-btn strong {
-  font-size: 0.88rem;
+.mission-headline h3 {
+  margin: 0;
+  font-size: 1.15rem;
 }
 
-.tab-kicker {
+.mission-headline p {
+  margin: 0.2rem 0 0;
+}
+
+.mission-headline-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.mission-grid {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.mission-card {
+  border: 1px solid rgba(26, 43, 75, 0.18);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink-2);
+  padding: 0.9rem;
+  box-shadow: none;
+  display: grid;
+  gap: 0.26rem;
+  text-align: left;
+}
+
+.mission-card strong {
+  font-size: 1rem;
+}
+
+.mission-card p {
+  margin: 0.2rem 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.mission-card.active {
+  background: linear-gradient(135deg, var(--brand-start), var(--brand-end));
+  border-color: transparent;
+  color: #ffffff;
+}
+
+.mission-card.active p,
+.mission-card.active .mission-stage,
+.mission-card.active .mission-shortcut {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.mission-stage {
   font-size: 0.66rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -182,36 +233,74 @@ body::before {
   color: var(--muted);
 }
 
-.tab-btn.active {
-  background: linear-gradient(135deg, var(--brand-start), var(--brand-end));
-  color: #ffffff;
-  border-color: transparent;
+.mission-shortcut {
+  margin-top: 0.35rem;
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", "Fira Code", monospace;
 }
 
-.tab-btn.active .tab-kicker {
-  color: rgba(255, 255, 255, 0.84);
+.command-palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 8vh 1rem 2rem;
 }
 
-.tab-compass {
-  position: relative;
-  z-index: 1;
+.command-palette {
+  width: min(760px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--stroke);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 1rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.command-palette-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
-  border: 1px solid var(--stroke);
-  border-radius: 14px;
-  background: linear-gradient(120deg, rgba(58, 100, 240, 0.08), rgba(38, 241, 255, 0.08));
-  padding: 0.9rem 1rem;
 }
 
-.tab-compass h3 {
+.command-palette-header h3 {
   margin: 0;
-  font-size: 1rem;
 }
 
-.tab-compass p {
-  margin: 0.2rem 0 0;
+.command-palette-list {
+  display: grid;
+  gap: 0.45rem;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+
+.command-item {
+  border: 1px solid rgba(26, 43, 75, 0.16);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink-2);
+  box-shadow: none;
+  padding: 0.65rem 0.75rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+  text-align: left;
+}
+
+.command-item strong {
+  font-size: 0.9rem;
+}
+
+.command-item span {
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .rbac-grid {
@@ -1143,6 +1232,15 @@ button:disabled {
   .admin-grid {
     grid-template-columns: 1fr;
   }
+
+  .mission-headline {
+    flex-direction: column;
+  }
+
+  .mission-headline-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 720px) {
@@ -1184,20 +1282,15 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
-  .console-tabs {
-    gap: 0.5rem;
+  .mission-grid {
+    grid-template-columns: 1fr;
   }
 
-  .tab-btn {
-    font-size: 0.8rem;
-    padding: 0.45rem 0.75rem;
+  .mission-card {
+    padding: 0.75rem;
   }
 
-  .tab-btn strong {
-    font-size: 0.8rem;
-  }
-
-  .tab-compass {
+  .command-item {
     flex-direction: column;
     align-items: flex-start;
   }
@@ -1276,6 +1369,39 @@ button:disabled {
 [data-theme="dark"] .panel {
   background: var(--panel);
   border-color: var(--stroke);
+}
+
+[data-theme="dark"] .mission-board {
+  background: linear-gradient(120deg, rgba(99, 102, 241, 0.2), rgba(34, 211, 238, 0.14));
+  border-color: var(--stroke);
+}
+
+[data-theme="dark"] .mission-card {
+  background: rgba(15, 23, 42, 0.86);
+  border-color: var(--stroke);
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .mission-card p,
+[data-theme="dark"] .mission-stage,
+[data-theme="dark"] .mission-shortcut,
+[data-theme="dark"] .command-item span {
+  color: #94a3b8;
+}
+
+[data-theme="dark"] .mission-card.active {
+  color: #ffffff;
+}
+
+[data-theme="dark"] .command-palette {
+  background: #1e293b;
+  border-color: var(--stroke);
+}
+
+[data-theme="dark"] .command-item {
+  background: #0f172a;
+  border-color: var(--stroke);
+  color: #e2e8f0;
 }
 
 [data-theme="dark"] .pill.ok {

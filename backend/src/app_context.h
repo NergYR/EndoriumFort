@@ -54,6 +54,20 @@ struct AppContext {
   std::atomic<int> next_recording_id{1};
   std::string recordings_dir = "recordings";
 
+  // ── Access requests (dual control) ──
+  std::mutex access_request_mutex;
+  std::unordered_map<int, AccessRequest> access_requests;
+  std::atomic<int> next_access_request_id{1};
+
+  // ── Runtime session behavior counters ──
+  std::mutex behavior_mutex;
+  std::unordered_map<int, int64_t> session_input_events;
+
+  // ── Ephemeral credential leases ──
+  std::mutex ephemeral_credential_mutex;
+  std::unordered_map<int, EphemeralCredentialLease> ephemeral_credentials;
+  std::atomic<int> next_ephemeral_credential_id{1};
+
   // ── Proxy cookie jar ──
   std::mutex proxy_cookie_mutex;
   std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
@@ -146,6 +160,20 @@ struct AppContext {
   bool insert_recording(const SessionRecording &rec);
   bool update_recording_close(const SessionRecording &rec);
   void load_recordings_from_db();
+
+  // ── Access request CRUD ──
+  void load_access_requests_from_db();
+  bool insert_access_request(const AccessRequest &req);
+  bool update_access_request(const AccessRequest &req);
+
+  // ── Behavior counters ──
+  void increment_session_input_event(int session_id);
+  int64_t consume_session_input_events(int session_id);
+
+  // ── Ephemeral credential lease CRUD ──
+  void load_ephemeral_credentials_from_db();
+  bool insert_ephemeral_credential(const EphemeralCredentialLease &lease);
+  bool update_ephemeral_credential(const EphemeralCredentialLease &lease);
 
   // ── Permissions ──
   std::vector<int> get_resource_permissions(int user_id);

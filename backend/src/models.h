@@ -30,8 +30,46 @@ struct Resource {
   std::string httpPassword;
   std::string sshUsername;
   std::string sshPassword;
+  bool requireAccessJustification = false;
+  bool requireDualApproval = false;
+  bool enableCommandGuard = false;
+  bool adaptiveAccessPolicy = false;
+  std::string riskLevel = "low";
   std::string createdAt;
   std::string updatedAt;
+};
+
+struct AccessRequest {
+  int id = 0;
+  int resourceId = 0;
+  std::string resourceName;
+  std::string requester;
+  std::string requesterRole;
+  std::string status = "pending";
+  std::string justification;
+  std::string ticketId;
+  std::string createdAt;
+  std::string reviewedAt;
+  std::string reviewedBy;
+};
+
+struct UserBehaviorStats {
+  std::string username;
+  int totalSessions = 0;
+  int64_t totalDurationMs = 0;
+  int64_t totalInputEvents = 0;
+  std::string updatedAt;
+};
+
+struct EphemeralCredentialLease {
+  int id = 0;
+  int resourceId = 0;
+  std::string requester;
+  std::string username;
+  std::string status = "issued";
+  std::string issuedAt;
+  std::string expiresAt;
+  std::string usedAt;
 };
 
 struct UserAccount {
@@ -102,6 +140,7 @@ struct SshConnection {
   std::atomic<bool> running{false};
   std::mutex write_mutex;
   int session_id = 0;
+  bool command_guard_enabled = false;
   // Session recording
   std::shared_ptr<SessionRecorder> recorder;
 };

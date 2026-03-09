@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import WebProxyViewer from './WebProxyViewer.jsx';
 import {
   changePassword,
   createResource,
@@ -14,6 +13,8 @@ import {
   fetchRecordingCast,
   fetchRecordings,
   fetchResourceCredentials,
+  issueEphemeralCredential,
+  consumeEphemeralCredential,
   fetchResources,
   fetchSessions,
   fetchStats,
@@ -30,7 +31,11 @@ import {
   getUserResourcePermissions,
   grantResourcePermission,
   revokeResourcePermission,
-  verify2FA
+  verify2FA,
+  fetchAccessRequests,
+  createAccessRequest,
+  approveAccessRequest,
+  denyAccessRequest
 } from './api.js';
 
 const ROLE_BLUEPRINTS = [
@@ -125,7 +130,12 @@ export default function App() {
     httpUsername: '',
     httpPassword: '',
     sshUsername: '',
-    sshPassword: ''
+    sshPassword: '',
+    requireAccessJustification: false,
+    requireDualApproval: false,
+    enableCommandGuard: false,
+    adaptiveAccessPolicy: false,
+    riskLevel: 'low'
   });
   const [editingResourceId, setEditingResourceId] = useState(null);
   const [users, setUsers] = useState([]);
@@ -141,24 +151,18 @@ export default function App() {
   const [userPermissions, setUserPermissions] = useState([]);
   const [loadingPermissions, setLoadingPermissions] = useState(false);
   const [permissionsError, setPermissionsError] = useState('');
-  const [webProxyResourceId, setWebProxyResourceId] = useState(null);
-  const [webProxyToken, setWebProxyToken] = useState(null);
-  const [webProxyResourceName, setWebProxyResourceName] = useState('');
   const [route, setRoute] = useState(() =>
     window.location.pathname ? window.location.pathname : '/'
   );
-  const [mainTab, setMainTab] = useState('overview');
-  const [launcherQuery, setLauncherQuery] = useState('');
-  const [favoriteResourceIds, setFavoriteResourceIds] = useState(() => {
-    try {
-      const raw = localStorage.getItem('endoriumfort_favorites');
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (_) {
-      return [];
-    }
-  });
+  const [mainTab, setMainTab] = useState('sessions');
+  const [inlineWebResource, setInlineWebResource] = useState(null);
+  const [accessPromptResource, setAccessPromptResource] = useState(null);
+  const [accessPromptReason, setAccessPromptReason] = useState('');
+  const [accessPromptTicketId, setAccessPromptTicketId] = useState('');
+  const [accessPromptMode, setAccessPromptMode] = useState('connect');
+  const [accessRequests, setAccessRequests] = useState([]);
+  const [loadingAccessRequests, setLoadingAccessRequests] = useState(false);
+  const [accessRequestError, setAccessRequestError] = useState('');
   // 2FA state
   const [twoFARequired, setTwoFARequired] = useState(false);
   const [totpCode, setTotpCode] = useState('');
@@ -229,7 +233,7 @@ export default function App() {
       overview: {
         title: 'Overview',
         hint: 'Use this page for global posture and rapid checks.',
-        focus: 'Review posture, recent sessions, and launcher shortcuts.'
+        focus: 'Review posture and recent sessions.'
       },
       sessions: {
         title: 'Sessions',
@@ -245,15 +249,50 @@ export default function App() {
         title: 'Recordings',
         hint: 'Replay session evidence for forensic analysis.',
         focus: 'Open SSH cast files and inspect timelines.'
-      },
-      innovations: {
-        title: 'Innovation Lab',
-        hint: 'Try workflow accelerators and exposure analytics.',
-        focus: 'Use smart launcher, favorites, and anomaly signals.'
       }
     };
     return base[mainTab] || base.overview;
   }, [mainTab]);
+
+  const missionBoardEntries = useMemo(() => {
+    const entries = [
+      {
+        id: 'sessions',
+        stage: 'Operate',
+        title: 'Live Access',
+        shortcut: 'Alt+1',
+        hint: 'Run and supervise remote sessions in real time.'
+      },
+      {
+        id: 'audit',
+        stage: 'Trace',
+        title: 'Investigation',
+        shortcut: 'Alt+2',
+        hint: 'Hunt activity trails and suspicious sequences.'
+      },
+      {
+        id: 'recordings',
+        stage: 'Evidence',
+        title: 'Replay Vault',
+        shortcut: 'Alt+3',
+        hint: 'Replay captured sessions and validate behavior.',
+        hidden: !canViewRecordings
+      }
+    ];
+
+    return entries.filter((entry) => !entry.hidden);
+  }, [canViewRecordings]);
+
+  const pendingAccessApprovals = useMemo(() => {
+    return accessRequests
+      .filter((item) => item.status === 'pending')
+      .sort((a, b) => {
+        const ta = Date.parse(a.createdAt || '') || 0;
+        const tb = Date.parse(b.createdAt || '') || 0;
+        return tb - ta;
+      })
+      .slice(0, 6);
+  }, [accessRequests]);
 
   const navigate = (path) => {
     if (window.location.pathname !== path) {
@@ -289,8 +328,25 @@ export default function App() {
   }, [darkMode]);
 
   useEffect(() => {
-    localStorage.setItem('endoriumfort_favorites', JSON.stringify(favoriteResourceIds));
-  }, [favoriteResourceIds]);
+    const onKeyDown = (event) => {
+      if (event.altKey && !event.metaKey && !event.ctrlKey) {
+        const jumpMap = {
+          '1': 'sessions',
+          '2': 'audit',
+          '3': canViewRecordings ? 'recordings' : null
+        };
+        const destination = jumpMap[event.key];
+        if (destination) {
+          event.preventDefault();
+          setMainTab(destination);
+          return;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [canViewRecordings]);
 
   // Token expiry auto-logout
   useEffect(() => {
@@ -389,6 +445,33 @@ export default function App() {
   }, [auth.token]);
 
   useEffect(() => {
+    if (!auth.token) {
+      setAccessRequests([]);
+      setLoadingAccessRequests(false);
+      return;
+    }
+    let active = true;
+    setLoadingAccessRequests(true);
+    fetchAccessRequests()
+      .then((data) => {
+        if (!active) return;
+        setAccessRequests(Array.isArray(data.items) ? data.items : []);
+        setAccessRequestError('');
+      })
+      .catch((error) => {
+        if (!active) return;
+        setAccessRequestError(error.message || 'Unable to load access requests');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoadingAccessRequests(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth.token]);
+
+  useEffect(() => {
     if (!auth.token || !canManagePlatform) {
       setUsers([]);
       setLoadingUsers(false);
@@ -468,8 +551,9 @@ export default function App() {
   };
 
   const onResourceFieldChange = (event) => {
-    const { name, value } = event.target;
-    setResourceForm((prev) => ({ ...prev, [name]: value }));
+    const { name, value, type, checked } = event.target;
+    const nextValue = type === 'checkbox' ? checked : value;
+    setResourceForm((prev) => ({ ...prev, [name]: nextValue }));
   };
 
   const onUserFieldChange = (event) => {
@@ -774,19 +858,17 @@ export default function App() {
     });
   };
 
-  const onConnectResource = async (resource) => {
+  const connectToResource = async (resource, accessMeta = {}) => {
     if (!auth.token) {
       setSessionError('Sign in to start a session.');
-      return;
+      return false;
     }
 
     // Handle web resources via proxy
     if (resource.protocol === 'http' || resource.protocol === 'https') {
-      setWebProxyResourceId(resource.id);
-      setWebProxyToken(auth.token);
-      setWebProxyResourceName(resource.name);
-      navigate('/webproxy');
-      return;
+      setInlineWebResource(resource);
+      setMainTab('sessions');
+      return true;
     }
 
     // Handle agent resources — open agent launch modal with random port
@@ -795,37 +877,153 @@ export default function App() {
       const serverUrl = window.location.origin;
       const cmd = `endoriumfort-agent connect --server ${serverUrl} --token ${auth.token} --resource ${resource.id} --local-port ${randomPort}`;
       setAgentModal({ resource, port: randomPort, command: cmd, copied: false });
-      return;
+      return true;
     }
 
     // Handle SSH/other protocols
     try {
       const payload = {
+        resourceId: resource.id,
         target: resource.target,
         user: resource.sshUsername || auth.user,
         protocol: resource.protocol,
-        port: resource.port
+        port: resource.port,
+        justification: (accessMeta.justification || '').trim(),
+        ticketId: (accessMeta.ticketId || '').trim(),
+        accessRequestId: accessMeta.accessRequestId || undefined
       };
       const created = await createSession(payload);
       setSessions((prev) => [created, ...prev]);
       setSessionError('');
+      setInlineWebResource(null);
       openTerminal(created);
 
       // Auto-inject credentials if stored in the vault
       if (resource.hasCredentials) {
         try {
-          const creds = await fetchResourceCredentials(resource.id);
+          const lease = await issueEphemeralCredential(resource.id);
+          const creds = await consumeEphemeralCredential(lease.leaseId);
           if (creds.sshPassword) {
             setSshPassword(creds.sshPassword);
             setMainTab('sessions');
             setAutoConnectSessionId(created.id);
           }
         } catch (_) {
-          // Silently fallback to manual password entry
+          // Fallback to static vault credentials if ephemeral lease fails.
+          try {
+            const creds = await fetchResourceCredentials(resource.id);
+            if (creds.sshPassword) {
+              setSshPassword(creds.sshPassword);
+              setMainTab('sessions');
+              setAutoConnectSessionId(created.id);
+            }
+          } catch (_) {
+            // Silently fallback to manual password entry
+          }
         }
       }
+      return true;
     } catch (error) {
       setSessionError(error.message || 'Unable to create session');
+      return false;
+    }
+  };
+
+  const onConnectResource = async (resource) => {
+    if (resource.requireDualApproval && normalizeRole(auth.role) !== 'admin') {
+      const approved = accessRequests.find(
+        (item) =>
+          item.resourceId === resource.id &&
+          item.requester === auth.user &&
+          item.status === 'approved'
+      );
+      if (approved) {
+        await connectToResource(resource, {
+          justification: approved.justification || '',
+          ticketId: approved.ticketId || '',
+          accessRequestId: approved.id
+        });
+        return;
+      }
+      setAccessPromptMode('request');
+      setAccessPromptResource(resource);
+      setAccessPromptReason('');
+      setAccessPromptTicketId('');
+      return;
+    }
+
+    if (resource.requireAccessJustification) {
+      setAccessPromptMode('connect');
+      setAccessPromptResource(resource);
+      setAccessPromptReason('');
+      setAccessPromptTicketId('');
+      return;
+    }
+    await connectToResource(resource);
+  };
+
+  const onSubmitAccessPrompt = async (event) => {
+    event.preventDefault();
+    if (!accessPromptResource) {
+      return;
+    }
+    const reason = accessPromptReason.trim();
+    if (!reason) {
+      setSessionError('Access reason is required for this resource.');
+      return;
+    }
+    if (accessPromptMode === 'request') {
+      try {
+        const created = await createAccessRequest({
+          resourceId: accessPromptResource.id,
+          justification: reason,
+          ticketId: accessPromptTicketId.trim()
+        });
+        setAccessRequests((prev) => [created, ...prev]);
+        setSessionError('Access request submitted. Wait for admin approval.');
+        setAccessPromptResource(null);
+        setAccessPromptReason('');
+        setAccessPromptTicketId('');
+        setAccessPromptMode('connect');
+        return;
+      } catch (error) {
+        setSessionError(error.message || 'Unable to submit access request');
+        return;
+      }
+    }
+    const connected = await connectToResource(accessPromptResource, {
+      justification: reason,
+      ticketId: accessPromptTicketId.trim()
+    });
+    if (connected) {
+      setAccessPromptResource(null);
+      setAccessPromptReason('');
+      setAccessPromptTicketId('');
+      setAccessPromptMode('connect');
+    }
+  };
+
+  const onApproveAccessRequest = async (requestId) => {
+    try {
+      const updated = await approveAccessRequest(requestId);
+      setAccessRequests((prev) =>
+        prev.map((item) => (item.id === requestId ? updated : item))
+      );
+      setAccessRequestError('');
+    } catch (error) {
+      setAccessRequestError(error.message || 'Unable to approve access request');
+    }
+  };
+
+  const onDenyAccessRequest = async (requestId) => {
+    try {
+      const updated = await denyAccessRequest(requestId);
+      setAccessRequests((prev) =>
+        prev.map((item) => (item.id === requestId ? updated : item))
+      );
+      setAccessRequestError('');
+    } catch (error) {
+      setAccessRequestError(error.message || 'Unable to deny access request');
     }
   };
 
@@ -854,7 +1052,12 @@ export default function App() {
       httpUsername: resourceForm.httpUsername.trim(),
       httpPassword: resourceForm.httpPassword,
       sshUsername: resourceForm.sshUsername.trim(),
-      sshPassword: resourceForm.sshPassword
+      sshPassword: resourceForm.sshPassword,
+      requireAccessJustification: !!resourceForm.requireAccessJustification,
+      requireDualApproval: !!resourceForm.requireDualApproval,
+      enableCommandGuard: !!resourceForm.enableCommandGuard,
+      adaptiveAccessPolicy: !!resourceForm.adaptiveAccessPolicy,
+      riskLevel: resourceForm.riskLevel || 'low'
     };
     try {
       setSavingResource(true);
@@ -878,7 +1081,12 @@ export default function App() {
         httpUsername: '',
         httpPassword: '',
         sshUsername: '',
-        sshPassword: ''
+        sshPassword: '',
+        requireAccessJustification: false,
+        requireDualApproval: false,
+        enableCommandGuard: false,
+        adaptiveAccessPolicy: false,
+        riskLevel: 'low'
       });
     } catch (error) {
       setResourceError(error.message || 'Unable to save resource');
@@ -899,7 +1107,12 @@ export default function App() {
       httpUsername: resource.httpUsername || '',
       httpPassword: '',
       sshUsername: resource.sshUsername || '',
-      sshPassword: ''
+      sshPassword: '',
+      requireAccessJustification: !!resource.requireAccessJustification,
+      requireDualApproval: !!resource.requireDualApproval,
+      enableCommandGuard: !!resource.enableCommandGuard,
+      adaptiveAccessPolicy: !!resource.adaptiveAccessPolicy,
+      riskLevel: resource.riskLevel || 'low'
     });
   };
 
@@ -1269,62 +1482,6 @@ export default function App() {
     [sessions]
   );
 
-  const toggleFavoriteResource = (resourceId) => {
-    setFavoriteResourceIds((prev) => {
-      if (prev.includes(resourceId)) {
-        return prev.filter((id) => id !== resourceId);
-      }
-      return [...prev, resourceId];
-    });
-  };
-
-  const favoriteResources = useMemo(
-    () => resources.filter((resource) => favoriteResourceIds.includes(resource.id)),
-    [resources, favoriteResourceIds]
-  );
-
-  const smartLaunchCandidates = useMemo(() => {
-    const query = launcherQuery.trim().toLowerCase();
-    if (!query) {
-      return resources.slice(0, 8);
-    }
-    return resources
-      .filter((resource) => {
-        const haystack = `${resource.name || ''} ${resource.target || ''} ${resource.protocol || ''}`.toLowerCase();
-        return haystack.includes(query);
-      })
-      .slice(0, 8);
-  }, [resources, launcherQuery]);
-
-  const protocolInsights = useMemo(() => {
-    const buckets = {};
-    resources.forEach((resource) => {
-      const protocol = (resource.protocol || 'unknown').toLowerCase();
-      buckets[protocol] = (buckets[protocol] || 0) + 1;
-    });
-    return Object.entries(buckets)
-      .map(([protocol, count]) => ({ protocol, count }))
-      .sort((a, b) => b.count - a.count);
-  }, [resources]);
-
-  const riskIndex = useMemo(() => {
-    const weights = {
-      ssh: 2,
-      rdp: 3,
-      vnc: 3,
-      http: 2,
-      https: 1,
-      agent: 1
-    };
-    let score = 0;
-    resources.forEach((resource) => {
-      const protocol = (resource.protocol || '').toLowerCase();
-      score += weights[protocol] || 1;
-    });
-    score += activeSessions.length * 2;
-    return score;
-  }, [resources, activeSessions.length]);
-
   const sortedSessions = useMemo(() => {
     return [...sessions].sort((a, b) => {
       const ta = Date.parse(a.createdAt || '') || 0;
@@ -1544,6 +1701,53 @@ export default function App() {
         </div>
       </header>
 
+      {canManagePlatform && stats && (
+        <section className="stats-grid reveal" style={{ marginBottom: '1rem' }}>
+          <div className="stat-card">
+            <div className="stat-icon stat-sessions">⚡</div>
+            <div>
+              <h4>{stats.sessions?.active || 0}</h4>
+              <p className="muted">Active sessions</p>
+            </div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-icon stat-total">📊</div>
+            <div>
+              <h4>{stats.sessions?.total || 0}</h4>
+              <p className="muted">Total sessions</p>
+            </div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-icon stat-resources">🖥️</div>
+            <div>
+              <h4>{stats.resources?.total || 0}</h4>
+              <p className="muted">Resources</p>
+            </div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-icon stat-users">👤</div>
+            <div>
+              <h4>{stats.users?.total || 0}</h4>
+              <p className="muted">Users</p>
+            </div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-icon stat-recordings">🎬</div>
+            <div>
+              <h4>{stats.recordings?.total || 0}</h4>
+              <p className="muted">Recordings</p>
+            </div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-icon stat-tokens">🔑</div>
+            <div>
+              <h4>{stats.auth?.activeTokens || 0}</h4>
+              <p className="muted">Active tokens</p>
+            </div>
+          </div>
+        </section>
+      )}
+
       {!canManagePlatform ? (
         <div className="panel reveal">
           <h3>Platform admin access required</h3>
@@ -1670,6 +1874,71 @@ export default function App() {
                   </label>
                 </>
               )}
+              <label
+                className="full"
+                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
+              >
+                <input
+                  name="requireAccessJustification"
+                  type="checkbox"
+                  checked={!!resourceForm.requireAccessJustification}
+                  onChange={onResourceFieldChange}
+                  style={{ width: 'auto' }}
+                />
+                Require reason popup before connect
+              </label>
+              <label
+                className="full"
+                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
+              >
+                <input
+                  name="requireDualApproval"
+                  type="checkbox"
+                  checked={!!resourceForm.requireDualApproval}
+                  onChange={onResourceFieldChange}
+                  style={{ width: 'auto' }}
+                />
+                Require dual approval before session start
+              </label>
+              <label
+                className="full"
+                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
+              >
+                <input
+                  name="enableCommandGuard"
+                  type="checkbox"
+                  checked={!!resourceForm.enableCommandGuard}
+                  onChange={onResourceFieldChange}
+                  style={{ width: 'auto' }}
+                />
+                Enable SSH command guard
+              </label>
+              <label
+                className="full"
+                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
+              >
+                <input
+                  name="adaptiveAccessPolicy"
+                  type="checkbox"
+                  checked={!!resourceForm.adaptiveAccessPolicy}
+                  onChange={onResourceFieldChange}
+                  style={{ width: 'auto' }}
+                />
+                Adaptive policy (extra controls by risk)
+              </label>
+              <label className="full">
+                Risk level
+                <select
+                  name="riskLevel"
+                  value={resourceForm.riskLevel}
+                  onChange={onResourceFieldChange}
+                >
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="critical">critical</option>
+                </select>
+              </label>
               <div className="resource-actions">
                 <button type="submit">
                   {savingResource
@@ -1692,7 +1961,12 @@ export default function App() {
                         httpUsername: '',
                         httpPassword: '',
                         sshUsername: '',
-                        sshPassword: ''
+                        sshPassword: '',
+                        requireAccessJustification: false,
+                        requireDualApproval: false,
+                        enableCommandGuard: false,
+                        adaptiveAccessPolicy: false,
+                        riskLevel: 'low'
                       });
                     }}
                   >
@@ -1724,6 +1998,18 @@ export default function App() {
                       {resource.description && (
                         <p className="muted">{resource.description}</p>
                       )}
+                      {resource.requireAccessJustification && (
+                        <p className="muted">Reason popup required</p>
+                      )}
+                      {resource.requireDualApproval && (
+                        <p className="muted">Dual approval required</p>
+                      )}
+                      {resource.enableCommandGuard && (
+                        <p className="muted">Command guard enabled</p>
+                      )}
+                      {resource.adaptiveAccessPolicy && (
+                        <p className="muted">Adaptive policy ({resource.riskLevel || 'low'})</p>
+                      )}
                     </div>
                     <div className="resource-actions">
                       <button
@@ -1745,6 +2031,59 @@ export default function App() {
                 ))
               ) : (
                 <p className="muted">No resources created yet.</p>
+              )}
+            </div>
+          </div>
+
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>Access Requests</h3>
+                <p>Dual-control queue and user requests.</p>
+              </div>
+              {loadingAccessRequests && <span className="pill loading">loading</span>}
+            </div>
+            {accessRequestError && <p className="error">{accessRequestError}</p>}
+            <div className="resource-list">
+              {accessRequests.length ? (
+                accessRequests.map((request) => (
+                  <article className="resource-row" key={request.id}>
+                    <div>
+                      <h4>
+                        #{request.id} {request.resourceName || `Resource ${request.resourceId}`}
+                      </h4>
+                      <p className="muted">
+                        {request.requester} • {request.status} • {request.createdAt}
+                      </p>
+                      {request.justification && (
+                        <p className="muted">{request.justification}</p>
+                      )}
+                      {request.ticketId && (
+                        <p className="muted">Ticket: {request.ticketId}</p>
+                      )}
+                    </div>
+                    {canManagePlatform && request.status === 'pending' && (
+                      <div className="resource-actions">
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => onApproveAccessRequest(request.id)}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => onDenyAccessRequest(request.id)}
+                        >
+                          Deny
+                        </button>
+                      </div>
+                    )}
+                  </article>
+                ))
+              ) : (
+                <p className="muted">No access requests yet.</p>
               )}
             </div>
           </div>
@@ -2055,19 +2394,8 @@ export default function App() {
                 Admin
               </button>
             )}
-            <button type="button" className="ghost" onClick={() => setMainTab('audit')}>
-              Audit
-            </button>
-            {canViewRecordings && (
-              <button type="button" className="ghost" onClick={() => setMainTab('recordings')}>
-                Recordings
-              </button>
-            )}
             <button type="button" className="ghost" onClick={() => setChangePwOpen(true)}>
               Change password
-            </button>
-            <button type="button" className="ghost" onClick={onQuickRefresh} disabled={quickRefreshing}>
-              {quickRefreshing ? 'Refreshing...' : 'Quick refresh'}
             </button>
             <button type="button" className="ghost icon-btn" title={darkMode ? 'Light mode' : 'Dark mode'} onClick={toggleDarkMode}>
               {darkMode ? '☀️' : '🌙'}
@@ -2079,61 +2407,41 @@ export default function App() {
         </div>
       </header>
 
-      <nav className="console-tabs" aria-label="Main console tabs">
-        <button
-          type="button"
-          className={mainTab === 'overview' ? 'tab-btn active' : 'tab-btn'}
-          onClick={() => setMainTab('overview')}
-        >
-          <span className="tab-kicker">Plan</span>
-          <strong>Overview</strong>
-        </button>
-        <button
-          type="button"
-          className={mainTab === 'sessions' ? 'tab-btn active' : 'tab-btn'}
-          onClick={() => setMainTab('sessions')}
-        >
-          <span className="tab-kicker">Operate</span>
-          <strong>Sessions</strong>
-        </button>
-        <button
-          type="button"
-          className={mainTab === 'audit' ? 'tab-btn active' : 'tab-btn'}
-          onClick={() => setMainTab('audit')}
-        >
-          <span className="tab-kicker">Trace</span>
-          <strong>Audit</strong>
-        </button>
-        {canViewRecordings && (
-          <button
-            type="button"
-            className={mainTab === 'recordings' ? 'tab-btn active' : 'tab-btn'}
-            onClick={() => setMainTab('recordings')}
-          >
-            <span className="tab-kicker">Replay</span>
-            <strong>Recordings</strong>
-          </button>
-        )}
-        <button
-          type="button"
-          className={mainTab === 'innovations' ? 'tab-btn active' : 'tab-btn'}
-          onClick={() => setMainTab('innovations')}
-        >
-          <span className="tab-kicker">Explore</span>
-          <strong>Innovation Lab</strong>
-        </button>
-      </nav>
-
-      <section className="tab-compass reveal" aria-live="polite">
-        <div>
-          <h3>{tabGuide.title}</h3>
-          <p>{tabGuide.hint}</p>
+      <section className="mission-board reveal" aria-label="Mission board navigation">
+        <div className="mission-headline">
+          <div>
+            <p className="workflow-kicker">Access Workspace</p>
+            <h3>Operate Without Context Switching</h3>
+            <p>Open a resource and access it directly on this page. No dashboard detours.</p>
+          </div>
+          <div className="mission-headline-actions">
+            <button type="button" className="ghost" onClick={onQuickRefresh} disabled={quickRefreshing}>
+              {quickRefreshing ? 'Refreshing...' : 'Refresh data'}
+            </button>
+          </div>
         </div>
+
+        <div className="mission-grid">
+          {missionBoardEntries.map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              className={mainTab === entry.id ? 'mission-card active' : 'mission-card'}
+              onClick={() => setMainTab(entry.id)}
+            >
+              <span className="mission-stage">{entry.stage}</span>
+              <strong>{entry.title}</strong>
+              <p>{entry.hint}</p>
+              <span className="mission-shortcut">{entry.shortcut}</span>
+            </button>
+          ))}
+        </div>
+
         <p className="muted">{tabGuide.focus}</p>
       </section>
 
       {/* ── Dashboard Stats ── */}
-      {mainTab === 'overview' && stats && (
+      {false && mainTab === 'overview' && stats && (
         <section className="stats-grid reveal">
           <div className="stat-card">
             <div className="stat-icon stat-sessions">⚡</div>
@@ -2180,7 +2488,7 @@ export default function App() {
         </section>
       )}
 
-      {mainTab === 'overview' && (
+      {false && mainTab === 'overview' && (
       <section className="ops-grid">
         <div className="panel reveal">
           <div className="panel-header">
@@ -2256,7 +2564,6 @@ export default function App() {
       </section>
       )}
 
-      {mainTab === 'overview' && (
       <section className="panel resources-panel reveal">
         <div className="panel-header">
           <div>
@@ -2321,7 +2628,6 @@ export default function App() {
           )}
         </div>
       </section>
-      )}
 
       {(mainTab === 'sessions' || mainTab === 'audit') && (
       <section className="main-grid">
@@ -2341,6 +2647,56 @@ export default function App() {
             </div>
           </div>
           {sessionError && <p className="error">{sessionError}</p>}
+
+          {canManagePlatform && (
+            <div style={{ marginBottom: '1rem' }}>
+              <div className="panel-header" style={{ marginBottom: '0.7rem' }}>
+                <div>
+                  <h3 style={{ fontSize: '1rem' }}>Pending Approvals</h3>
+                  <p>Latest dual-control requests awaiting admin action.</p>
+                </div>
+                <span className={`pill ${pendingAccessApprovals.length ? 'loading' : 'ok'}`}>
+                  {pendingAccessApprovals.length} pending
+                </span>
+              </div>
+              {accessRequestError && <p className="error">{accessRequestError}</p>}
+              <div className="resource-list">
+                {pendingAccessApprovals.length ? (
+                  pendingAccessApprovals.map((request) => (
+                    <article className="resource-row" key={`pending-req-${request.id}`}>
+                      <div>
+                        <h4>
+                          #{request.id} {request.resourceName || `Resource ${request.resourceId}`}
+                        </h4>
+                        <p className="muted">
+                          {request.requester} • {request.createdAt}
+                        </p>
+                        {request.justification && <p className="muted">{request.justification}</p>}
+                      </div>
+                      <div className="resource-actions">
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => onApproveAccessRequest(request.id)}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => onDenyAccessRequest(request.id)}
+                        >
+                          Deny
+                        </button>
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <p className="muted">No pending approvals.</p>
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="session-grid">
             {sessions.map((session) => (
@@ -2611,92 +2967,6 @@ export default function App() {
         </section>
       )}
 
-      {mainTab === 'innovations' && (
-        <section className="innov-grid">
-          <div className="panel reveal">
-            <div className="panel-header">
-              <div>
-                <h3>Smart Launcher</h3>
-                <p>Find and connect to resources instantly from a unified query bar.</p>
-              </div>
-              <span className="pill ok">{smartLaunchCandidates.length} matches</span>
-            </div>
-            <label>
-              Search target, protocol or resource name
-              <input
-                type="text"
-                value={launcherQuery}
-                onChange={(event) => setLauncherQuery(event.target.value)}
-                placeholder="ex: ssh prod bastion"
-              />
-            </label>
-            <div className="recent-session-list" style={{ marginTop: '1rem' }}>
-              {smartLaunchCandidates.map((resource) => (
-                <article className="recent-session-item" key={`launch-${resource.id}`}>
-                  <div>
-                    <h4>{resource.name}</h4>
-                    <p className="muted">{resource.protocol} {resource.target}:{resource.port}</p>
-                  </div>
-                  <div className="recent-session-actions">
-                    <button
-                      type="button"
-                      className={favoriteResourceIds.includes(resource.id) ? 'secondary' : 'ghost'}
-                      onClick={() => toggleFavoriteResource(resource.id)}
-                    >
-                      {favoriteResourceIds.includes(resource.id) ? '★ Favorited' : '☆ Favorite'}
-                    </button>
-                    <button type="button" onClick={() => onConnectResource(resource)}>
-                      Launch
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel reveal">
-            <div className="panel-header">
-              <div>
-                <h3>Exposure Analytics</h3>
-                <p>Protocol exposure mix and global runtime risk index.</p>
-              </div>
-              <span className={`pill ${riskIndex >= 24 ? 'offline' : riskIndex >= 14 ? 'loading' : 'ok'}`}>
-                risk {riskIndex}
-              </span>
-            </div>
-            <div className="insight-list">
-              {protocolInsights.length ? (
-                protocolInsights.map((insight) => (
-                  <div className="insight-row" key={`insight-${insight.protocol}`}>
-                    <span className="muted">{insight.protocol.toUpperCase()}</span>
-                    <strong>{insight.count}</strong>
-                  </div>
-                ))
-              ) : (
-                <p className="muted">No resources available.</p>
-              )}
-            </div>
-            <div style={{ marginTop: '1rem' }}>
-              <h4 style={{ margin: '0 0 0.6rem' }}>Favorites</h4>
-              <div className="insight-list">
-                {favoriteResources.length ? (
-                  favoriteResources.map((resource) => (
-                    <div className="insight-row" key={`fav-${resource.id}`}>
-                      <span className="muted">{resource.name}</span>
-                      <button type="button" className="ghost" onClick={() => onConnectResource(resource)}>
-                        Open
-                      </button>
-                    </div>
-                  ))
-                ) : (
-                  <p className="muted">No favorite resources yet.</p>
-                )}
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
       {mainTab === 'sessions' && (
       <section className="panel terminal-panel reveal">
         <div className="panel-header">
@@ -2735,6 +3005,35 @@ export default function App() {
       </section>
       )}
 
+      {mainTab === 'sessions' && inlineWebResource && (
+      <section className="panel reveal" style={{ marginBottom: '24px' }}>
+        <div className="panel-header">
+          <div>
+            <h3>Embedded Web Access</h3>
+            <p>
+              {inlineWebResource.name} - {inlineWebResource.protocol} {inlineWebResource.target}:{inlineWebResource.port}
+            </p>
+          </div>
+          <div className="resource-actions">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setInlineWebResource(null)}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+        <iframe
+          title={`resource-${inlineWebResource.id}`}
+          src={`/proxy/${inlineWebResource.id}/`}
+          className="proxy-iframe"
+          style={{ minHeight: '520px', borderRadius: '12px', border: '1px solid var(--stroke)' }}
+          sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals allow-top-navigation-by-user-activation"
+        />
+      </section>
+      )}
+
       {/* Shadow session panel */}
       {mainTab === 'sessions' && shadowSession && (
         <section className="panel terminal-panel shadow-panel reveal">
@@ -2757,6 +3056,67 @@ export default function App() {
           </div>
           <div className="terminal-shell shadow-terminal" ref={shadowTermRef} />
         </section>
+      )}
+
+      {accessPromptResource && (
+        <div
+          className="modal-overlay"
+          onClick={() => {
+            setAccessPromptResource(null);
+            setAccessPromptMode('connect');
+          }}
+        >
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>
+              {accessPromptMode === 'request'
+                ? 'Approval Request Required'
+                : 'Connection Justification Required'}
+            </h3>
+            <p className="muted" style={{ marginTop: 0 }}>
+              {accessPromptMode === 'request'
+                ? `${accessPromptResource.name} requires an approval workflow before session start.`
+                : `${accessPromptResource.name} requires an access reason before opening the session.`}
+            </p>
+            <form onSubmit={onSubmitAccessPrompt}>
+              <label>
+                Access reason
+                <input
+                  type="text"
+                  value={accessPromptReason}
+                  onChange={(event) => setAccessPromptReason(event.target.value)}
+                  placeholder="Describe why you need this access"
+                  required
+                />
+              </label>
+              <label>
+                Ticket / Change ID (optional)
+                <input
+                  type="text"
+                  value={accessPromptTicketId}
+                  onChange={(event) => setAccessPromptTicketId(event.target.value)}
+                  placeholder="INC-1234 / CHG-5678"
+                />
+              </label>
+              <div style={{ display: 'flex', gap: '0.8rem', marginTop: '0.8rem' }}>
+                <button type="submit">
+                  {accessPromptMode === 'request' ? 'Submit request' : 'Continue'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    setAccessPromptResource(null);
+                    setAccessPromptReason('');
+                    setAccessPromptTicketId('');
+                    setAccessPromptMode('connect');
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
       {/* Agent launch modal */}
@@ -2866,16 +3226,6 @@ export default function App() {
   }
   if (route === '/admin') {
     return renderAdmin();
-  }
-  if (route === '/webproxy') {
-    return (
-      <WebProxyViewer
-        resourceId={webProxyResourceId}
-        token={webProxyToken}
-        resourceName={webProxyResourceName}
-        onNavigate={navigate}
-      />
-    );
   }
   return renderMain();
 }

@@ -11,6 +11,11 @@
 #include <fstream>
 #include <sstream>
 
+namespace {
+constexpr int64_t kApprovedAccessTtlSeconds = 3600;
+constexpr int64_t kEphemeralLeaseTtlSeconds = 120;
+}
+
 // ══════════════════════════════════════════════════════════════════════
 //  Health
 // ══════════════════════════════════════════════════════════════════════
@@ -556,6 +561,27 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
         if (body.has("sshUsername")) ssh_username = body["sshUsername"].s();
         std::string ssh_password;
         if (body.has("sshPassword")) ssh_password = body["sshPassword"].s();
+        bool require_access_justification = false;
+        if (body.has("requireAccessJustification")) {
+          require_access_justification = body["requireAccessJustification"].b();
+        }
+        bool require_dual_approval = false;
+        if (body.has("requireDualApproval")) {
+          require_dual_approval = body["requireDualApproval"].b();
+        }
+        bool enable_command_guard = false;
+        if (body.has("enableCommandGuard")) {
+          enable_command_guard = body["enableCommandGuard"].b();
+        }
+        bool adaptive_access_policy = false;
+        if (body.has("adaptiveAccessPolicy")) {
+          adaptive_access_policy = body["adaptiveAccessPolicy"].b();
+        }
+        std::string risk_level = "low";
+        if (body.has("riskLevel")) risk_level = to_lower(body["riskLevel"].s());
+        if (!is_allowed_role(risk_level, {"low", "medium", "high", "critical"})) {
+          return crow::response(400, "Invalid riskLevel");
+        }
 
         if (name.empty() || target.empty() || protocol.empty())
           return crow::response(400, "Missing name, target, or protocol");
@@ -590,6 +616,11 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
         resource.httpPassword = http_password;
         resource.sshUsername = ssh_username;
         resource.sshPassword = ssh_password;
+        resource.requireAccessJustification = require_access_justification;
+        resource.requireDualApproval = require_dual_approval;
+        resource.enableCommandGuard = enable_command_guard;
+        resource.adaptiveAccessPolicy = adaptive_access_policy;
+        resource.riskLevel = risk_level;
         resource.createdAt = now_utc();
         resource.updatedAt = resource.createdAt;
 
@@ -642,6 +673,27 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
             if (body.has("sshUsername")) ssh_username = body["sshUsername"].s();
             std::string ssh_password;
             if (body.has("sshPassword")) ssh_password = body["sshPassword"].s();
+            bool require_access_justification = false;
+            if (body.has("requireAccessJustification")) {
+              require_access_justification = body["requireAccessJustification"].b();
+            }
+            bool require_dual_approval = false;
+            if (body.has("requireDualApproval")) {
+              require_dual_approval = body["requireDualApproval"].b();
+            }
+            bool enable_command_guard = false;
+            if (body.has("enableCommandGuard")) {
+              enable_command_guard = body["enableCommandGuard"].b();
+            }
+            bool adaptive_access_policy = false;
+            if (body.has("adaptiveAccessPolicy")) {
+              adaptive_access_policy = body["adaptiveAccessPolicy"].b();
+            }
+            std::string risk_level = "low";
+            if (body.has("riskLevel")) risk_level = to_lower(body["riskLevel"].s());
+            if (!is_allowed_role(risk_level, {"low", "medium", "high", "critical"})) {
+              return crow::response(400, "Invalid riskLevel");
+            }
 
             if (name.empty() || target.empty() || protocol.empty())
               return crow::response(400, "Missing name, target, or protocol");
@@ -678,6 +730,11 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
               resource.sshUsername = ssh_username;
               // Only update sshPassword if provided (non-empty)
               if (!ssh_password.empty()) resource.sshPassword = ssh_password;
+              resource.requireAccessJustification = require_access_justification;
+              resource.requireDualApproval = require_dual_approval;
+              resource.enableCommandGuard = enable_command_guard;
+              resource.adaptiveAccessPolicy = adaptive_access_policy;
+              resource.riskLevel = risk_level;
               resource.updatedAt = now_utc();
               it->second = resource;
             }
@@ -732,6 +789,238 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
             crow::json::wvalue payload;
             payload["status"] = "deleted";
             payload["id"] = resource_id;
+            return crow::response{payload};
+          });
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  Access Requests
+// ══════════════════════════════════════════════════════════════════════
+
+void register_access_request_routes(CrowApp &app, AppContext &ctx) {
+  // GET /api/access-requests
+  CROW_ROUTE(app, "/api/access-requests").methods(crow::HTTPMethod::Get)(
+      [&ctx](const crow::request &request) {
+        auto auth = ctx.find_auth(request);
+        if (!auth) return crow::response(401, "Unauthorized");
+        if (!is_allowed_user_role(auth->role, {"admin", "operator", "auditor"})) {
+          return crow::response(403, "Forbidden");
+        }
+
+        std::vector<AccessRequest> items;
+        std::vector<AccessRequest> expired_to_persist;
+        {
+          std::lock_guard<std::mutex> lock(ctx.access_request_mutex);
+          items.reserve(ctx.access_requests.size());
+          const int64_t now_epoch = now_epoch_seconds();
+          for (auto &entry : ctx.access_requests) {
+            auto &request_item = entry.second;
+            if (request_item.status == "approved") {
+              const auto approved_at =
+                  parse_utc_epoch_seconds(request_item.reviewedAt);
+              if (approved_at && (now_epoch - *approved_at) >
+                                     kApprovedAccessTtlSeconds) {
+                request_item.status = "expired";
+                expired_to_persist.push_back(request_item);
+              }
+            }
+            if (!is_user_role(auth->role, "admin") &&
+                !is_user_role(auth->role, "auditor") &&
+                request_item.requester != auth->user) {
+              continue;
+            }
+            items.push_back(request_item);
+          }
+        }
+
+        for (const auto &expired : expired_to_persist) {
+          ctx.update_access_request(expired);
+          AuditEvent event;
+          event.id = ctx.next_audit_id.fetch_add(1);
+          event.type = "access_request.expire";
+          event.actor = "system";
+          event.role = "system";
+          event.createdAt = now_utc();
+          event.payloadJson = "{\"id\":" + std::to_string(expired.id) +
+                              ",\"resourceId\":" +
+                              std::to_string(expired.resourceId) + "}";
+          event.payloadIsJson = true;
+          ctx.append_audit(event);
+        }
+        std::sort(items.begin(), items.end(),
+                  [](const AccessRequest &a, const AccessRequest &b) {
+                    return a.id > b.id;
+                  });
+
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["items"] = crow::json::wvalue::list();
+        for (size_t i = 0; i < items.size(); ++i) {
+          payload["items"][static_cast<int>(i)] = access_request_to_json(items[i]);
+        }
+        return crow::response{payload};
+      });
+
+  // POST /api/access-requests
+  CROW_ROUTE(app, "/api/access-requests").methods(crow::HTTPMethod::Post)(
+      [&ctx](const crow::request &request) {
+        auto auth = ctx.find_auth(request);
+        if (!auth) return crow::response(401, "Unauthorized");
+        if (!is_allowed_user_role(auth->role, {"operator", "admin"})) {
+          return crow::response(403, "Forbidden");
+        }
+
+        auto body = crow::json::load(request.body);
+        if (!body) return crow::response(400, "Invalid JSON body");
+        if (!body.has("resourceId")) return crow::response(400, "Missing resourceId");
+
+        const int resource_id = body["resourceId"].i();
+        std::string justification =
+            body.has("justification") ? std::string(body["justification"].s()) : "";
+        std::string ticket_id =
+            body.has("ticketId") ? std::string(body["ticketId"].s()) : "";
+
+        if (justification.empty()) {
+          return crow::response(400, "justification is required for access requests");
+        }
+        if (justification.size() > 280)
+          return crow::response(400, "justification is too long (max 280 chars)");
+        if (ticket_id.size() > 80)
+          return crow::response(400, "ticketId is too long (max 80 chars)");
+
+        Resource resource;
+        {
+          std::lock_guard<std::mutex> lock(ctx.resource_mutex);
+          auto it = ctx.resources.find(resource_id);
+          if (it == ctx.resources.end()) return crow::response(404, "Resource not found");
+          resource = it->second;
+        }
+
+        if (!is_user_role(auth->role, "admin")) {
+          auto allowed = ctx.get_resource_permissions(auth->userId);
+          if (std::find(allowed.begin(), allowed.end(), resource_id) == allowed.end()) {
+            return crow::response(403, "Forbidden");
+          }
+        }
+
+        AccessRequest req;
+        req.id = ctx.next_access_request_id.fetch_add(1);
+        req.resourceId = resource.id;
+        req.resourceName = resource.name;
+        req.requester = auth->user;
+        req.requesterRole = auth->role;
+        req.status = "pending";
+        req.justification = justification;
+        req.ticketId = ticket_id;
+        req.createdAt = now_utc();
+
+        {
+          std::lock_guard<std::mutex> lock(ctx.access_request_mutex);
+          ctx.access_requests[req.id] = req;
+        }
+        if (!ctx.insert_access_request(req)) {
+          return crow::response(500, "Failed to persist access request");
+        }
+
+        AuditEvent event;
+        event.id = ctx.next_audit_id.fetch_add(1);
+        event.type = "access_request.create";
+        event.actor = auth->user;
+        event.role = auth->role;
+        event.createdAt = now_utc();
+        event.payloadJson = "{\"id\":" + std::to_string(req.id) +
+                            ",\"resourceId\":" + std::to_string(req.resourceId) +
+                            ",\"status\":\"pending\"}";
+        event.payloadIsJson = true;
+        ctx.append_audit(event);
+
+        crow::json::wvalue payload = access_request_to_json(req);
+        return crow::response{payload};
+      });
+
+  // POST /api/access-requests/<int>/approve
+  CROW_ROUTE(app, "/api/access-requests/<int>/approve")
+      .methods(crow::HTTPMethod::Post)(
+          [&ctx](const crow::request &request, int req_id) {
+            auto auth = ctx.find_auth(request);
+            if (!auth) return crow::response(401, "Unauthorized");
+            if (!is_allowed_user_role(auth->role, {"admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+
+            AccessRequest req;
+            {
+              std::lock_guard<std::mutex> lock(ctx.access_request_mutex);
+              auto it = ctx.access_requests.find(req_id);
+              if (it == ctx.access_requests.end()) {
+                return crow::response(404, "Access request not found");
+              }
+              req = it->second;
+              req.status = "approved";
+              req.reviewedAt = now_utc();
+              req.reviewedBy = auth->user;
+              it->second = req;
+            }
+            if (!ctx.update_access_request(req)) {
+              return crow::response(500, "Failed to persist decision");
+            }
+
+            AuditEvent event;
+            event.id = ctx.next_audit_id.fetch_add(1);
+            event.type = "access_request.approve";
+            event.actor = auth->user;
+            event.role = auth->role;
+            event.createdAt = now_utc();
+            event.payloadJson = "{\"id\":" + std::to_string(req.id) +
+                                ",\"resourceId\":" + std::to_string(req.resourceId) +
+                                ",\"requester\":\"" + json_escape(req.requester) + "\"}";
+            event.payloadIsJson = true;
+            ctx.append_audit(event);
+
+            crow::json::wvalue payload = access_request_to_json(req);
+            return crow::response{payload};
+          });
+
+  // POST /api/access-requests/<int>/deny
+  CROW_ROUTE(app, "/api/access-requests/<int>/deny")
+      .methods(crow::HTTPMethod::Post)(
+          [&ctx](const crow::request &request, int req_id) {
+            auto auth = ctx.find_auth(request);
+            if (!auth) return crow::response(401, "Unauthorized");
+            if (!is_allowed_user_role(auth->role, {"admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+
+            AccessRequest req;
+            {
+              std::lock_guard<std::mutex> lock(ctx.access_request_mutex);
+              auto it = ctx.access_requests.find(req_id);
+              if (it == ctx.access_requests.end()) {
+                return crow::response(404, "Access request not found");
+              }
+              req = it->second;
+              req.status = "denied";
+              req.reviewedAt = now_utc();
+              req.reviewedBy = auth->user;
+              it->second = req;
+            }
+            if (!ctx.update_access_request(req)) {
+              return crow::response(500, "Failed to persist decision");
+            }
+
+            AuditEvent event;
+            event.id = ctx.next_audit_id.fetch_add(1);
+            event.type = "access_request.deny";
+            event.actor = auth->user;
+            event.role = auth->role;
+            event.createdAt = now_utc();
+            event.payloadJson = "{\"id\":" + std::to_string(req.id) +
+                                ",\"resourceId\":" + std::to_string(req.resourceId) +
+                                ",\"requester\":\"" + json_escape(req.requester) + "\"}";
+            event.payloadIsJson = true;
+            ctx.append_audit(event);
+
+            crow::json::wvalue payload = access_request_to_json(req);
             return crow::response{payload};
           });
 }
@@ -815,12 +1104,131 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
         std::string target = body["target"].s();
         std::string user = body["user"].s();
         std::string protocol = body["protocol"].s();
+        std::string justification = body.has("justification")
+                                        ? std::string(body["justification"].s())
+                                        : "";
+        std::string ticket_id = body.has("ticketId")
+                                    ? std::string(body["ticketId"].s())
+                                    : "";
+        int resource_id = 0;
+        if (body.has("resourceId")) resource_id = body["resourceId"].i();
+        int access_request_id = 0;
+        if (body.has("accessRequestId")) access_request_id = body["accessRequestId"].i();
         int port = 22;
         if (body.has("port")) port = body["port"].i();
         if (target.empty() || user.empty() || protocol.empty())
           return crow::response(400, "Missing target, user, or protocol");
         if (port <= 0 || port > 65535)
           return crow::response(400, "Invalid port");
+        if (justification.size() > 280)
+          return crow::response(400, "justification is too long (max 280 chars)");
+        if (ticket_id.size() > 80)
+          return crow::response(400, "ticketId is too long (max 80 chars)");
+
+        bool justification_required = false;
+        bool dual_approval_required = false;
+        bool adaptive_policy_enabled = false;
+        std::string risk_level = "low";
+        if (resource_id > 0) {
+          Resource resource;
+          {
+            std::lock_guard<std::mutex> lock(ctx.resource_mutex);
+            auto it = ctx.resources.find(resource_id);
+            if (it == ctx.resources.end()) {
+              return crow::response(404, "Resource not found");
+            }
+            resource = it->second;
+          }
+
+          // Non-admin users can only open sessions on assigned resources.
+          if (!is_user_role(auth->role, "admin")) {
+            auto allowed = ctx.get_resource_permissions(auth->userId);
+            if (std::find(allowed.begin(), allowed.end(), resource_id) ==
+                allowed.end()) {
+              return crow::response(403, "Forbidden");
+            }
+          }
+
+          if (resource.target != target || resource.protocol != protocol ||
+              resource.port != port) {
+            return crow::response(
+                400,
+                "resourceId does not match target/protocol/port payload");
+          }
+          justification_required = resource.requireAccessJustification;
+          dual_approval_required = resource.requireDualApproval;
+          adaptive_policy_enabled = resource.adaptiveAccessPolicy;
+          risk_level = to_lower(resource.riskLevel);
+        }
+        if (justification_required && justification.empty()) {
+          return crow::response(
+              400,
+              "This resource requires an access justification before connect");
+        }
+
+        if (dual_approval_required && !is_user_role(auth->role, "admin")) {
+          if (access_request_id <= 0) {
+            return crow::response(
+                400,
+                "This resource requires dual approval: provide an approved accessRequestId");
+          }
+          AccessRequest req;
+          {
+            std::lock_guard<std::mutex> lock(ctx.access_request_mutex);
+            auto it = ctx.access_requests.find(access_request_id);
+            if (it == ctx.access_requests.end()) {
+              return crow::response(404, "Access request not found");
+            }
+            req = it->second;
+          }
+
+          if (req.status == "approved") {
+            const int64_t now_epoch = now_epoch_seconds();
+            const auto approved_at =
+                parse_utc_epoch_seconds(req.reviewedAt);
+            if (approved_at && (now_epoch - *approved_at) >
+                                   kApprovedAccessTtlSeconds) {
+              req.status = "expired";
+              {
+                std::lock_guard<std::mutex> lock(ctx.access_request_mutex);
+                auto it = ctx.access_requests.find(access_request_id);
+                if (it != ctx.access_requests.end()) {
+                  it->second = req;
+                }
+              }
+              ctx.update_access_request(req);
+
+              AuditEvent expire_event;
+              expire_event.id = ctx.next_audit_id.fetch_add(1);
+              expire_event.type = "access_request.expire";
+              expire_event.actor = "system";
+              expire_event.role = "system";
+              expire_event.createdAt = now_utc();
+              expire_event.payloadJson =
+                  "{\"id\":" + std::to_string(req.id) +
+                  ",\"resourceId\":" + std::to_string(req.resourceId) +
+                  "}";
+              expire_event.payloadIsJson = true;
+              ctx.append_audit(expire_event);
+            }
+          }
+
+          if (req.status != "approved") {
+            return crow::response(403, "Access request is not approved");
+          }
+          if (req.requester != auth->user || req.resourceId != resource_id) {
+            return crow::response(403, "Access request does not match requester/resource");
+          }
+        }
+
+        if (adaptive_policy_enabled && !is_user_role(auth->role, "admin")) {
+          if ((risk_level == "high" || risk_level == "critical") &&
+              ticket_id.empty()) {
+            return crow::response(
+                400,
+                "High-risk resources require a ticketId under adaptive policy");
+          }
+        }
 
         Session session;
         session.id = ctx.next_session_id.fetch_add(1);
@@ -845,9 +1253,44 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
         event.role = auth->role;
         event.createdAt = now_utc();
         event.payloadJson = build_session_payload_json(session);
+        if (!justification.empty() || !ticket_id.empty()) {
+          if (!event.payloadJson.empty() && event.payloadJson.back() == '}') {
+            event.payloadJson.pop_back();
+          }
+          if (!justification.empty()) {
+            event.payloadJson += ",\"justification\":\"" +
+                                 json_escape(justification) + "\"";
+          }
+          if (!ticket_id.empty()) {
+            event.payloadJson +=
+                ",\"ticketId\":\"" + json_escape(ticket_id) + "\"";
+          }
+          event.payloadJson += "}";
+        }
+        if (access_request_id > 0) {
+          if (!event.payloadJson.empty() && event.payloadJson.back() == '}') {
+            event.payloadJson.pop_back();
+          }
+          event.payloadJson += ",\"accessRequestId\":" +
+                               std::to_string(access_request_id) + "}";
+        }
         event.payloadIsJson = true;
         ctx.append_audit(event);
         ctx.append_session_event("session.create", session);
+
+        // Compliance signal: track sessions opened without explicit reason.
+        if (justification.empty()) {
+          AuditEvent reason_event;
+          reason_event.id = ctx.next_audit_id.fetch_add(1);
+          reason_event.type = "session.create.unjustified";
+          reason_event.actor = auth->user;
+          reason_event.role = auth->role;
+          reason_event.createdAt = now_utc();
+          reason_event.payloadJson = "{\"sessionId\":" +
+                                     std::to_string(session.id) + "}";
+          reason_event.payloadIsJson = true;
+          ctx.append_audit(reason_event);
+        }
 
         crow::json::wvalue payload = session_to_json(session);
         return crow::response{payload};
@@ -1394,4 +1837,178 @@ void register_stats_routes(CrowApp &app, AppContext &ctx) {
         payload["hasCredentials"] = !target_resource.sshPassword.empty();
         return crow::response{payload};
       });
+
+  // POST /api/resources/<int>/ephemeral-credentials — issue one-time lease
+  CROW_ROUTE(app, "/api/resources/<int>/ephemeral-credentials")
+      .methods(crow::HTTPMethod::Post)(
+          [&ctx](const crow::request &request, int resource_id) {
+            auto auth = ctx.find_auth(request);
+            if (!auth) return crow::response(401, "Unauthorized");
+            if (!is_allowed_user_role(auth->role, {"operator", "admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+
+            if (!is_user_role(auth->role, "admin")) {
+              auto allowed_ids = ctx.get_resource_permissions(auth->userId);
+              if (std::find(allowed_ids.begin(), allowed_ids.end(),
+                            resource_id) == allowed_ids.end()) {
+                return crow::response(403, "No access to this resource");
+              }
+            }
+
+            Resource target_resource;
+            {
+              std::lock_guard<std::mutex> lock(ctx.resource_mutex);
+              auto it = ctx.resources.find(resource_id);
+              if (it == ctx.resources.end()) {
+                return crow::response(404, "Resource not found");
+              }
+              target_resource = it->second;
+            }
+
+            if (to_lower(target_resource.protocol) != "ssh") {
+              return crow::response(
+                  400,
+                  "Ephemeral credential lease is only available for SSH resources");
+            }
+            if (target_resource.sshUsername.empty() ||
+                target_resource.sshPassword.empty()) {
+              return crow::response(
+                  400,
+                  "Resource has no vaulted SSH credentials to lease");
+            }
+
+            const int64_t now_epoch = now_epoch_seconds();
+            EphemeralCredentialLease lease;
+            lease.id = ctx.next_ephemeral_credential_id.fetch_add(1);
+            lease.resourceId = resource_id;
+            lease.requester = auth->user;
+            lease.username = target_resource.sshUsername;
+            lease.status = "issued";
+            lease.issuedAt = now_utc();
+            lease.expiresAt =
+                utc_from_epoch_seconds(now_epoch + kEphemeralLeaseTtlSeconds);
+
+            {
+              std::lock_guard<std::mutex> lock(ctx.ephemeral_credential_mutex);
+              ctx.ephemeral_credentials[lease.id] = lease;
+            }
+            if (!ctx.insert_ephemeral_credential(lease)) {
+              return crow::response(500, "Failed to persist lease");
+            }
+
+            AuditEvent event;
+            event.id = ctx.next_audit_id.fetch_add(1);
+            event.type = "credential.ephemeral.issue";
+            event.actor = auth->user;
+            event.role = auth->role;
+            event.createdAt = now_utc();
+            event.payloadJson =
+                "{\"leaseId\":" + std::to_string(lease.id) +
+                ",\"resourceId\":" + std::to_string(resource_id) +
+                ",\"expiresAt\":\"" + json_escape(lease.expiresAt) +
+                "\"}";
+            event.payloadIsJson = true;
+            ctx.append_audit(event);
+
+            crow::json::wvalue payload;
+            payload["status"] = "ok";
+            payload["leaseId"] = lease.id;
+            payload["resourceId"] = resource_id;
+            payload["username"] = lease.username;
+            payload["expiresAt"] = lease.expiresAt;
+            payload["ttlSeconds"] = static_cast<int>(kEphemeralLeaseTtlSeconds);
+            return crow::response{payload};
+          });
+
+  // POST /api/ephemeral-credentials/<int>/consume — one-time secret reveal
+  CROW_ROUTE(app, "/api/ephemeral-credentials/<int>/consume")
+      .methods(crow::HTTPMethod::Post)(
+          [&ctx](const crow::request &request, int lease_id) {
+            auto auth = ctx.find_auth(request);
+            if (!auth) return crow::response(401, "Unauthorized");
+            if (!is_allowed_user_role(auth->role, {"operator", "admin"})) {
+              return crow::response(403, "Forbidden");
+            }
+
+            EphemeralCredentialLease lease;
+            {
+              std::lock_guard<std::mutex> lock(ctx.ephemeral_credential_mutex);
+              auto it = ctx.ephemeral_credentials.find(lease_id);
+              if (it == ctx.ephemeral_credentials.end()) {
+                return crow::response(404, "Lease not found");
+              }
+              lease = it->second;
+            }
+
+            if (!is_user_role(auth->role, "admin") && lease.requester != auth->user) {
+              return crow::response(403, "Lease requester mismatch");
+            }
+            if (lease.status != "issued") {
+              return crow::response(403, "Lease is not consumable");
+            }
+
+            const int64_t now_epoch = now_epoch_seconds();
+            const auto expiry_epoch = parse_utc_epoch_seconds(lease.expiresAt);
+            if (expiry_epoch && now_epoch > *expiry_epoch) {
+              lease.status = "expired";
+              {
+                std::lock_guard<std::mutex> lock(ctx.ephemeral_credential_mutex);
+                auto it = ctx.ephemeral_credentials.find(lease_id);
+                if (it != ctx.ephemeral_credentials.end()) it->second = lease;
+              }
+              ctx.update_ephemeral_credential(lease);
+              return crow::response(403, "Lease has expired");
+            }
+
+            Resource target_resource;
+            {
+              std::lock_guard<std::mutex> lock(ctx.resource_mutex);
+              auto it = ctx.resources.find(lease.resourceId);
+              if (it == ctx.resources.end()) {
+                return crow::response(404, "Resource not found");
+              }
+              target_resource = it->second;
+            }
+
+            if (target_resource.sshUsername.empty() ||
+                target_resource.sshPassword.empty()) {
+              return crow::response(
+                  400,
+                  "Resource has no vaulted SSH credentials to consume");
+            }
+
+            lease.status = "consumed";
+            lease.usedAt = now_utc();
+            {
+              std::lock_guard<std::mutex> lock(ctx.ephemeral_credential_mutex);
+              auto it = ctx.ephemeral_credentials.find(lease_id);
+              if (it != ctx.ephemeral_credentials.end()) it->second = lease;
+            }
+            if (!ctx.update_ephemeral_credential(lease)) {
+              return crow::response(500, "Failed to persist lease state");
+            }
+
+            AuditEvent event;
+            event.id = ctx.next_audit_id.fetch_add(1);
+            event.type = "credential.ephemeral.consume";
+            event.actor = auth->user;
+            event.role = auth->role;
+            event.createdAt = now_utc();
+            event.payloadJson =
+                "{\"leaseId\":" + std::to_string(lease.id) +
+                ",\"resourceId\":" + std::to_string(lease.resourceId) +
+                "}";
+            event.payloadIsJson = true;
+            ctx.append_audit(event);
+
+            crow::json::wvalue payload;
+            payload["status"] = "ok";
+            payload["leaseId"] = lease.id;
+            payload["resourceId"] = lease.resourceId;
+            payload["sshUsername"] = target_resource.sshUsername;
+            payload["sshPassword"] = target_resource.sshPassword;
+            payload["expiresAt"] = lease.expiresAt;
+            return crow::response{payload};
+          });
 }

@@ -6,7 +6,9 @@
 #include "utils.h"
 
 #include <iostream>
+#include <regex>
 #include <thread>
+#include <vector>
 
 #ifdef ENDORIUMFORT_SSH_ENABLED
 #ifndef _WIN32
@@ -282,6 +284,19 @@ void register_ssh_routes(CrowApp &app, AppContext &ctx) {
           }
 
           connection->session_id = session_id;
+          connection->command_guard_enabled = false;
+          {
+            std::lock_guard<std::mutex> rlock(ctx.resource_mutex);
+            for (const auto &entry : ctx.resources) {
+              const Resource &res = entry.second;
+              if (res.protocol == "ssh" && res.target == target_session.target &&
+                  res.port == target_session.port &&
+                  res.enableCommandGuard) {
+                connection->command_guard_enabled = true;
+                break;
+              }
+            }
+          }
 
           // ── Start session recording ──
           ctx.init_recordings_dir();
@@ -353,6 +368,23 @@ void register_ssh_routes(CrowApp &app, AppContext &ctx) {
                       entry.second.durationMs = dur;
                       entry.second.fileSize = fsize;
                       ctx.update_recording_close(entry.second);
+                      AuditEvent rec_event;
+                      rec_event.id = ctx.next_audit_id.fetch_add(1);
+                      rec_event.type = "recording.watermark";
+                      rec_event.actor = "system";
+                      rec_event.role = "system";
+                      rec_event.createdAt = now_utc();
+                      rec_event.payloadJson =
+                          "{\"sessionId\":" +
+                          std::to_string(connection->session_id) +
+                          ",\"recordingId\":" +
+                          std::to_string(entry.second.id) +
+                          ",\"watermark\":\"wm-" +
+                          std::to_string(connection->session_id) + "-" +
+                          std::to_string(dur) + "-" +
+                          std::to_string(fsize) + "\"}";
+                      rec_event.payloadIsJson = true;
+                      ctx.append_audit(rec_event);
                       break;
                     }
                   }
@@ -375,6 +407,68 @@ void register_ssh_routes(CrowApp &app, AppContext &ctx) {
           if (!payload.has("data")) return;
           if (!connection->channel) return;
           std::string input = payload["data"].s();
+          ctx.increment_session_input_event(connection->session_id);
+
+          if (connection->command_guard_enabled) {
+            static const std::regex allowed_chars(
+                R"(^[a-zA-Z0-9\s_./:\-\|&;<>='"()\[\]{}*+?,@!%#~`$\\]*$)");
+            static const std::vector<std::pair<std::string, std::regex>>
+                blocked_patterns = {
+                    {"wipe_root",
+                     std::regex(R"((^|[;&|]\s*)(sudo\s+)?rm\s+-rf\s+/($|\s))",
+                                std::regex::icase)},
+                    {"fork_bomb",
+                     std::regex(R"(:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;?\s*:)",
+                                std::regex::icase)},
+                    {"disk_format",
+                     std::regex(R"((^|[;&|]\s*)(sudo\s+)?mkfs(\.[a-z0-9]+)?\b)",
+                                std::regex::icase)},
+                    {"raw_disk_dd",
+                     std::regex(R"((^|[;&|]\s*)(sudo\s+)?dd\s+if=.*\s+of=/dev/)",
+                                std::regex::icase)},
+                    {"power_command",
+                     std::regex(R"((^|[;&|]\s*)(sudo\s+)?(shutdown|poweroff|reboot)\b)",
+                                std::regex::icase)}};
+
+            const bool has_control_sequence =
+                input.find('\x1b') != std::string::npos ||
+                input.find('\r') != std::string::npos ||
+                input.find('\n') != std::string::npos ||
+                input.find('\t') != std::string::npos ||
+                input.find('\b') != std::string::npos;
+            const bool safe_chars =
+                std::regex_match(input, allowed_chars) || has_control_sequence;
+
+            auto emit_guard_block = [&](const std::string &reason) {
+              AuditEvent guard_event;
+              guard_event.id = ctx.next_audit_id.fetch_add(1);
+              guard_event.type = "command_guard.block";
+              guard_event.actor = "system";
+              guard_event.role = "system";
+              guard_event.createdAt = now_utc();
+              guard_event.payloadJson =
+                  "{\"sessionId\":" +
+                  std::to_string(connection->session_id) +
+                  ",\"reason\":\"" + json_escape(reason) + "\"}";
+              guard_event.payloadIsJson = true;
+              ctx.append_audit(guard_event);
+              conn.send_text(
+                  "{\"type\":\"warning\",\"message\":\"Command blocked by bastion guard\"}");
+            };
+
+            if (!safe_chars) {
+              emit_guard_block("non_whitelisted_input");
+              return;
+            }
+
+            for (const auto &pattern : blocked_patterns) {
+              if (std::regex_search(input, pattern.second)) {
+                emit_guard_block(pattern.first);
+                return;
+              }
+            }
+          }
+
           // Record input
           if (connection->recorder && connection->recorder->is_open()) {
             connection->recorder->append_input(input.c_str(), input.size());
