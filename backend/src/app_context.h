@@ -13,6 +13,7 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -179,4 +180,14 @@ struct AppContext {
   std::vector<int> get_resource_permissions(int user_id);
   bool grant_resource_permission(int user_id, int resource_id);
   bool revoke_resource_permission(int user_id, int resource_id);
+
+  // ── Granular permission overrides ──
+  std::unordered_map<std::string, bool> get_user_permission_overrides(
+      int user_id);
+  std::unordered_set<std::string> get_effective_permissions(
+      int user_id, const std::string &role);
+  bool has_permission(int user_id, const std::string &role,
+                      const std::string &permission);
+  bool set_user_permission_override(int user_id, const std::string &permission,
+                                    std::optional<bool> allow_effect);
 };

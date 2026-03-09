@@ -39,7 +39,7 @@ void register_rdp_routes(CrowApp &app, AppContext &ctx) {
         if (!token || token->empty()) return false;
         auto auth = ctx.find_auth_by_token(*token);
         if (!auth) return false;
-        return is_allowed_user_role(auth->role, {"operator", "admin"});
+        return ctx.has_permission(auth->userId, auth->role, "rdp.connect");
       })
       .onopen([](crow::websocket::connection &conn) {
         conn.send_text(

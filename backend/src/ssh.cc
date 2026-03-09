@@ -182,7 +182,7 @@ void register_ssh_routes(CrowApp &app, AppContext &ctx) {
         }
         std::cerr << "[WS] onaccept: auth found, user=" << auth->user
                   << " role=" << auth->role << std::endl;
-        bool allowed = is_allowed_user_role(auth->role, {"operator", "admin"});
+        bool allowed = ctx.has_permission(auth->userId, auth->role, "ssh.connect");
         std::cerr << "[WS] onaccept: allowed=" << allowed << std::endl;
         return allowed;
       })
@@ -499,7 +499,8 @@ void register_ssh_routes(CrowApp &app, AppContext &ctx) {
         auto auth = ctx.find_auth_by_token(*token);
         if (!auth) return false;
         // Only admin and auditor can shadow
-        if (!is_allowed_user_role(auth->role, {"admin", "auditor"})) return false;
+        if (!ctx.has_permission(auth->userId, auth->role, "ssh.shadow.watch"))
+          return false;
 
         const char *sid_param = request.url_params.get("sessionId");
         if (!sid_param) return false;

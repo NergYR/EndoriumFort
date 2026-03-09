@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.5.19 - 2026-03-09
+### Admin UX: Granular Permission Management Panel
+- Added a new **Granular Action Permissions** section in the Admin user-permission panel.
+- Admins can now manage per-user permission overrides directly from the UI with `inherit`, `allow`, or `deny` for each action-level permission.
+- Resource assignment and action-level permission management are now loaded together when selecting a user.
+- Permission override updates now refresh effective permission state in-place after each change.
+
+## v0.5.18 - 2026-03-09
+### Security Model: Granular Permission Overrides
+- Added a permission catalog for backend authorization checks (sessions/resources/users/audit/recordings/tunnel/proxy/SSH/RDP/ephemeral credentials).
+- Added per-user permission overrides in SQLite:
+  - table: `user_permission_overrides`
+  - effects: `allow`, `deny`, `inherit` (delete override)
+- Added new admin APIs:
+  - `GET /api/users/:id/permissions`
+  - `PUT /api/users/:id/permissions/:permission`
+- Login response now includes effective permissions for the authenticated user.
+
+### Backend Authorization Migration
+- Migrated major backend route guards from role-only checks to permission checks.
+- Updated SSH, RDP, tunnel, and proxy gates to rely on permission evaluation.
+- Preserved role aliases and role baselines for compatibility, while enabling fine-grained per-user exceptions.
+
+### Frontend Authorization Behavior
+- Frontend capabilities now consume backend-provided `permissions` from login payload.
+- Added compatibility fallback to role-based capabilities when no permissions are present.
+
+### Validation
+- Runtime smoke test verified with `admin/admin`:
+  - login success
+  - resource creation success
+  - ephemeral lease issue success
+  - ephemeral lease consume success
+
 ## v0.5.17 - 2026-03-09
 ### UX Refactor: Access-First User Console
 - Removed command palette workflow from user console.

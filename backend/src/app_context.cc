@@ -292,6 +292,21 @@ void AppContext::init_database() {
   if (!sqlite.exec(perm_schema, err))
     std::cerr << "SQLite user_resource_permissions schema failed: " << err << '\n';
 
+  const std::string perm_override_schema =
+      "CREATE TABLE IF NOT EXISTS user_permission_overrides ("
+      "id INTEGER PRIMARY KEY,"
+      "user_id INTEGER NOT NULL,"
+      "permission TEXT NOT NULL,"
+      "effect TEXT NOT NULL,"
+      "created_at TEXT NOT NULL,"
+      "updated_at TEXT NOT NULL,"
+      "FOREIGN KEY (user_id) REFERENCES users(id),"
+      "UNIQUE(user_id, permission)"
+      ");";
+  if (!sqlite.exec(perm_override_schema, err))
+    std::cerr << "SQLite user_permission_overrides schema failed: " << err
+              << '\n';
+
   // Session recordings table
   const std::string rec_schema =
       "CREATE TABLE IF NOT EXISTS session_recordings ("
@@ -866,6 +881,108 @@ bool AppContext::revoke_resource_permission(int user_id, int resource_id) {
   sqlite3_bind_int(stmt, 2, resource_id);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite perm delete failed: " << sqlite3_errmsg(sqlite.db) << '\n';
+  sqlite3_finalize(stmt);
+  return ok;
+}
+
+std::unordered_map<std::string, bool> AppContext::get_user_permission_overrides(
+    int user_id) {
+  std::unordered_map<std::string, bool> overrides;
+  if (!sqlite.db) return overrides;
+
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  const char *sql =
+      "SELECT permission, effect FROM user_permission_overrides WHERE user_id = ?";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite permission override select failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return overrides;
+  }
+  sqlite3_bind_int(stmt, 1, user_id);
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    const auto *perm = sqlite3_column_text(stmt, 0);
+    const auto *effect = sqlite3_column_text(stmt, 1);
+    if (!perm || !effect) continue;
+    std::string permission = reinterpret_cast<const char *>(perm);
+    std::string effect_str = reinterpret_cast<const char *>(effect);
+    overrides[permission] = effect_str == "allow";
+  }
+  sqlite3_finalize(stmt);
+  return overrides;
+}
+
+std::unordered_set<std::string> AppContext::get_effective_permissions(
+    int user_id, const std::string &role) {
+  auto effective = default_permissions_for_role(role);
+  const auto overrides = get_user_permission_overrides(user_id);
+  for (const auto &entry : overrides) {
+    if (entry.second) {
+      effective.insert(entry.first);
+    } else {
+      effective.erase(entry.first);
+      if (entry.first == "*") effective.erase("*");
+    }
+  }
+  return effective;
+}
+
+bool AppContext::has_permission(int user_id, const std::string &role,
+                                const std::string &permission) {
+  if (!is_known_permission(permission)) return false;
+  const auto effective = get_effective_permissions(user_id, role);
+  return permissions_contain(effective, permission);
+}
+
+bool AppContext::set_user_permission_override(
+    int user_id, const std::string &permission,
+    std::optional<bool> allow_effect) {
+  if (!is_known_permission(permission) && permission != "*") return false;
+  if (!sqlite.db) return true;
+
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  if (!allow_effect.has_value()) {
+    const char *sql =
+        "DELETE FROM user_permission_overrides WHERE user_id=? AND permission=?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite permission override delete failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_text(stmt, 2, permission.c_str(), -1, SQLITE_TRANSIENT);
+    const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok)
+      std::cerr << "SQLite permission override delete failed: "
+                << sqlite3_errmsg(sqlite.db) << '\n';
+    sqlite3_finalize(stmt);
+    return ok;
+  }
+
+  const char *sql =
+      "INSERT INTO user_permission_overrides "
+      "(user_id, permission, effect, created_at, updated_at) "
+      "VALUES (?, ?, ?, ?, ?) "
+      "ON CONFLICT(user_id, permission) DO UPDATE SET "
+      "effect=excluded.effect, updated_at=excluded.updated_at";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite permission override upsert failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return false;
+  }
+  const std::string now = now_utc();
+  const std::string effect = *allow_effect ? "allow" : "deny";
+  sqlite3_bind_int(stmt, 1, user_id);
+  sqlite3_bind_text(stmt, 2, permission.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 3, effect.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 4, now.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 5, now.c_str(), -1, SQLITE_TRANSIENT);
+  const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+  if (!ok)
+    std::cerr << "SQLite permission override upsert failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
   return ok;
 }

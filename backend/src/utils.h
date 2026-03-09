@@ -14,6 +14,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 inline std::string now_utc() {
@@ -181,6 +182,78 @@ inline bool is_allowed_user_role(const std::string &role,
   const std::string normalized_role = normalize_user_role(role);
   for (const auto &item : allowed) {
     if (normalized_role == normalize_user_role(item)) return true;
+  }
+  return false;
+}
+
+inline const std::vector<std::string> &permission_catalog() {
+  static const std::vector<std::string> catalog = {
+      "users.read",
+      "users.manage",
+      "users.permissions.manage",
+      "resources.read",
+      "resources.manage",
+      "resources.assign",
+      "sessions.read",
+      "sessions.create",
+      "sessions.terminate",
+      "audit.read",
+      "recordings.read",
+      "stats.read",
+      "totp.manage",
+      "access_requests.read",
+      "access_requests.create",
+      "access_requests.review",
+      "credentials.ephemeral.issue",
+      "credentials.ephemeral.consume",
+      "ssh.connect",
+      "ssh.shadow.watch",
+      "rdp.connect",
+      "web.proxy.access",
+      "tunnel.connect"};
+  return catalog;
+}
+
+inline bool is_known_permission(const std::string &permission) {
+  const auto &catalog = permission_catalog();
+  return std::find(catalog.begin(), catalog.end(), permission) != catalog.end();
+}
+
+inline std::unordered_set<std::string> default_permissions_for_role(
+    const std::string &role) {
+  const std::string normalized = normalize_user_role(role);
+  if (normalized == "admin") {
+    std::unordered_set<std::string> all;
+    for (const auto &item : permission_catalog()) all.insert(item);
+    all.insert("*");
+    return all;
+  }
+  if (normalized == "auditor") {
+    return {"resources.read", "sessions.read", "audit.read", "recordings.read",
+            "stats.read", "access_requests.read", "ssh.shadow.watch"};
+  }
+  return {"resources.read", "sessions.read", "sessions.create",
+          "sessions.terminate", "stats.read", "access_requests.read",
+          "access_requests.create", "credentials.ephemeral.issue",
+          "credentials.ephemeral.consume", "ssh.connect", "rdp.connect",
+          "web.proxy.access", "tunnel.connect"};
+}
+
+inline bool permission_match(const std::string &granted,
+                             const std::string &required) {
+  if (granted == "*") return true;
+  if (granted == required) return true;
+  if (granted.size() > 2 && granted.back() == '*') {
+    const std::string prefix = granted.substr(0, granted.size() - 1);
+    if (required.rfind(prefix, 0) == 0) return true;
+  }
+  return false;
+}
+
+inline bool permissions_contain(const std::unordered_set<std::string> &granted,
+                                const std::string &required) {
+  for (const auto &item : granted) {
+    if (permission_match(item, required)) return true;
   }
   return false;
 }

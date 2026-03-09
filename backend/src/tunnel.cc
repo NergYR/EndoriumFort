@@ -79,7 +79,7 @@ void register_tunnel_routes(CrowApp &app, AppContext &ctx) {
 
           // Check permission
           std::vector<int> allowed_ids;
-          if (is_user_role(auth->role, "admin")) {
+          if (ctx.has_permission(auth->userId, auth->role, "resources.manage")) {
             std::lock_guard<std::mutex> lock(ctx.resource_mutex);
             for (const auto &r : ctx.resources)
               allowed_ids.push_back(r.first);

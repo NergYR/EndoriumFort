@@ -246,6 +246,27 @@ export async function revokeResourcePermission(userId, resourceId) {
   return response.json();
 }
 
+export async function getUserPermissions(userId) {
+  const response = await fetch(`/api/users/${userId}/permissions`, {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch user permissions');
+  return response.json();
+}
+
+export async function setUserPermissionOverride(userId, permission, override) {
+  const response = await fetch(`/api/users/${userId}/permissions/${encodeURIComponent(permission)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify({ override })
+  });
+  await ensureResponseOk(response, 'Failed to set permission override');
+  return response.json();
+}
+
 // ── 2FA / TOTP ───────────────────────────────────────────────────────
 
 export async function setup2FA() {

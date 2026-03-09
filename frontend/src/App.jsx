@@ -31,6 +31,8 @@ import {
   getUserResourcePermissions,
   grantResourcePermission,
   revokeResourcePermission,
+  getUserPermissions,
+  setUserPermissionOverride,
   verify2FA,
   fetchAccessRequests,
   createAccessRequest,
@@ -73,7 +75,15 @@ const roleLabel = (role) => {
   return found ? found.label : mapped;
 };
 
-const hasRoleCapability = (role, capability) => {
+const CAPABILITY_PERMISSION_MAP = {
+  manageResources: ['resources.manage'],
+  viewAudit: ['audit.read'],
+  viewRecordings: ['recordings.read'],
+  operateSessions: ['sessions.create', 'sessions.read'],
+  viewStats: ['stats.read']
+};
+
+const hasRoleCapabilityFallback = (role, capability) => {
   const mapped = normalizeRole(role);
   if (mapped === 'admin') return true;
   if (mapped === 'operator') {
@@ -83,6 +93,14 @@ const hasRoleCapability = (role, capability) => {
     return ['viewAudit', 'viewRecordings', 'viewStats'].includes(capability);
   }
   return false;
+};
+
+const hasCapability = (role, permissions, capability) => {
+  const required = CAPABILITY_PERMISSION_MAP[capability] || [];
+  if (Array.isArray(permissions) && permissions.length) {
+    return required.some((permission) => permissions.includes(permission) || permissions.includes('*'));
+  }
+  return hasRoleCapabilityFallback(role, capability);
 };
 
 export default function App() {
@@ -95,11 +113,17 @@ export default function App() {
         const parsed = JSON.parse(saved);
         if (parsed.token) {
           setAuthToken(parsed.token);
-          return { user: parsed.user || '', password: '', role: normalizeRole(parsed.role), token: parsed.token };
+          return {
+            user: parsed.user || '',
+            password: '',
+            role: normalizeRole(parsed.role),
+            token: parsed.token,
+            permissions: Array.isArray(parsed.permissions) ? parsed.permissions : []
+          };
         }
       }
     } catch (_) {}
-    return { user: '', password: '', role: 'operator', token: '' };
+    return { user: '', password: '', role: 'operator', token: '', permissions: [] };
   });
   const [authError, setAuthError] = useState('');
   const [sessions, setSessions] = useState([]);
@@ -151,6 +175,8 @@ export default function App() {
   const [userPermissions, setUserPermissions] = useState([]);
   const [loadingPermissions, setLoadingPermissions] = useState(false);
   const [permissionsError, setPermissionsError] = useState('');
+  const [granularPermissions, setGranularPermissions] = useState([]);
+  const [updatingPermissionKey, setUpdatingPermissionKey] = useState('');
   const [route, setRoute] = useState(() =>
     window.location.pathname ? window.location.pathname : '/'
   );
@@ -223,10 +249,10 @@ export default function App() {
   const fitAddonRef = useRef(null);
   const socketRef = useRef(null);
 
-  const canManagePlatform = hasRoleCapability(auth.role, 'manageResources');
-  const canViewAudit = hasRoleCapability(auth.role, 'viewAudit');
-  const canViewRecordings = hasRoleCapability(auth.role, 'viewRecordings');
-  const canOperateSessions = hasRoleCapability(auth.role, 'operateSessions');
+  const canManagePlatform = hasCapability(auth.role, auth.permissions, 'manageResources');
+  const canViewAudit = hasCapability(auth.role, auth.permissions, 'viewAudit');
+  const canViewRecordings = hasCapability(auth.role, auth.permissions, 'viewRecordings');
+  const canOperateSessions = hasCapability(auth.role, auth.permissions, 'operateSessions');
   const roleName = roleLabel(auth.role);
   const tabGuide = useMemo(() => {
     const base = {
@@ -311,7 +337,7 @@ export default function App() {
 
   useEffect(() => {
     const onUnauthorized = () => {
-      setAuth((prev) => ({ ...prev, token: '', password: '' }));
+      setAuth((prev) => ({ ...prev, token: '', password: '', permissions: [] }));
       setAuthError('Session expirée. Veuillez vous reconnecter.');
       setTokenExpiresAt('');
       setAuthToken('');
@@ -585,6 +611,7 @@ export default function App() {
         token: payload.token,
         role: normalizeRole(payload.role),
         user: payload.user,
+        permissions: Array.isArray(payload.permissions) ? payload.permissions : [],
         password: ''
       }));
       setAuthToken(payload.token);
@@ -593,7 +620,8 @@ export default function App() {
       localStorage.setItem('endoriumfort_auth', JSON.stringify({
         token: payload.token,
         user: payload.user,
-        role: normalizeRole(payload.role)
+        role: normalizeRole(payload.role),
+        permissions: Array.isArray(payload.permissions) ? payload.permissions : []
       }));
       setAuthError('');
       navigate('/');
@@ -604,7 +632,7 @@ export default function App() {
 
   const onLogout = async () => {
     try { await logout(); } catch (_) {}
-    setAuth((prev) => ({ ...prev, token: '', password: '' }));
+    setAuth((prev) => ({ ...prev, token: '', password: '', permissions: [] }));
     setAuthToken('');
     setTokenExpiresAt('');
     localStorage.removeItem('endoriumfort_auth');
@@ -930,7 +958,7 @@ export default function App() {
   };
 
   const onConnectResource = async (resource) => {
-    if (resource.requireDualApproval && normalizeRole(auth.role) !== 'admin') {
+    if (resource.requireDualApproval && !canManagePlatform) {
       const approved = accessRequests.find(
         (item) =>
           item.resourceId === resource.id &&
@@ -1179,8 +1207,12 @@ export default function App() {
     try {
       setLoadingPermissions(true);
       setSelectedUserForPermissions(user);
-      const response = await getUserResourcePermissions(user.id);
-      setUserPermissions(response.resourceIds || []);
+      const [resourceResponse, granularResponse] = await Promise.all([
+        getUserResourcePermissions(user.id),
+        getUserPermissions(user.id)
+      ]);
+      setUserPermissions(resourceResponse.resourceIds || []);
+      setGranularPermissions(granularResponse.permissions || []);
       setPermissionsError('');
     } catch (error) {
       setPermissionsError(error.message || 'Unable to load permissions');
@@ -1204,6 +1236,22 @@ export default function App() {
       setPermissionsError('');
     } catch (error) {
       setPermissionsError(error.message || 'Unable to modify permission');
+    }
+  };
+
+  const onChangeGranularPermissionOverride = async (permission, override) => {
+    if (!selectedUserForPermissions) return;
+    const key = `${selectedUserForPermissions.id}:${permission}`;
+    try {
+      setUpdatingPermissionKey(key);
+      await setUserPermissionOverride(selectedUserForPermissions.id, permission, override);
+      const refreshed = await getUserPermissions(selectedUserForPermissions.id);
+      setGranularPermissions(refreshed.permissions || []);
+      setPermissionsError('');
+    } catch (error) {
+      setPermissionsError(error.message || 'Unable to update permission override');
+    } finally {
+      setUpdatingPermissionKey('');
     }
   };
 
@@ -2226,6 +2274,8 @@ export default function App() {
                   onClick={() => {
                     setSelectedUserForPermissions(null);
                     setUserPermissions([]);
+                    setGranularPermissions([]);
+                    setPermissionsError('');
                   }}
                 >
                   Close
@@ -2266,6 +2316,49 @@ export default function App() {
                   ))
                 ) : (
                   <p className="muted">No resources yet.</p>
+                )}
+              </div>
+
+              <div className="panel-header" style={{ marginTop: '1rem' }}>
+                <div>
+                  <h3>Granular Action Permissions</h3>
+                  <p>Set per-action override policy for this user.</p>
+                </div>
+              </div>
+              <div className="resource-list">
+                {granularPermissions.length ? (
+                  granularPermissions.map((permission) => {
+                    const key = `${selectedUserForPermissions.id}:${permission.name}`;
+                    const isSaving = updatingPermissionKey === key;
+                    return (
+                      <article className="resource-row" key={permission.name}>
+                        <div>
+                          <h4>{permission.name}</h4>
+                          <p className="muted">
+                            Effective: {permission.effective ? 'allowed' : 'denied'}
+                          </p>
+                        </div>
+                        <div className="resource-actions">
+                          <select
+                            value={permission.override || 'inherit'}
+                            disabled={isSaving}
+                            onChange={(event) =>
+                              onChangeGranularPermissionOverride(
+                                permission.name,
+                                event.target.value
+                              )
+                            }
+                          >
+                            <option value="inherit">inherit</option>
+                            <option value="allow">allow</option>
+                            <option value="deny">deny</option>
+                          </select>
+                        </div>
+                      </article>
+                    );
+                  })
+                ) : (
+                  <p className="muted">No granular permissions loaded.</p>
                 )}
               </div>
             </div>

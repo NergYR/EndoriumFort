@@ -26,7 +26,7 @@
 | 👁️ **Session Shadowing** | Real-time read-only observation of active sessions |
 | 🎬 **Session Recording** | Asciinema v2 format with animated in-browser replay |
 | 🔑 **2FA / TOTP** | RFC 6238 two-factor authentication with QR setup |
-| 🛡️ **RBAC Blueprint** | Clear role model: Platform Admin, Session Operator, Security Auditor (legacy aliases supported) |
+| 🛡️ **Granular Access Control** | Fine-grained permissions per action with per-user allow/deny overrides (role defaults still available) |
 | 📊 **Live Dashboard** | Real-time KPI stats, session monitoring, security alerts |
 | 🧭 **Access-First Workspace** | Open resources and operate sessions from one page without context switching |
 | 🚨 **Security Center** | Live anomaly hints (login failures, stale sessions, admin-change activity, MFA posture) |
@@ -174,6 +174,11 @@ Opens:
 6. **Audit** — Search and filter all security events
 7. **Recordings** — Replay past SSH sessions with the animated Asciinema player (admin/auditor)
 8. **Admin dashboard** — Manage users/resources/permissions and view platform stats
+9. **Granular permissions**:
+  - role gives a default permission baseline
+  - admin can override each permission per user (`allow`, `deny`, or `inherit`)
+  - admin UI includes a dedicated **Granular Action Permissions** panel per user
+  - endpoints: `GET /api/users/:id/permissions`, `PUT /api/users/:id/permissions/:permission`
 
 ### Agent Tunnel
 
@@ -209,7 +214,7 @@ Or simply **click a resource tile** with the 🚀 agent protocol — the fronten
 | **Token Expiration** | Bearer tokens expire after 1 hour, server-side invalidation |
 | **Auth Cookie Security** | `HttpOnly` + `SameSite=Strict`; `Secure` automatically enabled on HTTPS deployments |
 | **2FA / TOTP** | RFC 6238, QR code setup, compatible with Google Authenticator |
-| **RBAC** | Blueprint roles: Platform Admin (governance), Session Operator (operations), Security Auditor (traceability) |
+| **Authorization** | Action-level permissions (sessions/resources/audit/recordings/tunnel/SSH/RDP) with role defaults + per-user overrides |
 | **Credential Vault** | SSH passwords stored in DB, never exposed in standard API |
 | **Session Recording** | All SSH I/O recorded in Asciinema v2 format |
 | **Audit Trail** | Every action logged to JSONL — login, logout, connect, shadow, proxy |

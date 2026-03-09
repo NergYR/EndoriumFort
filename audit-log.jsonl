@@ -36,3 +36,16 @@
 {"id":7,"type":"session.terminate","actor":"admin","role":"admin","createdAt":"2026-03-06T15:44:00Z","payload":{"sessionId":10,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-03-06T14:59:42Z","terminatedAt":"2026-03-06T15:44:00Z"}}
 {"id":8,"type":"session.terminate","actor":"admin","role":"admin","createdAt":"2026-03-06T15:44:01Z","payload":{"sessionId":11,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-03-06T15:42:40Z","terminatedAt":"2026-03-06T15:44:01Z"}}
 {"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T14:00:26Z","payload":{"userId":1,"username":"admin"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T20:46:07Z","payload":{"userId":1,"username":"admin"}}
+{"id":2,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T20:46:10Z","payload":{"userId":1,"username":"admin"}}
+{"id":3,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T20:46:12Z","payload":{"userId":1,"username":"admin"}}
+{"id":4,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T20:46:12Z","payload":{"userId":1,"username":"admin"}}
+{"id":5,"type":"auth.logout","actor":"admin","role":"admin","createdAt":"2026-03-09T20:46:14Z","payload":{"userId":1}}
+{"id":6,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T20:46:18Z","payload":{"userId":1,"username":"admin"}}
+{"id":7,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T20:50:04Z","payload":{"userId":1,"username":"admin"}}
+{"id":8,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T20:50:15Z","payload":{"userId":1,"username":"admin"}}
+{"id":9,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T20:50:27Z","payload":{"userId":1,"username":"admin"}}
+{"id":10,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-09T20:50:38Z","payload":{"userId":1,"username":"admin"}}
+{"id":11,"type":"resource.create","actor":"admin","role":"admin","createdAt":"2026-03-09T20:50:38Z","payload":{"resourceId":5,"name":"smoke-ssh-admin","target":"127.0.0.1","protocol":"ssh","port":22,"requireAccessJustification":false,"requireDualApproval":false,"enableCommandGuard":false,"adaptiveAccessPolicy":false,"riskLevel":"low","createdAt":"2026-03-09T20:50:38Z","updatedAt":"2026-03-09T20:50:38Z"}}
+{"id":12,"type":"credential.ephemeral.issue","actor":"admin","role":"admin","createdAt":"2026-03-09T20:50:38Z","payload":{"leaseId":1,"resourceId":5,"expiresAt":"2026-03-09T20:52:38Z"}}
+{"id":13,"type":"credential.ephemeral.consume","actor":"admin","role":"admin","createdAt":"2026-03-09T20:50:38Z","payload":{"leaseId":1,"resourceId":5}}
