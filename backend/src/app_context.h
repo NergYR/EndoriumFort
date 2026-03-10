@@ -22,6 +22,22 @@ struct RateLimitEntry {
   std::queue<std::chrono::steady_clock::time_point> attempts;
 };
 
+struct TunnelTicket {
+  std::string ticket;
+  std::string proof;
+  std::string challenge;
+  std::string signingKeyId;
+  std::string serverAttestation;
+  int userId = 0;
+  std::string user;
+  std::string role;
+  int resourceId = 0;
+  std::string issuedForIp;
+  std::string issuedForUserAgent;
+  std::string issuedAt;
+  std::string expiresAt;
+};
+
 struct AppContext {
   // ── Session state ──
   std::mutex session_mutex;
@@ -54,6 +70,32 @@ struct AppContext {
   std::unordered_map<int, SessionRecording> recordings;
   std::atomic<int> next_recording_id{1};
   std::string recordings_dir = "recordings";
+
+  // ── Session DNA chain (tamper-evident audit lineage) ──
+  std::mutex session_dna_mutex;
+
+  // ── Incident containment mode ──
+  std::mutex containment_mutex;
+  bool containment_mode_enabled = false;
+  std::string containment_updated_at;
+  std::string containment_updated_by;
+  std::string containment_reason;
+
+  // ── Active security incident lifecycle ──
+  std::mutex incident_mutex;
+  std::atomic<int> next_incident_id{1};
+  bool incident_active = false;
+  int incident_id = 0;
+  int incident_critical_count = 0;
+  int incident_window_seconds = 0;
+  std::string incident_profile;
+  std::string incident_title;
+  std::string incident_summary;
+  std::string incident_opened_at;
+  std::string incident_opened_by;
+  std::string incident_closed_at;
+  std::string incident_closed_by;
+  std::string incident_close_reason;
 
   // ── Access requests (dual control) ──
   std::mutex access_request_mutex;
@@ -96,6 +138,34 @@ struct AppContext {
   std::unordered_map<crow::websocket::connection *,
                      std::shared_ptr<TunnelState>>
       tunnel_connections;
+
+  // ── One-time tunnel tickets ──
+  std::mutex tunnel_ticket_mutex;
+  std::unordered_map<std::string, TunnelTicket> tunnel_tickets;
+  int tunnel_ticket_ttl_seconds = 30;
+  int tunnel_signature_max_skew_seconds = 45;
+
+  // ── Tunnel nonce anti-replay cache ──
+  std::mutex tunnel_nonce_mutex;
+  std::unordered_map<std::string, int64_t> tunnel_seen_nonces;
+  int tunnel_nonce_ttl_seconds = 90;
+
+  // ── Tunnel cryptographic key-id rotation (agility window) ──
+  std::mutex tunnel_signing_key_mutex;
+  std::string tunnel_signing_key_current_id;
+  std::string tunnel_signing_key_previous_id;
+  std::string tunnel_signing_key_current_secret;
+  std::string tunnel_signing_key_previous_secret;
+  int64_t tunnel_signing_key_current_epoch = 0;
+  int64_t tunnel_signing_key_previous_epoch = 0;
+  int tunnel_signing_key_rotation_seconds = 300;
+  int tunnel_signing_key_grace_seconds = 600;
+
+  // ── Tunnel ticket issuance throttle ──
+  std::mutex tunnel_ticket_issue_limit_mutex;
+  std::unordered_map<int, RateLimitEntry> tunnel_ticket_issue_by_user;
+  int tunnel_ticket_issue_max_attempts = 20;
+  std::chrono::seconds tunnel_ticket_issue_window{60};
 
 #ifdef ENDORIUMFORT_SSH_ENABLED
 #ifndef _WIN32
@@ -161,6 +231,13 @@ struct AppContext {
   bool insert_recording(const SessionRecording &rec);
   bool update_recording_close(const SessionRecording &rec);
   void load_recordings_from_db();
+
+  // ── Session DNA chain ──
+  bool append_session_dna_entry(int session_id, int audit_event_id,
+                                const std::string &event_type,
+                                const std::string &payload_json,
+                                const std::string &created_at);
+  std::vector<SessionDnaEntry> get_session_dna_chain(int session_id);
 
   // ── Access request CRUD ──
   void load_access_requests_from_db();

@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
 #include <random>
 #include <sstream>
 #include <string>
@@ -137,6 +138,57 @@ inline std::string sha256_hex(const std::string &input) {
     out += hex[byte & 0x0F];
   }
   return out;
+}
+
+inline std::string hmac_sha256_hex(const std::string &key,
+                                   const std::string &message) {
+  constexpr size_t block_size = 64;
+  std::string normalized_key = key;
+  if (normalized_key.size() > block_size) {
+    auto key_hash = sha256(reinterpret_cast<const uint8_t *>(normalized_key.data()),
+                           normalized_key.size());
+    normalized_key.assign(reinterpret_cast<const char *>(key_hash.data()),
+                          key_hash.size());
+  }
+  if (normalized_key.size() < block_size) {
+    normalized_key.append(block_size - normalized_key.size(), '\0');
+  }
+
+  std::string o_key_pad(block_size, '\0');
+  std::string i_key_pad(block_size, '\0');
+  for (size_t i = 0; i < block_size; ++i) {
+    const unsigned char b = static_cast<unsigned char>(normalized_key[i]);
+    o_key_pad[i] = static_cast<char>(b ^ 0x5c);
+    i_key_pad[i] = static_cast<char>(b ^ 0x36);
+  }
+
+  std::string inner = i_key_pad + message;
+  auto inner_hash = sha256(reinterpret_cast<const uint8_t *>(inner.data()),
+                           inner.size());
+
+  std::string outer = o_key_pad +
+                      std::string(reinterpret_cast<const char *>(inner_hash.data()),
+                                  inner_hash.size());
+  auto hmac = sha256(reinterpret_cast<const uint8_t *>(outer.data()),
+                     outer.size());
+
+  static const char hex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(64);
+  for (auto byte : hmac) {
+    out += hex[byte >> 4];
+    out += hex[byte & 0x0F];
+  }
+  return out;
+}
+
+inline bool constant_time_equals(const std::string &a, const std::string &b) {
+  if (a.size() != b.size()) return false;
+  unsigned char diff = 0;
+  for (size_t i = 0; i < a.size(); ++i) {
+    diff |= static_cast<unsigned char>(a[i] ^ b[i]);
+  }
+  return diff == 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

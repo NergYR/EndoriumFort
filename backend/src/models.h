@@ -120,6 +120,17 @@ struct SessionRecording {
   size_t fileSize = 0;
 };
 
+struct SessionDnaEntry {
+  int id = 0;
+  int sessionId = 0;
+  int auditEventId = 0;
+  std::string eventType;
+  std::string createdAt;
+  std::string prevHash;
+  std::string payloadHash;
+  std::string chainHash;
+};
+
 struct HttpProxyResponse {
   int status_code = 0;
   std::string body;

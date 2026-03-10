@@ -322,6 +322,21 @@ void AppContext::init_database() {
   if (!sqlite.exec(rec_schema, err))
     std::cerr << "SQLite session_recordings schema failed: " << err << '\n';
 
+  const std::string session_dna_schema =
+      "CREATE TABLE IF NOT EXISTS session_dna_chain ("
+      "id INTEGER PRIMARY KEY,"
+      "session_id INTEGER NOT NULL,"
+      "audit_event_id INTEGER NOT NULL,"
+      "event_type TEXT NOT NULL,"
+      "created_at TEXT NOT NULL,"
+      "prev_hash TEXT NOT NULL,"
+      "payload_hash TEXT NOT NULL,"
+      "chain_hash TEXT NOT NULL,"
+      "FOREIGN KEY (session_id) REFERENCES sessions(id)"
+      ");";
+  if (!sqlite.exec(session_dna_schema, err))
+    std::cerr << "SQLite session_dna_chain schema failed: " << err << '\n';
+
   const std::string access_req_schema =
       "CREATE TABLE IF NOT EXISTS access_requests ("
       "id INTEGER PRIMARY KEY,"
@@ -498,6 +513,8 @@ void AppContext::terminate_session(int session_id, const std::string &actor,
   event.payloadJson = build_session_payload_json(terminated);
   event.payloadIsJson = true;
   append_audit(event);
+  append_session_dna_entry(terminated.id, event.id, event.type,
+                           event.payloadJson, event.createdAt);
   append_session_event(event_type, terminated);
 
   // Behavioral baseline update: maintain per-user stats and emit anomaly
@@ -1147,6 +1164,99 @@ bool AppContext::update_recording_close(const SessionRecording &rec) {
               << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
   return ok;
+}
+
+bool AppContext::append_session_dna_entry(int session_id, int audit_event_id,
+                                          const std::string &event_type,
+                                          const std::string &payload_json,
+                                          const std::string &created_at) {
+  if (!sqlite.db || session_id <= 0 || audit_event_id <= 0) return false;
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+
+  std::string prev_hash = "GENESIS";
+  sqlite3_stmt *select_stmt = nullptr;
+  const char *select_sql =
+      "SELECT chain_hash FROM session_dna_chain WHERE session_id=? "
+      "ORDER BY id DESC LIMIT 1";
+  if (sqlite3_prepare_v2(sqlite.db, select_sql, -1, &select_stmt, nullptr) ==
+      SQLITE_OK) {
+    sqlite3_bind_int(select_stmt, 1, session_id);
+    if (sqlite3_step(select_stmt) == SQLITE_ROW) {
+      const unsigned char *hash_text = sqlite3_column_text(select_stmt, 0);
+      if (hash_text) {
+        prev_hash = reinterpret_cast<const char *>(hash_text);
+      }
+    }
+  }
+  sqlite3_finalize(select_stmt);
+
+  const std::string payload_hash = crypto::sha256_hex(payload_json);
+  const std::string chain_input = prev_hash + "|" + event_type + "|" +
+                                  payload_hash + "|" + created_at;
+  const std::string chain_hash = crypto::sha256_hex(chain_input);
+
+  sqlite3_stmt *insert_stmt = nullptr;
+  const char *insert_sql =
+      "INSERT INTO session_dna_chain "
+      "(session_id, audit_event_id, event_type, created_at, prev_hash, "
+      "payload_hash, chain_hash) VALUES (?, ?, ?, ?, ?, ?, ?)";
+  if (sqlite3_prepare_v2(sqlite.db, insert_sql, -1, &insert_stmt, nullptr) !=
+      SQLITE_OK) {
+    std::cerr << "SQLite session_dna insert prepare failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return false;
+  }
+  sqlite3_bind_int(insert_stmt, 1, session_id);
+  sqlite3_bind_int(insert_stmt, 2, audit_event_id);
+  sqlite3_bind_text(insert_stmt, 3, event_type.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(insert_stmt, 4, created_at.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(insert_stmt, 5, prev_hash.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(insert_stmt, 6, payload_hash.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(insert_stmt, 7, chain_hash.c_str(), -1, SQLITE_TRANSIENT);
+  const bool ok = sqlite3_step(insert_stmt) == SQLITE_DONE;
+  if (!ok) {
+    std::cerr << "SQLite session_dna insert failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+  }
+  sqlite3_finalize(insert_stmt);
+  return ok;
+}
+
+std::vector<SessionDnaEntry> AppContext::get_session_dna_chain(int session_id) {
+  std::vector<SessionDnaEntry> entries;
+  if (!sqlite.db || session_id <= 0) return entries;
+
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  sqlite3_stmt *stmt = nullptr;
+  const char *sql =
+      "SELECT id, session_id, audit_event_id, event_type, created_at, "
+      "prev_hash, payload_hash, chain_hash "
+      "FROM session_dna_chain WHERE session_id=? ORDER BY id ASC";
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite session_dna select failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return entries;
+  }
+  sqlite3_bind_int(stmt, 1, session_id);
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    SessionDnaEntry entry;
+    entry.id = sqlite3_column_int(stmt, 0);
+    entry.sessionId = sqlite3_column_int(stmt, 1);
+    entry.auditEventId = sqlite3_column_int(stmt, 2);
+    entry.eventType =
+        reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+    entry.createdAt =
+        reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
+    entry.prevHash =
+        reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
+    entry.payloadHash =
+        reinterpret_cast<const char *>(sqlite3_column_text(stmt, 6));
+    entry.chainHash =
+        reinterpret_cast<const char *>(sqlite3_column_text(stmt, 7));
+    entries.push_back(entry);
+  }
+  sqlite3_finalize(stmt);
+  return entries;
 }
 
 // ── Access Requests ────────────────────────────────────────────────────

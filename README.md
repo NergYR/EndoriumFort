@@ -36,6 +36,13 @@
 | ✅ **Dual Approval Workflow** | Per-resource 4-eyes control with operator request submission and admin approve/deny queue |
 | 🚫 **SSH Command Guard** | Optional server-side dangerous command blocking with dedicated audit events |
 | 📈 **Adaptive Risk Policy** | Per-resource risk level + ticket requirements for high-risk access |
+| 🧪 **Risk Preview** | Real-time session risk scoring before opening access (factors + effective level) |
+| 🧬 **Session DNA** | Tamper-evident per-session audit chain with integrity verification endpoint/UI |
+| 🎯 **Purpose-Bound Access** | High/critical-risk sessions require explicit purpose and optional evidence |
+| 🔔 **Live Security Notifications** | In-app toast alerts with configurable strict/normal/permissive filtering, per-type throttling, and severity-aware display caps |
+| 🚨 **Incident Escalation Banner** | Automatic high-visibility escalation when repeated critical signals are detected in a short time window |
+| 📂 **Incident Lifecycle Cases** | Open and close active incident coordination cases directly from the escalation banner |
+| 🧯 **Containment Mode** | Incident-time guardrail that forces explicit session justification before opening access |
 | 🧠 **Behavior Anomaly Signal** | Command-volume spike detection on session close (`behavior.anomaly.command_spike`) |
 | 🌙 **Dark Mode** | Full dark theme with localStorage persistence |
 
@@ -171,6 +178,7 @@ Opens:
   - admins approve/deny from the built-in Access Requests queue
   - for high-risk adaptive resources, `ticketId` is enforced server-side
 5. **Sessions** — Monitor, shadow (👁), or terminate active sessions
+  - open **Session DNA** to inspect integrity chain entries and verification status
 6. **Audit** — Search and filter all security events
 7. **Recordings** — Replay past SSH sessions with the animated Asciinema player (admin/auditor)
 8. **Admin dashboard** — Manage users/resources/permissions and view platform stats
@@ -179,6 +187,27 @@ Opens:
   - admin can override each permission per user (`allow`, `deny`, or `inherit`)
   - admin UI includes a dedicated **Granular Action Permissions** panel per user
   - endpoints: `GET /api/users/:id/permissions`, `PUT /api/users/:id/permissions/:permission`
+10. **Risk-aware access prompt**:
+  - before access, operators get a live **Risk Preview** (`score`, `effectiveRiskLevel`, factors)
+  - high/critical resources enforce **Session Purpose** at creation time
+  - optional `purposeEvidence` can be attached for compliance context
+11. **Live security notifications**:
+  - the console raises real-time toast alerts when new critical audit signals are observed
+  - currently includes auth anomalies, unjustified session creation, and behavior anomaly events
+  - alerts auto-expire and can be dismissed manually
+  - powered by dedicated API polling: `GET /api/security/alerts?sinceId=<id>`
+  - incident escalation is audit-tracked via: `POST /api/security/incidents/escalate` (event type `security.incident.escalated`)
+  - active incident case lifecycle APIs:
+    - `GET /api/security/incidents/active`
+    - `POST /api/security/incidents/open`
+    - `POST /api/security/incidents/close`
+  - escalation banner can open incident cases for SOC coordination and show active case metadata
+  - escalation banner now correlates suspect sessions and provides one-click `Audit session` shortcuts
+  - correlated sessions are ranked by a risk score (signal count, criticality, recency, active status)
+  - operators with session permissions can terminate all active correlated suspects from a confirmation dialog
+  - platform admins can enable/disable containment from the incident banner to enforce justifications globally
+  - containment state API: `GET /api/security/containment` and `POST /api/security/containment`
+  - while containment is active, backend blocks session creation without `justification` and emits `session.create.blocked.containment`
 
 ### Agent Tunnel
 
@@ -199,8 +228,54 @@ For transparent access to web applications (no URL rewriting):
   --server http://bastion:8080 --token <your-token> \
   --resource 3 --local-port 8888
 
+# Open multiple tunnels with one single agent instance
+./agent/endoriumfort-agent connect \
+  --server http://bastion:8080 --token <your-token> \
+  --tunnel 3:8888 --tunnel 7:8890 --tunnel 10:8892
+
+# Open multi-tunnel agent in live management mode
+./agent/endoriumfort-agent connect \
+  --server http://bastion:8080 --token <your-token> \
+  --tunnel 3:8888 --manage
+# then use: add 7:8890 | remove 8888 | list | stats | quit
+
+# Live TUI monitoring (health + TX/RX)
+./agent/endoriumfort-agent connect \
+  --server http://bastion:8080 --token <your-token> \
+  --tunnel 3:8888 --tunnel 7:8890 --tui
+
+# Structured JSON logs
+./agent/endoriumfort-agent connect \
+  --server http://bastion:8080 --token <your-token> \
+  --tunnel 3:8888 --log-json
+
 # Browse http://127.0.0.1:8888 — traffic tunneled through bastion
 ```
+
+Security note (agent tunnel hardening):
+- The agent no longer sends long-lived auth tokens in WebSocket URL query parameters.
+- Before opening each tunnel WebSocket, the agent requests a short-lived one-time ticket from `POST /api/tunnel/ticket`.
+- The backend consumes this ticket on first use for replay resistance and tighter tunnel traceability.
+- Tunnel tickets are IP-bound server-side (issued source IP must match WebSocket source IP).
+- Tunnel auth now uses split credentials: one-time `ticket` plus one-time `proof` sent in WebSocket headers.
+- Tunnel tickets are also bound to agent `User-Agent` to reduce cross-client replay opportunities.
+- Tunnel handshake now requires a cryptographic HMAC-SHA256 proof-of-possession signature with `timestamp` + `nonce` headers.
+- Ticket issuance now includes a server challenge that must be echoed in `X-EndoriumFort-Tunnel-Challenge` and included in the handshake signature payload.
+- Ticket issuance now includes a rotating cryptographic key identifier (`signingKeyId`) that must be echoed in `X-EndoriumFort-Tunnel-Key-Id` and signed.
+- Ticket issuance also includes a server HMAC attestation (`serverAttestation`) that must be echoed in `X-EndoriumFort-Tunnel-Attestation`.
+- Backend rotates real in-memory signing secrets and verifies the attestation against current/previous secret windows.
+- Backend enforces signature freshness window (`max skew`) to block delayed/replayed handshake frames.
+- Backend now caches handshake nonces per ticket for a short TTL to reject duplicate nonce reuse attempts.
+- Backend accepts only active key IDs (current plus short grace window) to support safe key rotation without breaking active clients.
+- Tunnel ticket issuance is rate-limited per user to reduce abuse/bruteforce pressure.
+- Agent transport policy is now strict by default: HTTPS/WSS required unless explicitly overridden for lab mode (`--allow-http` or `EF_ALLOW_INSECURE_HTTP=1`).
+- A single running agent process can now host multiple concurrent local tunnels via repeated `--tunnel resource_id:local_port` options.
+- With `--manage`, tunnels can be added/removed at runtime from the same process (`add`, `remove`, `list`, `quit`) without restarting the agent.
+- Agent tracks per-tunnel health and traffic counters (`TX` / `RX` bytes), visible in `list`/`stats` manage commands and in `--tui` mode.
+- Agent retries WebSocket establishment with exponential backoff + jitter for better resilience during transient network/backend failures.
+- Agent can refresh token from `EF_TOKEN` or secure token file on auth failures to support token rotation with less downtime.
+- Token file loading now enforces strict permissions (mode `600`) for better local secret hygiene.
+- Optional `--log-json` enables structured logs for easier SIEM/observability pipelines.
 
 Or simply **click a resource tile** with the 🚀 agent protocol — the frontend generates the command automatically with a random port.
 

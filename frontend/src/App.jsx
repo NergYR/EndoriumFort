@@ -12,9 +12,17 @@ import {
   fetchHealth,
   fetchRecordingCast,
   fetchRecordings,
+  fetchContainmentStatus,
+  fetchActiveSecurityIncident,
+  openSecurityIncident,
+  closeSecurityIncident,
+  reportSecurityIncidentEscalation,
+  fetchSecurityAlerts,
+  fetchSessionDna,
   fetchResourceCredentials,
   issueEphemeralCredential,
   consumeEphemeralCredential,
+  previewSessionRisk,
   fetchResources,
   fetchSessions,
   fetchStats,
@@ -37,7 +45,8 @@ import {
   fetchAccessRequests,
   createAccessRequest,
   approveAccessRequest,
-  denyAccessRequest
+  denyAccessRequest,
+  setContainmentMode
 } from './api.js';
 
 const ROLE_BLUEPRINTS = [
@@ -101,6 +110,80 @@ const hasCapability = (role, permissions, capability) => {
     return required.some((permission) => permissions.includes(permission) || permissions.includes('*'));
   }
   return hasRoleCapabilityFallback(role, capability);
+};
+
+const LIVE_ALERT_SEVERITY_WEIGHT = {
+  critical: 3,
+  warning: 2,
+  ok: 1
+};
+
+const LIVE_ALERT_COOLDOWN_MS = {
+  critical: 0,
+  warning: 45000,
+  ok: 120000
+};
+
+const LIVE_ALERT_PROFILES = {
+  strict: {
+    cooldownMultiplier: 1.8,
+    maxVisible: { critical: 2, warning: 2, ok: 1, total: 4 }
+  },
+  normal: {
+    cooldownMultiplier: 1,
+    maxVisible: { critical: 2, warning: 3, ok: 1, total: 5 }
+  },
+  permissive: {
+    cooldownMultiplier: 0.55,
+    maxVisible: { critical: 3, warning: 4, ok: 2, total: 7 }
+  }
+};
+
+const LIVE_ALERT_PROFILE_LABEL = {
+  strict: 'Strict',
+  normal: 'Normal',
+  permissive: 'Permissive'
+};
+
+const compareLiveAlertPriority = (left, right) => {
+  const severityDelta =
+    (LIVE_ALERT_SEVERITY_WEIGHT[right.severity] || 0) -
+    (LIVE_ALERT_SEVERITY_WEIGHT[left.severity] || 0);
+  if (severityDelta !== 0) return severityDelta;
+  const rightTime = Date.parse(right.createdAt || '') || 0;
+  const leftTime = Date.parse(left.createdAt || '') || 0;
+  return rightTime - leftTime;
+};
+
+const capLiveAlertsBySeverity = (alerts, maxVisible) => {
+  const capped = [];
+  const counts = { critical: 0, warning: 0, ok: 0 };
+  for (const item of alerts) {
+    const severity = item.severity === 'critical' || item.severity === 'ok'
+      ? item.severity
+      : 'warning';
+    const severityLimit = maxVisible[severity] ?? 1;
+    if (counts[severity] >= severityLimit) {
+      continue;
+    }
+    if (capped.length >= (maxVisible.total ?? 5)) {
+      break;
+    }
+    counts[severity] += 1;
+    capped.push({ ...item, severity });
+  }
+  return capped;
+};
+
+const extractSessionIdFromAuditItem = (item) => {
+  if (!item?.payloadIsJson || !item?.payloadRaw) return null;
+  try {
+    const payload = JSON.parse(item.payloadRaw);
+    const sessionId = Number(payload?.sessionId || 0);
+    return Number.isFinite(sessionId) && sessionId > 0 ? sessionId : null;
+  } catch (_) {
+    return null;
+  }
 };
 
 export default function App() {
@@ -185,7 +268,15 @@ export default function App() {
   const [accessPromptResource, setAccessPromptResource] = useState(null);
   const [accessPromptReason, setAccessPromptReason] = useState('');
   const [accessPromptTicketId, setAccessPromptTicketId] = useState('');
+  const [accessPromptPurpose, setAccessPromptPurpose] = useState('');
+  const [accessPromptPurposeEvidence, setAccessPromptPurposeEvidence] = useState('');
   const [accessPromptMode, setAccessPromptMode] = useState('connect');
+  const [riskPreview, setRiskPreview] = useState(null);
+  const [riskPreviewLoading, setRiskPreviewLoading] = useState(false);
+  const [riskPreviewError, setRiskPreviewError] = useState('');
+  const [sessionDna, setSessionDna] = useState(null);
+  const [sessionDnaLoading, setSessionDnaLoading] = useState(false);
+  const [sessionDnaError, setSessionDnaError] = useState('');
   const [accessRequests, setAccessRequests] = useState([]);
   const [loadingAccessRequests, setLoadingAccessRequests] = useState(false);
   const [accessRequestError, setAccessRequestError] = useState('');
@@ -211,6 +302,30 @@ export default function App() {
   const [securityAuditItems, setSecurityAuditItems] = useState([]);
   const [loadingSecurityAudit, setLoadingSecurityAudit] = useState(false);
   const [securityAuditError, setSecurityAuditError] = useState('');
+  const [liveSecurityAlerts, setLiveSecurityAlerts] = useState([]);
+  const [liveSecurityIncident, setLiveSecurityIncident] = useState(null);
+  const [containmentStatus, setContainmentStatus] = useState({
+    enabled: false,
+    updatedAt: '',
+    updatedBy: '',
+    reason: ''
+  });
+  const [activeSecurityIncident, setActiveSecurityIncident] = useState({
+    active: false,
+    incident: null
+  });
+  const [incidentCaseBusy, setIncidentCaseBusy] = useState(false);
+  const [containmentBusy, setContainmentBusy] = useState(false);
+  const [incidentTerminateConfirmOpen, setIncidentTerminateConfirmOpen] = useState(false);
+  const [incidentTerminateBusy, setIncidentTerminateBusy] = useState(false);
+  const [liveAlertProfile, setLiveAlertProfile] = useState(() => {
+    try {
+      const saved = localStorage.getItem('endoriumfort_live_alert_profile');
+      return saved && LIVE_ALERT_PROFILES[saved] ? saved : 'normal';
+    } catch (_) {
+      return 'normal';
+    }
+  });
   // Audit search
   const [auditSearchQuery, setAuditSearchQuery] = useState('');
   const [auditTypeFilter, setAuditTypeFilter] = useState('');
@@ -248,12 +363,25 @@ export default function App() {
   const terminalInstanceRef = useRef(null);
   const fitAddonRef = useRef(null);
   const socketRef = useRef(null);
+  const securityFeedBootstrappedRef = useRef(false);
+  const lastSecurityAuditIdRef = useRef(0);
+  const liveAlertCooldownByTypeRef = useRef({});
+  const liveIncidentCriticalTimestampsRef = useRef([]);
+  const liveIncidentCooldownUntilRef = useRef(0);
 
   const canManagePlatform = hasCapability(auth.role, auth.permissions, 'manageResources');
   const canViewAudit = hasCapability(auth.role, auth.permissions, 'viewAudit');
   const canViewRecordings = hasCapability(auth.role, auth.permissions, 'viewRecordings');
   const canOperateSessions = hasCapability(auth.role, auth.permissions, 'operateSessions');
   const roleName = roleLabel(auth.role);
+  const activeLiveAlertProfile = LIVE_ALERT_PROFILES[liveAlertProfile] || LIVE_ALERT_PROFILES.normal;
+  const containmentEnabled = !!containmentStatus.enabled;
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('endoriumfort_live_alert_profile', liveAlertProfile);
+    } catch (_) {}
+  }, [liveAlertProfile]);
   const tabGuide = useMemo(() => {
     const base = {
       overview: {
@@ -544,6 +672,15 @@ export default function App() {
     if (!auth.token || !canViewAudit) {
       setSecurityAuditItems([]);
       setSecurityAuditError('');
+      setLiveSecurityAlerts([]);
+      setLiveSecurityIncident(null);
+      setContainmentStatus({ enabled: false, updatedAt: '', updatedBy: '', reason: '' });
+      setActiveSecurityIncident({ active: false, incident: null });
+      securityFeedBootstrappedRef.current = false;
+      lastSecurityAuditIdRef.current = 0;
+      liveAlertCooldownByTypeRef.current = {};
+      liveIncidentCriticalTimestampsRef.current = [];
+      liveIncidentCooldownUntilRef.current = 0;
       return;
     }
     let active = true;
@@ -570,6 +707,423 @@ export default function App() {
       clearInterval(interval);
     };
   }, [auth.token, canViewAudit]);
+
+  useEffect(() => {
+    if (!auth.token || !canViewAudit) {
+      setContainmentStatus({ enabled: false, updatedAt: '', updatedBy: '', reason: '' });
+      return;
+    }
+    let active = true;
+    const load = () => {
+      fetchContainmentStatus()
+        .then((data) => {
+          if (!active) return;
+          setContainmentStatus({
+            enabled: !!data?.enabled,
+            updatedAt: data?.updatedAt || '',
+            updatedBy: data?.updatedBy || '',
+            reason: data?.reason || ''
+          });
+        })
+        .catch(() => {
+          if (!active) return;
+          setContainmentStatus({ enabled: false, updatedAt: '', updatedBy: '', reason: '' });
+        });
+    };
+    load();
+    const interval = window.setInterval(load, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [auth.token, canViewAudit]);
+
+  useEffect(() => {
+    if (!auth.token || !canViewAudit) {
+      setActiveSecurityIncident({ active: false, incident: null });
+      return;
+    }
+    let active = true;
+    const load = () => {
+      fetchActiveSecurityIncident()
+        .then((data) => {
+          if (!active) return;
+          setActiveSecurityIncident({
+            active: !!data?.active,
+            incident: data?.incident || null
+          });
+        })
+        .catch(() => {
+          if (!active) return;
+          setActiveSecurityIncident({ active: false, incident: null });
+        });
+    };
+    load();
+    const interval = window.setInterval(load, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [auth.token, canViewAudit]);
+
+  useEffect(() => {
+    if (!auth.token || !canViewAudit) {
+      return undefined;
+    }
+
+    let active = true;
+    const load = async () => {
+      try {
+        const sinceId = lastSecurityAuditIdRef.current;
+        const data = await fetchSecurityAlerts(sinceId);
+        if (!active) return;
+
+        const nextMaxId = Number(data?.maxEventId) || sinceId;
+        const items = Array.isArray(data?.items) ? data.items : [];
+
+        if (!securityFeedBootstrappedRef.current) {
+          securityFeedBootstrappedRef.current = true;
+          lastSecurityAuditIdRef.current = Math.max(sinceId, nextMaxId);
+          return;
+        }
+
+        if (items.length) {
+          const nowMs = Date.now();
+          const incidentWindowMs = 5 * 60 * 1000;
+          const incidentThreshold = 3;
+          const nextCriticalTimestamps = [
+            ...liveIncidentCriticalTimestampsRef.current.filter((ts) => ts >= nowMs - incidentWindowMs),
+            ...items
+              .filter((item) => String(item.severity || '').toLowerCase() === 'critical')
+              .map((item) => Date.parse(item.createdAt || '') || nowMs)
+          ];
+          liveIncidentCriticalTimestampsRef.current = nextCriticalTimestamps;
+
+          if (
+            nextCriticalTimestamps.length >= incidentThreshold &&
+            nowMs >= liveIncidentCooldownUntilRef.current
+          ) {
+            liveIncidentCooldownUntilRef.current = nowMs + incidentWindowMs;
+            setLiveSecurityIncident({
+              key: `incident:${nowMs}`,
+              createdAt: new Date(nowMs).toISOString(),
+              criticalCount: nextCriticalTimestamps.length,
+              title: 'Potential Security Incident',
+              hint: 'Multiple critical signals observed in a short window. Escalate and investigate immediately.'
+            });
+            reportSecurityIncidentEscalation({
+              criticalCount: nextCriticalTimestamps.length,
+              windowSeconds: Math.floor(incidentWindowMs / 1000),
+              profile: liveAlertProfile
+            }).catch(() => {
+              // Keep incident UX independent from audit reporting failures.
+            });
+
+            if (!activeSecurityIncident?.active) {
+              openSecurityIncident({
+                criticalCount: nextCriticalTimestamps.length,
+                windowSeconds: Math.floor(incidentWindowMs / 1000),
+                profile: liveAlertProfile,
+                title: 'Potential Security Incident',
+                summary: 'Automatically opened from repeated critical live security signals.'
+              })
+                .then((opened) => {
+                  setActiveSecurityIncident({
+                    active: !!opened?.active,
+                    incident: opened?.incident || null
+                  });
+                })
+                .catch(() => {
+                  // Keep signal-to-incident UI non-blocking.
+                });
+            }
+          }
+
+          setLiveSecurityAlerts((prev) => {
+            const existing = new Set(prev.map((item) => item.key));
+            const throttledBySeverity = { critical: 0, warning: 0, ok: 0 };
+            const incoming = items
+              .map((item) => ({
+                key: `${item.id}:${item.eventType}`,
+                eventType: item.eventType,
+                sessionId: Number(item.sessionId) || null,
+                createdAt: item.createdAt,
+                severity: item.severity || 'warning',
+                title: item.title || 'Security Signal',
+                hint: item.hint || 'Investigate in audit timeline.'
+              }))
+              .sort(compareLiveAlertPriority)
+              .filter((item) => {
+                if (existing.has(item.key)) return false;
+                const baseCooldown = LIVE_ALERT_COOLDOWN_MS[item.severity] ?? 60000;
+                const cooldownMs = Math.round(
+                  baseCooldown * (activeLiveAlertProfile.cooldownMultiplier || 1)
+                );
+                const cooldownKey = item.eventType || item.severity;
+                const lastShownAt = liveAlertCooldownByTypeRef.current[cooldownKey] || 0;
+                if (nowMs - lastShownAt < cooldownMs) {
+                  throttledBySeverity[item.severity] =
+                    (throttledBySeverity[item.severity] || 0) + 1;
+                  return false;
+                }
+                liveAlertCooldownByTypeRef.current[cooldownKey] = nowMs;
+                return true;
+              });
+
+            const suppressedCount = Object.values(throttledBySeverity).reduce(
+              (sum, count) => sum + count,
+              0
+            );
+            if (suppressedCount > 0) {
+              incoming.push({
+                key: `throttled:${nowMs}`,
+                eventType: 'security.alerts.throttled',
+                createdAt: new Date(nowMs).toISOString(),
+                severity:
+                  throttledBySeverity.warning > 0 || throttledBySeverity.critical > 0
+                    ? 'warning'
+                    : 'ok',
+                title: `${suppressedCount} signal${suppressedCount > 1 ? 's' : ''} grouped`,
+                hint: 'Low-priority duplicates were throttled to keep focus on high-risk events.'
+              });
+            }
+
+            const merged = [...incoming, ...prev].sort(compareLiveAlertPriority);
+            return capLiveAlertsBySeverity(merged, activeLiveAlertProfile.maxVisible);
+          });
+        }
+
+        lastSecurityAuditIdRef.current = Math.max(sinceId, nextMaxId);
+      } catch (_) {
+        // Keep security feed non-blocking for the rest of the UI.
+      }
+    };
+
+    load();
+    const interval = window.setInterval(load, 10000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [auth.token, canViewAudit, activeLiveAlertProfile, activeSecurityIncident]);
+
+  useEffect(() => {
+    if (!liveSecurityAlerts.length) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      setLiveSecurityAlerts((prev) => prev.slice(0, -1));
+    }, 9000);
+    return () => window.clearTimeout(timer);
+  }, [liveSecurityAlerts]);
+
+  const dismissLiveSecurityAlert = (alertKey) => {
+    setLiveSecurityAlerts((prev) => prev.filter((item) => item.key !== alertKey));
+  };
+
+  const dismissLiveSecurityIncident = () => {
+    setLiveSecurityIncident(null);
+  };
+
+  const incidentSuspectSessions = useMemo(() => {
+    if (!liveSecurityIncident) return [];
+    const incidentTs = Date.parse(liveSecurityIncident.createdAt || '') || Date.now();
+    const since = incidentTs - 5 * 60 * 1000;
+    const bySessionId = new Map();
+
+    const touchSuspicion = (sessionId, severity, createdAt) => {
+      if (!sessionId || sessionId <= 0) return;
+      const existing = bySessionId.get(sessionId) || {
+        sessionId,
+        signals: 0,
+        criticalSignals: 0,
+        lastSignalAt: 0
+      };
+      const signalTs = Date.parse(createdAt || '') || incidentTs;
+      existing.signals += 1;
+      if (String(severity || '').toLowerCase() === 'critical') {
+        existing.criticalSignals += 1;
+      }
+      existing.lastSignalAt = Math.max(existing.lastSignalAt, signalTs);
+      bySessionId.set(sessionId, existing);
+    };
+
+    securityAuditItems.forEach((item) => {
+      const created = Date.parse(item?.createdAt || '') || 0;
+      if (created < since) return;
+      const type = String(item?.type || '').toLowerCase();
+      const isSuspicious =
+        type.includes('behavior.anomaly') ||
+        type.includes('session.create.unjustified') ||
+        (type.includes('session.dna') && type.includes('mismatch'));
+      if (!isSuspicious) return;
+      const sid = extractSessionIdFromAuditItem(item);
+      const severity = type.includes('mismatch') ? 'critical' : 'warning';
+      touchSuspicion(sid, severity, item?.createdAt);
+    });
+
+    liveSecurityAlerts.forEach((item) => {
+      const created = Date.parse(item?.createdAt || '') || 0;
+      if (created < since) return;
+      const sid = Number(item?.sessionId) || 0;
+      touchSuspicion(sid, item?.severity, item?.createdAt);
+    });
+
+    return Array.from(bySessionId.values())
+      .map((entry) => {
+        const matched = sessions.find((session) => session.id === entry.sessionId) || {
+          id: entry.sessionId,
+          status: 'unknown',
+          target: 'n/a',
+          user: 'n/a'
+        };
+        const minutesSince = Math.max(0, Math.floor((incidentTs - entry.lastSignalAt) / 60000));
+        const recencyBonus = Math.max(0, 20 - minutesSince * 4);
+        const activeBonus = matched.status === 'active' ? 30 : 0;
+        const score =
+          entry.signals * 20 +
+          entry.criticalSignals * 25 +
+          activeBonus +
+          recencyBonus;
+        return {
+          ...matched,
+          score,
+          signals: entry.signals,
+          criticalSignals: entry.criticalSignals,
+          lastSignalAt: entry.lastSignalAt
+        };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 4);
+  }, [liveSecurityIncident, securityAuditItems, liveSecurityAlerts, sessions]);
+
+  const activeIncidentSuspectSessions = useMemo(
+    () => incidentSuspectSessions.filter((session) => session.status === 'active'),
+    [incidentSuspectSessions]
+  );
+
+  const requestTerminateIncidentSuspects = () => {
+    if (!canOperateSessions) {
+      setSessionError('You are not allowed to terminate sessions.');
+      return;
+    }
+    if (!activeIncidentSuspectSessions.length) {
+      setSessionError('No active correlated suspect sessions to terminate.');
+      return;
+    }
+    setIncidentTerminateConfirmOpen(true);
+  };
+
+  const confirmTerminateIncidentSuspects = async () => {
+    if (!activeIncidentSuspectSessions.length || incidentTerminateBusy) {
+      return;
+    }
+    setIncidentTerminateBusy(true);
+    try {
+      const ids = activeIncidentSuspectSessions.map((session) => session.id);
+      const results = await Promise.allSettled(ids.map((id) => terminateSession(id)));
+      const updatedById = new Map();
+      let failed = 0;
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled' && result.value) {
+          updatedById.set(ids[index], result.value);
+        } else {
+          failed += 1;
+        }
+      });
+
+      if (updatedById.size > 0) {
+        setSessions((prev) =>
+          prev.map((item) => updatedById.get(item.id) || item)
+        );
+      }
+
+      if (failed > 0) {
+        setSessionError(`${failed} suspect session(s) could not be terminated.`);
+      } else {
+        setSessionError('');
+      }
+    } catch (error) {
+      setSessionError(error.message || 'Unable to terminate correlated suspect sessions');
+    } finally {
+      setIncidentTerminateBusy(false);
+      setIncidentTerminateConfirmOpen(false);
+    }
+  };
+
+  const setContainmentEnabled = async (enabled) => {
+    if (containmentBusy) return;
+    if (!canManagePlatform) {
+      setSessionError('Only platform admins can change containment mode.');
+      return;
+    }
+    setContainmentBusy(true);
+    try {
+      const payload = await setContainmentMode({
+        enabled,
+        reason: liveSecurityIncident?.title || 'incident.escalation'
+      });
+      setContainmentStatus({
+        enabled: !!payload?.enabled,
+        updatedAt: payload?.updatedAt || '',
+        updatedBy: payload?.updatedBy || auth.user,
+        reason: payload?.reason || ''
+      });
+      setSessionError('');
+    } catch (error) {
+      setSessionError(error.message || 'Unable to update containment mode');
+    } finally {
+      setContainmentBusy(false);
+    }
+  };
+
+  const openIncidentCase = async () => {
+    if (incidentCaseBusy) return;
+    setIncidentCaseBusy(true);
+    try {
+      const payload = await openSecurityIncident({
+        criticalCount: Number(liveSecurityIncident?.criticalCount || 0),
+        windowSeconds: 300,
+        profile: liveAlertProfile,
+        title: liveSecurityIncident?.title || 'Potential Security Incident',
+        summary: liveSecurityIncident?.hint || 'Opened manually from incident banner.'
+      });
+      setActiveSecurityIncident({
+        active: !!payload?.active,
+        incident: payload?.incident || null
+      });
+      setSessionError('');
+    } catch (error) {
+      setSessionError(error.message || 'Unable to open incident case');
+    } finally {
+      setIncidentCaseBusy(false);
+    }
+  };
+
+  const closeIncidentCase = async () => {
+    if (incidentCaseBusy || !activeSecurityIncident?.active) return;
+    setIncidentCaseBusy(true);
+    try {
+      await closeSecurityIncident({
+        reason: liveSecurityIncident?.title || 'Incident mitigated and closed from UI'
+      });
+      setActiveSecurityIncident((prev) => ({
+        active: false,
+        incident: prev?.incident
+          ? {
+              ...prev.incident,
+              closedAt: new Date().toISOString(),
+              closeReason: liveSecurityIncident?.title || 'Incident mitigated and closed from UI'
+            }
+          : prev?.incident
+      }));
+      setSessionError('');
+    } catch (error) {
+      setSessionError(error.message || 'Unable to close incident case');
+    } finally {
+      setIncidentCaseBusy(false);
+    }
+  };
 
   const onAuthChange = (event) => {
     const { name, value } = event.target;
@@ -651,9 +1205,11 @@ export default function App() {
       }
       if (canViewAudit) {
         requests.push(fetchAudit());
+        requests.push(fetchContainmentStatus());
+        requests.push(fetchActiveSecurityIncident());
       }
       const results = await Promise.all(requests);
-      const [sessionData, resourceData, statsData, maybeUsersOrAudit, maybeAudit] = results;
+      const [sessionData, resourceData, statsData, maybeUsersOrAudit, maybeAudit, maybeContainment, maybeIncident] = results;
 
       setSessions(Array.isArray(sessionData?.items) ? sessionData.items : []);
       setResources(Array.isArray(resourceData?.items) ? resourceData.items : []);
@@ -665,6 +1221,18 @@ export default function App() {
         const auditData = canManagePlatform ? maybeAudit : maybeUsersOrAudit;
         const items = Array.isArray(auditData?.items) ? auditData.items : [];
         setSecurityAuditItems(items);
+        const containmentData = canManagePlatform ? maybeContainment : maybeAudit;
+        setContainmentStatus({
+          enabled: !!containmentData?.enabled,
+          updatedAt: containmentData?.updatedAt || '',
+          updatedBy: containmentData?.updatedBy || '',
+          reason: containmentData?.reason || ''
+        });
+        const incidentData = canManagePlatform ? maybeIncident : maybeContainment;
+        setActiveSecurityIncident({
+          active: !!incidentData?.active,
+          incident: incidentData?.incident || null
+        });
         if (auditOpen) {
           setAuditItems(items);
         }
@@ -918,6 +1486,8 @@ export default function App() {
         port: resource.port,
         justification: (accessMeta.justification || '').trim(),
         ticketId: (accessMeta.ticketId || '').trim(),
+        purpose: (accessMeta.purpose || '').trim(),
+        purposeEvidence: (accessMeta.purposeEvidence || '').trim(),
         accessRequestId: accessMeta.accessRequestId || undefined
       };
       const created = await createSession(payload);
@@ -957,7 +1527,21 @@ export default function App() {
     }
   };
 
+  const closeAccessPrompt = () => {
+    setAccessPromptResource(null);
+    setAccessPromptReason('');
+    setAccessPromptTicketId('');
+    setAccessPromptPurpose('');
+    setAccessPromptPurposeEvidence('');
+    setAccessPromptMode('connect');
+    setRiskPreview(null);
+    setRiskPreviewError('');
+  };
+
   const onConnectResource = async (resource) => {
+    const protocol = String(resource?.protocol || '').toLowerCase();
+    const sessionBackedProtocol = protocol !== 'http' && protocol !== 'https' && protocol !== 'agent';
+
     if (resource.requireDualApproval && !canManagePlatform) {
       const approved = accessRequests.find(
         (item) =>
@@ -977,14 +1561,22 @@ export default function App() {
       setAccessPromptResource(resource);
       setAccessPromptReason('');
       setAccessPromptTicketId('');
+      setAccessPromptPurpose('');
+      setAccessPromptPurposeEvidence('');
+      setRiskPreview(null);
+      setRiskPreviewError('');
       return;
     }
 
-    if (resource.requireAccessJustification) {
+    if (resource.requireAccessJustification || (containmentEnabled && sessionBackedProtocol)) {
       setAccessPromptMode('connect');
       setAccessPromptResource(resource);
       setAccessPromptReason('');
       setAccessPromptTicketId('');
+      setAccessPromptPurpose('');
+      setAccessPromptPurposeEvidence('');
+      setRiskPreview(null);
+      setRiskPreviewError('');
       return;
     }
     await connectToResource(resource);
@@ -997,7 +1589,19 @@ export default function App() {
     }
     const reason = accessPromptReason.trim();
     if (!reason) {
-      setSessionError('Access reason is required for this resource.');
+      setSessionError(
+        containmentEnabled
+          ? 'Access reason is required while containment mode is active.'
+          : 'Access reason is required for this resource.'
+      );
+      return;
+    }
+    const purpose = accessPromptPurpose.trim();
+    const purposeEvidence = accessPromptPurposeEvidence.trim();
+    const riskLevel = String(accessPromptResource.riskLevel || '').toLowerCase();
+    const purposeRequired = riskLevel === 'high' || riskLevel === 'critical';
+    if (purposeRequired && !purpose) {
+      setSessionError('High-risk resources require a purpose.');
       return;
     }
     if (accessPromptMode === 'request') {
@@ -1009,10 +1613,7 @@ export default function App() {
         });
         setAccessRequests((prev) => [created, ...prev]);
         setSessionError('Access request submitted. Wait for admin approval.');
-        setAccessPromptResource(null);
-        setAccessPromptReason('');
-        setAccessPromptTicketId('');
-        setAccessPromptMode('connect');
+        closeAccessPrompt();
         return;
       } catch (error) {
         setSessionError(error.message || 'Unable to submit access request');
@@ -1021,13 +1622,62 @@ export default function App() {
     }
     const connected = await connectToResource(accessPromptResource, {
       justification: reason,
-      ticketId: accessPromptTicketId.trim()
+      ticketId: accessPromptTicketId.trim(),
+      purpose,
+      purposeEvidence
     });
     if (connected) {
-      setAccessPromptResource(null);
-      setAccessPromptReason('');
-      setAccessPromptTicketId('');
-      setAccessPromptMode('connect');
+      closeAccessPrompt();
+    }
+  };
+
+  useEffect(() => {
+    if (!accessPromptResource || !auth.token) {
+      setRiskPreview(null);
+      setRiskPreviewError('');
+      return undefined;
+    }
+    const timer = window.setTimeout(async () => {
+      setRiskPreviewLoading(true);
+      try {
+        const data = await previewSessionRisk({
+          resourceId: accessPromptResource.id,
+          justification: accessPromptReason.trim(),
+          ticketId: accessPromptTicketId.trim(),
+          purpose: accessPromptPurpose.trim()
+        });
+        setRiskPreview(data);
+        setRiskPreviewError('');
+      } catch (error) {
+        setRiskPreview(null);
+        setRiskPreviewError(error.message || 'Unable to compute risk preview');
+      } finally {
+        setRiskPreviewLoading(false);
+      }
+    }, 220);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    accessPromptResource,
+    accessPromptReason,
+    accessPromptTicketId,
+    accessPromptPurpose,
+    auth.token
+  ]);
+
+  const onOpenSessionDna = async (sessionId) => {
+    setSessionDnaLoading(true);
+    setSessionDnaError('');
+    setSessionDna(null);
+    try {
+      const data = await fetchSessionDna(sessionId);
+      setSessionDna(data);
+    } catch (error) {
+      setSessionDnaError(error.message || 'Unable to load session DNA');
+    } finally {
+      setSessionDnaLoading(false);
     }
   };
 
@@ -1803,7 +2453,7 @@ export default function App() {
         </div>
       ) : (
         <div className="admin-grid">
-          <div className="panel reveal">
+          <div className="panel reveal permissions-panel">
             <div className="panel-header">
               <div>
                 <h3>{editingResourceId ? 'Edit resource' : 'New resource'}</h3>
@@ -2261,13 +2911,17 @@ export default function App() {
             </div>
           </div>
 
-          {selectedUserForPermissions && (
-            <div className="panel reveal">
-              <div className="panel-header">
-                <div>
-                  <h3>Resource Permissions</h3>
-                  <p>Assign resources to {selectedUserForPermissions.username}</p>
-                </div>
+          <div className="panel reveal permissions-panel">
+            <div className="panel-header">
+              <div>
+                <h3>Granular Permissions</h3>
+                <p>
+                  {selectedUserForPermissions
+                    ? `Manage access rights for ${selectedUserForPermissions.username}`
+                    : 'Select a user and click Permissions to manage granular rights.'}
+                </p>
+              </div>
+              {selectedUserForPermissions && (
                 <button
                   type="button"
                   className="ghost"
@@ -2280,89 +2934,99 @@ export default function App() {
                 >
                   Close
                 </button>
-              </div>
-              {loadingPermissions && <p>Loading permissions...</p>}
-              {permissionsError && <p className="error">{permissionsError}</p>}
-              <div className="resource-list">
-                {resources.length ? (
-                  resources.map((resource) => (
-                    <article className="resource-row" key={resource.id}>
-                      <div>
-                        <div
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '12px'
-                          }}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={userPermissions.includes(resource.id)}
-                            onChange={() =>
-                              onToggleResourcePermission(resource.id)
-                            }
-                            style={{ cursor: 'pointer' }}
-                          />
-                          <div>
-                            <h4>{resource.name}</h4>
-                            <p className="muted">
-                              {resource.protocol} {resource.target}:
-                              {resource.port}
-                            </p>
+              )}
+            </div>
+
+            {!selectedUserForPermissions ? (
+              <p className="muted">No user selected yet.</p>
+            ) : (
+              <>
+                {loadingPermissions && <p>Loading permissions...</p>}
+                {permissionsError && <p className="error">{permissionsError}</p>}
+                <div className="panel-header" style={{ marginTop: '0.5rem' }}>
+                  <div>
+                    <h3>Resource Permissions</h3>
+                    <p>Assign resource scope.</p>
+                  </div>
+                </div>
+                <div className="resource-list permissions-resources-list">
+                  {resources.length ? (
+                    resources.map((resource) => (
+                      <article className="resource-row compact-perm-row" key={resource.id}>
+                        <div>
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '12px'
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={userPermissions.includes(resource.id)}
+                              onChange={() => onToggleResourcePermission(resource.id)}
+                              style={{ cursor: 'pointer' }}
+                            />
+                            <div>
+                              <h4>{resource.name}</h4>
+                              <p className="muted">
+                                {resource.protocol} {resource.target}:{resource.port}
+                              </p>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </article>
-                  ))
-                ) : (
-                  <p className="muted">No resources yet.</p>
-                )}
-              </div>
-
-              <div className="panel-header" style={{ marginTop: '1rem' }}>
-                <div>
-                  <h3>Granular Action Permissions</h3>
-                  <p>Set per-action override policy for this user.</p>
-                </div>
-              </div>
-              <div className="resource-list">
-                {granularPermissions.length ? (
-                  granularPermissions.map((permission) => {
-                    const key = `${selectedUserForPermissions.id}:${permission.name}`;
-                    const isSaving = updatingPermissionKey === key;
-                    return (
-                      <article className="resource-row" key={permission.name}>
-                        <div>
-                          <h4>{permission.name}</h4>
-                          <p className="muted">
-                            Effective: {permission.effective ? 'allowed' : 'denied'}
-                          </p>
-                        </div>
-                        <div className="resource-actions">
-                          <select
-                            value={permission.override || 'inherit'}
-                            disabled={isSaving}
-                            onChange={(event) =>
-                              onChangeGranularPermissionOverride(
-                                permission.name,
-                                event.target.value
-                              )
-                            }
-                          >
-                            <option value="inherit">inherit</option>
-                            <option value="allow">allow</option>
-                            <option value="deny">deny</option>
-                          </select>
-                        </div>
                       </article>
-                    );
-                  })
-                ) : (
-                  <p className="muted">No granular permissions loaded.</p>
-                )}
-              </div>
-            </div>
-          )}
+                    ))
+                  ) : (
+                    <p className="muted">No resources yet.</p>
+                  )}
+                </div>
+
+                <div className="panel-header" style={{ marginTop: '1rem' }}>
+                  <div>
+                    <h3>Action-Level Overrides</h3>
+                    <p>Set per-action policy: inherit, allow, deny.</p>
+                  </div>
+                </div>
+                <div className="resource-list permissions-grid">
+                  {granularPermissions.length ? (
+                    granularPermissions.map((permission) => {
+                      const key = `${selectedUserForPermissions.id}:${permission.name}`;
+                      const isSaving = updatingPermissionKey === key;
+                      return (
+                        <article className="resource-row compact-perm-row" key={permission.name}>
+                          <div>
+                            <h4>{permission.name}</h4>
+                            <p className="muted">
+                              Effective: {permission.effective ? 'allowed' : 'denied'}
+                            </p>
+                          </div>
+                          <div className="resource-actions">
+                            <select
+                              value={permission.override || 'inherit'}
+                              disabled={isSaving}
+                              onChange={(event) =>
+                                onChangeGranularPermissionOverride(
+                                  permission.name,
+                                  event.target.value
+                                )
+                              }
+                            >
+                              <option value="inherit">inherit</option>
+                              <option value="allow">allow</option>
+                              <option value="deny">deny</option>
+                            </select>
+                          </div>
+                        </article>
+                      );
+                    })
+                  ) : (
+                    <p className="muted">No granular permissions loaded.</p>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
 
           {/* 2FA Management Panel */}
           <div className="panel reveal">
@@ -2463,6 +3127,151 @@ export default function App() {
 
   const renderMain = () => (
     <div className="page compact">
+      {canViewAudit && liveSecurityIncident && (
+        <section className="incident-banner critical reveal" role="alert" aria-live="assertive">
+          <div>
+            <p className="incident-kicker">Escalation Triggered</p>
+            <h3>{liveSecurityIncident.title}</h3>
+            <p className="muted">{liveSecurityIncident.hint}</p>
+            <p className="muted">
+              {liveSecurityIncident.criticalCount} critical signals in the last 5 minutes · triggered {formatRelativeDate(liveSecurityIncident.createdAt)}
+            </p>
+            {containmentEnabled && (
+              <p className="incident-containment-state">
+                Containment active{containmentStatus.updatedBy ? ` by ${containmentStatus.updatedBy}` : ''}
+                {containmentStatus.updatedAt ? ` · ${formatRelativeDate(containmentStatus.updatedAt)}` : ''}
+              </p>
+            )}
+            {activeSecurityIncident?.active && activeSecurityIncident?.incident?.id > 0 && (
+              <p className="incident-case-state">
+                Active case #{activeSecurityIncident.incident.id}
+                {activeSecurityIncident.incident.openedBy ? ` · opened by ${activeSecurityIncident.incident.openedBy}` : ''}
+                {activeSecurityIncident.incident.openedAt ? ` · ${formatRelativeDate(activeSecurityIncident.incident.openedAt)}` : ''}
+              </p>
+            )}
+            {incidentSuspectSessions.length > 0 && (
+              <div className="incident-sessions">
+                <p className="muted">Correlated sessions (highest risk first):</p>
+                <div className="incident-session-list">
+                  {incidentSuspectSessions.map((session) => (
+                    <button
+                      key={`incident-session-${session.id}`}
+                      type="button"
+                      className="ghost incident-session-chip"
+                      onClick={() => openAudit(session.id)}
+                    >
+                      Session #{session.id} · score {session.score} · {session.status}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="incident-actions">
+            <button type="button" className="secondary" onClick={() => openAudit()}>
+              Investigate now
+            </button>
+            {liveAlertProfile !== 'strict' && (
+              <button type="button" className="ghost" onClick={() => setLiveAlertProfile('strict')}>
+                Switch to strict
+              </button>
+            )}
+            {!activeSecurityIncident?.active && (
+              <button type="button" className="ghost" onClick={openIncidentCase} disabled={incidentCaseBusy}>
+                {incidentCaseBusy ? 'Opening incident...' : 'Open incident case'}
+              </button>
+            )}
+            {canManagePlatform && activeSecurityIncident?.active && (
+              <button type="button" className="ghost" onClick={closeIncidentCase} disabled={incidentCaseBusy}>
+                {incidentCaseBusy ? 'Closing incident...' : 'Close incident case'}
+              </button>
+            )}
+            {canManagePlatform && !containmentEnabled && (
+              <button type="button" className="ghost" onClick={() => setContainmentEnabled(true)} disabled={containmentBusy}>
+                {containmentBusy ? 'Enabling containment...' : 'Enable containment'}
+              </button>
+            )}
+            {canManagePlatform && containmentEnabled && (
+              <button type="button" className="ghost" onClick={() => setContainmentEnabled(false)} disabled={containmentBusy}>
+                {containmentBusy ? 'Updating containment...' : 'Disable containment'}
+              </button>
+            )}
+            {canOperateSessions && activeIncidentSuspectSessions.length > 0 && (
+              <button type="button" className="ghost" onClick={requestTerminateIncidentSuspects}>
+                Terminate active suspects ({activeIncidentSuspectSessions.length})
+              </button>
+            )}
+            <button type="button" className="ghost" onClick={dismissLiveSecurityIncident}>
+              Dismiss
+            </button>
+          </div>
+        </section>
+      )}
+
+      {incidentTerminateConfirmOpen && (
+        <div className="modal-overlay" onClick={() => !incidentTerminateBusy && setIncidentTerminateConfirmOpen(false)}>
+          <div className="modal-content" onClick={(event) => event.stopPropagation()}>
+            <h3>Confirm Session Termination</h3>
+            <p>
+              You are about to terminate {activeIncidentSuspectSessions.length} active correlated suspect session(s).
+              This action is immediate.
+            </p>
+            <div className="resource-actions" style={{ marginTop: '0.9rem' }}>
+              <button type="button" onClick={confirmTerminateIncidentSuspects} disabled={incidentTerminateBusy}>
+                {incidentTerminateBusy ? 'Terminating...' : 'Confirm terminate'}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => setIncidentTerminateConfirmOpen(false)}
+                disabled={incidentTerminateBusy}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {canViewAudit && (
+        <div className="live-alert-stack" role="status" aria-live="polite">
+          <div className="live-alert-toolbar">
+            <strong>Alert Noise Filter</strong>
+            <div className="live-alert-profile-tabs" role="group" aria-label="Live alert filter mode">
+              {Object.keys(LIVE_ALERT_PROFILES).map((profileKey) => (
+                <button
+                  type="button"
+                  key={profileKey}
+                  className={`live-alert-profile-btn ${liveAlertProfile === profileKey ? 'active' : ''}`}
+                  onClick={() => setLiveAlertProfile(profileKey)}
+                >
+                  {LIVE_ALERT_PROFILE_LABEL[profileKey] || profileKey}
+                </button>
+              ))}
+            </div>
+          </div>
+          {liveSecurityAlerts.map((alert) => (
+            <article className={`live-alert ${alert.severity}`} key={alert.key}>
+              <div className="live-alert-head">
+                <strong>{alert.title}</strong>
+                <span className="live-alert-severity">{String(alert.severity || 'warning').toUpperCase()}</span>
+                <button
+                  type="button"
+                  className="ghost live-alert-close"
+                  onClick={() => dismissLiveSecurityAlert(alert.key)}
+                >
+                  Dismiss
+                </button>
+              </div>
+              <p className="muted">{alert.hint}</p>
+              <p className="muted">
+                {alert.eventType} - {formatRelativeDate(alert.createdAt)}
+              </p>
+            </article>
+          ))}
+        </div>
+      )}
+
       <header className="topbar">
         <div className="brand">
           <img src="/assets/logo-icon-dark.png" alt="EndoriumFort" className="brand-logo" />
@@ -2836,6 +3645,15 @@ export default function App() {
                     <button
                       type="button"
                       className="ghost"
+                      onClick={() => onOpenSessionDna(session.id)}
+                    >
+                      Session DNA
+                    </button>
+                  )}
+                  {canViewAudit && (
+                    <button
+                      type="button"
+                      className="ghost"
                       onClick={() => openRecordings(session.id)}
                     >
                       Recordings
@@ -3011,37 +3829,34 @@ export default function App() {
             )}
           </div>
           {castData && (
-            <div style={{ marginTop: '16px', background: '#111827', borderRadius: '8px', padding: '16px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                <h4 style={{ color: '#f9fafb', margin: 0 }}>Replay — Recording #{castRecordingId}</h4>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <div className="recording-player-card">
+              <div className="recording-player-header">
+                <h4 className="recording-player-title">Replay — Recording #{castRecordingId}</h4>
+                <div className="recording-player-actions">
                   {!playerPlaying ? (
                     <button
                       type="button"
-                      className="secondary"
+                      className="secondary recording-player-btn"
                       onClick={startPlayer}
-                      style={{ fontSize: '0.8rem', padding: '0.4rem 0.8rem' }}
                     >
                       ▶ Play
                     </button>
                   ) : (
                     <button
                       type="button"
-                      className="secondary"
+                      className="secondary recording-player-btn"
                       onClick={stopPlayer}
-                      style={{ fontSize: '0.8rem', padding: '0.4rem 0.8rem' }}
                     >
                       ⏸ Pause
                     </button>
                   )}
-                  <span style={{ color: '#9ca3af', fontSize: '0.8rem' }}>
+                  <span className="recording-player-meta">
                     {playerIndex}/{playerEvents.length} events
                   </span>
                   <button
                     type="button"
-                    className="ghost"
+                    className="ghost recording-player-close"
                     onClick={closePlayer}
-                    style={{ color: '#9ca3af' }}
                   >
                     Close
                   </button>
@@ -3052,7 +3867,7 @@ export default function App() {
                 ref={playerTermRef}
                 style={{ minHeight: '240px', borderRadius: '6px' }}
               />
-              <p className="muted" style={{ marginTop: '8px', fontSize: '11px' }}>
+              <p className="recording-player-note">
                 Animated replay powered by xterm.js. Click Play to watch the session unfold in real time.
               </p>
             </div>
@@ -3154,10 +3969,7 @@ export default function App() {
       {accessPromptResource && (
         <div
           className="modal-overlay"
-          onClick={() => {
-            setAccessPromptResource(null);
-            setAccessPromptMode('connect');
-          }}
+          onClick={closeAccessPrompt}
         >
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <h3>
@@ -3168,9 +3980,33 @@ export default function App() {
             <p className="muted" style={{ marginTop: 0 }}>
               {accessPromptMode === 'request'
                 ? `${accessPromptResource.name} requires an approval workflow before session start.`
-                : `${accessPromptResource.name} requires an access reason before opening the session.`}
+                : containmentEnabled
+                  ? `${accessPromptResource.name} requires an access reason because containment mode is active.`
+                  : `${accessPromptResource.name} requires an access reason before opening the session.`}
             </p>
+            {containmentEnabled && accessPromptMode === 'connect' && containmentStatus.reason && (
+              <p className="muted" style={{ marginTop: 0 }}>
+                Containment context: {containmentStatus.reason}
+              </p>
+            )}
             <form onSubmit={onSubmitAccessPrompt}>
+              <div className="risk-preview-box">
+                <strong>Risk Preview</strong>
+                {riskPreviewLoading && <p className="muted">Calculating risk score...</p>}
+                {riskPreviewError && <p className="error">{riskPreviewError}</p>}
+                {riskPreview && (
+                  <>
+                    <p className="muted" style={{ marginBottom: '0.35rem' }}>
+                      Score: <strong>{riskPreview.score}/100</strong> ({riskPreview.effectiveRiskLevel})
+                    </p>
+                    <p className="muted" style={{ margin: 0 }}>
+                      {Array.isArray(riskPreview.factors)
+                        ? riskPreview.factors.join(' - ')
+                        : 'No factors'}
+                    </p>
+                  </>
+                )}
+              </div>
               <label>
                 Access reason
                 <input
@@ -3190,6 +4026,31 @@ export default function App() {
                   placeholder="INC-1234 / CHG-5678"
                 />
               </label>
+              <label>
+                Session purpose {(String(accessPromptResource.riskLevel || '').toLowerCase() === 'high' ||
+                String(accessPromptResource.riskLevel || '').toLowerCase() === 'critical')
+                  ? '(required for high-risk)'
+                  : '(optional)'}
+                <input
+                  type="text"
+                  value={accessPromptPurpose}
+                  onChange={(event) => setAccessPromptPurpose(event.target.value)}
+                  placeholder="Maintenance, incident response, onboarding..."
+                  required={
+                    String(accessPromptResource.riskLevel || '').toLowerCase() === 'high' ||
+                    String(accessPromptResource.riskLevel || '').toLowerCase() === 'critical'
+                  }
+                />
+              </label>
+              <label>
+                Purpose evidence (optional)
+                <input
+                  type="text"
+                  value={accessPromptPurposeEvidence}
+                  onChange={(event) => setAccessPromptPurposeEvidence(event.target.value)}
+                  placeholder="Change request, SOP ref, ticket notes"
+                />
+              </label>
               <div style={{ display: 'flex', gap: '0.8rem', marginTop: '0.8rem' }}>
                 <button type="submit">
                   {accessPromptMode === 'request' ? 'Submit request' : 'Continue'}
@@ -3197,17 +4058,68 @@ export default function App() {
                 <button
                   type="button"
                   className="ghost"
-                  onClick={() => {
-                    setAccessPromptResource(null);
-                    setAccessPromptReason('');
-                    setAccessPromptTicketId('');
-                    setAccessPromptMode('connect');
-                  }}
+                  onClick={closeAccessPrompt}
                 >
                   Cancel
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {sessionDnaLoading && (
+        <div className="modal-overlay" onClick={() => setSessionDnaLoading(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>Session DNA</h3>
+            <p className="muted">Loading chain...</p>
+          </div>
+        </div>
+      )}
+
+      {(sessionDna || sessionDnaError) && !sessionDnaLoading && (
+        <div
+          className="modal-overlay"
+          onClick={() => {
+            setSessionDna(null);
+            setSessionDnaError('');
+          }}
+        >
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>Session DNA {sessionDna?.sessionId ? `#${sessionDna.sessionId}` : ''}</h3>
+            {sessionDnaError && <p className="error">{sessionDnaError}</p>}
+            {sessionDna && (
+              <>
+                <p className="muted" style={{ marginTop: 0 }}>
+                  Integrity: {sessionDna.verified ? 'verified' : 'mismatch detected'}
+                </p>
+                <div className="audit-timeline" style={{ maxHeight: '320px', overflowY: 'auto' }}>
+                  {(sessionDna.entries || []).length ? (
+                    sessionDna.entries.map((entry) => (
+                      <article key={`dna-${entry.id}`}>
+                        <strong>{entry.eventType}</strong>
+                        <p>#{entry.id} - {entry.createdAt}</p>
+                        <p>hash: {String(entry.chainHash || '').slice(0, 20)}...</p>
+                      </article>
+                    ))
+                  ) : (
+                    <p className="muted">No DNA entries for this session.</p>
+                  )}
+                </div>
+              </>
+            )}
+            <div style={{ marginTop: '0.8rem' }}>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  setSessionDna(null);
+                  setSessionDnaError('');
+                }}
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -117,6 +117,27 @@ export async function createSession(payload) {
   return response.json();
 }
 
+export async function previewSessionRisk(payload) {
+  const response = await fetch('/api/sessions/risk-preview', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload)
+  });
+  await ensureResponseOk(response, 'Failed to preview session risk');
+  return response.json();
+}
+
+export async function fetchSessionDna(sessionId) {
+  const response = await fetch(`/api/sessions/${sessionId}/dna`, {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch session DNA');
+  return response.json();
+}
+
 export async function terminateSession(sessionId) {
   const response = await fetch(`/api/sessions/${sessionId}/terminate`, {
     method: 'POST',
@@ -131,6 +152,82 @@ export async function fetchAudit() {
     headers: withAuthHeaders()
   });
   await ensureResponseOk(response, 'Failed to fetch audit log');
+  return response.json();
+}
+
+export async function fetchSecurityAlerts(sinceId = 0) {
+  const response = await fetch(`/api/security/alerts?sinceId=${Number(sinceId) || 0}`, {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch security alerts');
+  return response.json();
+}
+
+export async function reportSecurityIncidentEscalation(payload) {
+  const response = await fetch('/api/security/incidents/escalate', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to report security incident escalation');
+  return response.json();
+}
+
+export async function fetchContainmentStatus() {
+  const response = await fetch('/api/security/containment', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch containment status');
+  return response.json();
+}
+
+export async function setContainmentMode(payload) {
+  const response = await fetch('/api/security/containment', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to update containment mode');
+  return response.json();
+}
+
+export async function fetchActiveSecurityIncident() {
+  const response = await fetch('/api/security/incidents/active', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch active incident');
+  return response.json();
+}
+
+export async function openSecurityIncident(payload) {
+  const response = await fetch('/api/security/incidents/open', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to open security incident');
+  return response.json();
+}
+
+export async function closeSecurityIncident(payload) {
+  const response = await fetch('/api/security/incidents/close', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to close security incident');
   return response.json();
 }
 

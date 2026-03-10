@@ -15,6 +15,31 @@ namespace {
 constexpr int64_t kApprovedAccessTtlSeconds = 3600;
 constexpr int64_t kEphemeralLeaseTtlSeconds = 120;
 
+int base_risk_score_for_level(const std::string &risk_level) {
+  if (risk_level == "critical") return 85;
+  if (risk_level == "high") return 70;
+  if (risk_level == "medium") return 40;
+  return 15;
+}
+
+std::string risk_level_for_score(int score) {
+  if (score >= 80) return "critical";
+  if (score >= 60) return "high";
+  if (score >= 35) return "medium";
+  return "low";
+}
+
+bool is_off_hours_utc() {
+  const std::time_t now = std::time(nullptr);
+  std::tm utc_tm{};
+#ifdef _WIN32
+  gmtime_s(&utc_tm, &now);
+#else
+  gmtime_r(&now, &utc_tm);
+#endif
+  return utc_tm.tm_hour < 6 || utc_tm.tm_hour >= 20;
+}
+
 bool has_permission(AppContext &ctx, const AuthSession &auth,
                     const std::string &permission) {
   return ctx.has_permission(auth.userId, auth.role, permission);
@@ -32,6 +57,59 @@ bool can_access_any_resource(AppContext &ctx, const AuthSession &auth) {
   if (has_permission(ctx, auth, "resources.manage")) return true;
   if (has_permission(ctx, auth, "resources.read")) return true;
   return false;
+}
+
+struct SecurityAlertTemplate {
+  std::string severity;
+  std::string title;
+  std::string hint;
+};
+
+std::optional<SecurityAlertTemplate> classify_security_alert_type(
+    const std::string &event_type_raw) {
+  const std::string event_type = to_lower(event_type_raw);
+  if (event_type.find("security.incident.opened") != std::string::npos) {
+    return SecurityAlertTemplate{"warning", "Incident Case Opened",
+                                 "An active incident case has been declared for coordination."};
+  }
+  if (event_type.find("security.incident.closed") != std::string::npos) {
+    return SecurityAlertTemplate{"ok", "Incident Case Closed",
+                                 "Incident coordination case has been closed."};
+  }
+  if (event_type.find("security.containment.enabled") != std::string::npos) {
+    return SecurityAlertTemplate{"warning", "Containment Mode Enabled",
+                                 "Session opens now require explicit justification."};
+  }
+  if (event_type.find("auth.login.failure") != std::string::npos ||
+      event_type.find("auth.login.rate_limited") != std::string::npos ||
+      event_type.find("auth.rate_limit") != std::string::npos) {
+    return SecurityAlertTemplate{"critical", "Authentication Anomaly",
+                                 "Repeated login failures or throttling detected."};
+  }
+  if (event_type.find("behavior.anomaly") != std::string::npos) {
+    return SecurityAlertTemplate{"warning", "Behavioral Anomaly",
+                                 "Unusual activity pattern detected in session telemetry."};
+  }
+  if (event_type.find("session.create.unjustified") != std::string::npos) {
+    return SecurityAlertTemplate{"warning", "Unjustified Session Opened",
+                                 "Session opened without explicit justification."};
+  }
+  if (event_type.find("session.dna") != std::string::npos &&
+      event_type.find("mismatch") != std::string::npos) {
+    return SecurityAlertTemplate{"critical", "Session DNA Integrity Mismatch",
+                                 "Audit chain verification issue detected."};
+  }
+  return std::nullopt;
+}
+
+std::optional<int> extract_session_id_from_audit_event(const AuditEvent &event) {
+  if (!event.payloadIsJson || event.payloadJson.empty()) return std::nullopt;
+  auto payload = crow::json::load(event.payloadJson);
+  if (!payload) return std::nullopt;
+  if (!payload.has("sessionId")) return std::nullopt;
+  int session_id = payload["sessionId"].i();
+  if (session_id <= 0) return std::nullopt;
+  return session_id;
 }
 }
 
@@ -1207,6 +1285,75 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
     return crow::response{payload};
   });
 
+  // POST /api/sessions/risk-preview
+  CROW_ROUTE(app, "/api/sessions/risk-preview").methods(crow::HTTPMethod::Post)(
+      [&ctx](const crow::request &request) {
+        auto auth = ctx.find_auth(request);
+        if (!auth) return crow::response(401, "Unauthorized");
+        if (!has_permission(ctx, *auth, "sessions.create"))
+          return crow::response(403, "Forbidden");
+
+        auto body = crow::json::load(request.body);
+        if (!body) return crow::response(400, "Invalid JSON body");
+
+        int resource_id = body.has("resourceId") ? body["resourceId"].i() : 0;
+        std::string risk_level = "low";
+        bool adaptive_policy_enabled = false;
+        bool purpose_required = false;
+
+        if (resource_id > 0) {
+          std::lock_guard<std::mutex> lock(ctx.resource_mutex);
+          auto it = ctx.resources.find(resource_id);
+          if (it == ctx.resources.end()) return crow::response(404, "Resource not found");
+          risk_level = to_lower(it->second.riskLevel);
+          adaptive_policy_enabled = it->second.adaptiveAccessPolicy;
+          purpose_required = (risk_level == "high" || risk_level == "critical");
+        }
+
+        std::string justification =
+            body.has("justification") ? std::string(body["justification"].s()) : "";
+        std::string ticket_id =
+            body.has("ticketId") ? std::string(body["ticketId"].s()) : "";
+        std::string purpose =
+            body.has("purpose") ? std::string(body["purpose"].s()) : "";
+
+        int score = base_risk_score_for_level(risk_level);
+        std::vector<std::string> factors;
+        factors.push_back("base:" + risk_level);
+
+        if (justification.empty()) {
+          score += 10;
+          factors.push_back("missing_justification:+10");
+        }
+        if ((risk_level == "high" || risk_level == "critical") && ticket_id.empty()) {
+          score += 10;
+          factors.push_back("missing_ticket_high_risk:+10");
+        }
+        if (purpose_required && purpose.empty()) {
+          score += 15;
+          factors.push_back("missing_purpose_bound:+15");
+        }
+        if (is_off_hours_utc()) {
+          score += 10;
+          factors.push_back("off_hours_utc:+10");
+        }
+        if (score < 0) score = 0;
+        if (score > 100) score = 100;
+
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["score"] = score;
+        payload["effectiveRiskLevel"] = risk_level_for_score(score);
+        payload["resourceRiskLevel"] = risk_level;
+        payload["adaptivePolicyEnabled"] = adaptive_policy_enabled;
+        payload["purposeRequired"] = purpose_required;
+        payload["factors"] = crow::json::wvalue::list();
+        for (size_t i = 0; i < factors.size(); ++i) {
+          payload["factors"][static_cast<int>(i)] = factors[i];
+        }
+        return crow::response{payload};
+      });
+
   // POST /api/sessions
   CROW_ROUTE(app, "/api/sessions").methods(crow::HTTPMethod::Post)(
       [&ctx](const crow::request &request) {
@@ -1226,6 +1373,12 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
         std::string ticket_id = body.has("ticketId")
                                     ? std::string(body["ticketId"].s())
                                     : "";
+        std::string purpose = body.has("purpose")
+                ? std::string(body["purpose"].s())
+                : "";
+        std::string purpose_evidence = body.has("purposeEvidence")
+                   ? std::string(body["purposeEvidence"].s())
+                   : "";
         int resource_id = 0;
         if (body.has("resourceId")) resource_id = body["resourceId"].i();
         int access_request_id = 0;
@@ -1240,10 +1393,15 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
           return crow::response(400, "justification is too long (max 280 chars)");
         if (ticket_id.size() > 80)
           return crow::response(400, "ticketId is too long (max 80 chars)");
+        if (purpose.size() > 120)
+          return crow::response(400, "purpose is too long (max 120 chars)");
+        if (purpose_evidence.size() > 280)
+          return crow::response(400, "purposeEvidence is too long (max 280 chars)");
 
         bool justification_required = false;
         bool dual_approval_required = false;
         bool adaptive_policy_enabled = false;
+        bool purpose_required = false;
         std::string risk_level = "low";
         if (resource_id > 0) {
           Resource resource;
@@ -1275,6 +1433,9 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
           dual_approval_required = resource.requireDualApproval;
           adaptive_policy_enabled = resource.adaptiveAccessPolicy;
           risk_level = to_lower(resource.riskLevel);
+          if (risk_level == "high" || risk_level == "critical") {
+            purpose_required = true;
+          }
         }
         if (justification_required && justification.empty()) {
           return crow::response(
@@ -1345,6 +1506,38 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
                 "High-risk resources require a ticketId under adaptive policy");
           }
         }
+        if (purpose_required && purpose.empty()) {
+          return crow::response(
+              400,
+              "High-risk resources require a purpose (purpose-bound session)");
+        }
+
+        bool containment_enabled = false;
+        std::string containment_reason;
+        {
+          std::lock_guard<std::mutex> lock(ctx.containment_mutex);
+          containment_enabled = ctx.containment_mode_enabled;
+          containment_reason = ctx.containment_reason;
+        }
+        if (containment_enabled && justification.empty()) {
+          AuditEvent blocked_event;
+          blocked_event.id = ctx.next_audit_id.fetch_add(1);
+          blocked_event.type = "session.create.blocked.containment";
+          blocked_event.actor = auth->user;
+          blocked_event.role = auth->role;
+          blocked_event.createdAt = now_utc();
+          blocked_event.payloadJson =
+              "{\"resourceId\":" + std::to_string(resource_id) +
+              ",\"target\":\"" + json_escape(target) + "\"" +
+              ",\"reason\":\"missing_justification\"" +
+              ",\"containmentReason\":\"" +
+              json_escape(containment_reason) + "\"}";
+          blocked_event.payloadIsJson = true;
+          ctx.append_audit(blocked_event);
+          return crow::response(
+              400,
+              "Containment mode is enabled: provide a justification to open this session");
+        }
 
         Session session;
         session.id = ctx.next_session_id.fetch_add(1);
@@ -1369,7 +1562,8 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
         event.role = auth->role;
         event.createdAt = now_utc();
         event.payloadJson = build_session_payload_json(session);
-        if (!justification.empty() || !ticket_id.empty()) {
+        if (!justification.empty() || !ticket_id.empty() || !purpose.empty() ||
+            !purpose_evidence.empty()) {
           if (!event.payloadJson.empty() && event.payloadJson.back() == '}') {
             event.payloadJson.pop_back();
           }
@@ -1380,6 +1574,14 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
           if (!ticket_id.empty()) {
             event.payloadJson +=
                 ",\"ticketId\":\"" + json_escape(ticket_id) + "\"";
+          }
+          if (!purpose.empty()) {
+            event.payloadJson +=
+                ",\"purpose\":\"" + json_escape(purpose) + "\"";
+          }
+          if (!purpose_evidence.empty()) {
+            event.payloadJson += ",\"purposeEvidence\":\"" +
+                                 json_escape(purpose_evidence) + "\"";
           }
           event.payloadJson += "}";
         }
@@ -1392,7 +1594,27 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
         }
         event.payloadIsJson = true;
         ctx.append_audit(event);
+        ctx.append_session_dna_entry(session.id, event.id, event.type,
+                                     event.payloadJson, event.createdAt);
         ctx.append_session_event("session.create", session);
+
+        if (!purpose.empty()) {
+          AuditEvent purpose_event;
+          purpose_event.id = ctx.next_audit_id.fetch_add(1);
+          purpose_event.type = "session.purpose.bound";
+          purpose_event.actor = auth->user;
+          purpose_event.role = auth->role;
+          purpose_event.createdAt = now_utc();
+          purpose_event.payloadJson =
+              "{\"sessionId\":" + std::to_string(session.id) +
+              ",\"purpose\":\"" + json_escape(purpose) + "\"}";
+          purpose_event.payloadIsJson = true;
+          ctx.append_audit(purpose_event);
+          ctx.append_session_dna_entry(session.id, purpose_event.id,
+                                       purpose_event.type,
+                                       purpose_event.payloadJson,
+                                       purpose_event.createdAt);
+        }
 
         // Compliance signal: track sessions opened without explicit reason.
         if (justification.empty()) {
@@ -1406,6 +1628,10 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
                                      std::to_string(session.id) + "}";
           reason_event.payloadIsJson = true;
           ctx.append_audit(reason_event);
+          ctx.append_session_dna_entry(session.id, reason_event.id,
+                                       reason_event.type,
+                                       reason_event.payloadJson,
+                                       reason_event.createdAt);
         }
 
         crow::json::wvalue payload = session_to_json(session);
@@ -1424,6 +1650,66 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
         if (it == ctx.sessions.end())
           return crow::response(404, "Session not found");
         crow::json::wvalue payload = session_to_json(it->second);
+        return crow::response{payload};
+      });
+
+  // GET /api/sessions/<int>/dna
+  CROW_ROUTE(app, "/api/sessions/<int>/dna")(
+      [&ctx](const crow::request &request, int session_id) {
+        auto auth = ctx.find_auth(request);
+        if (!auth) return crow::response(401, "Unauthorized");
+        if (!has_permission(ctx, *auth, "sessions.read"))
+          return crow::response(403, "Forbidden");
+
+        auto entries = ctx.get_session_dna_chain(session_id);
+        if (entries.empty()) {
+          crow::json::wvalue payload;
+          payload["status"] = "ok";
+          payload["sessionId"] = session_id;
+          payload["entries"] = crow::json::wvalue::list();
+          payload["verified"] = true;
+          payload["message"] = "No session DNA entries";
+          return crow::response{payload};
+        }
+
+        bool verified = true;
+        std::string reason;
+        std::string prev = "GENESIS";
+        for (const auto &entry : entries) {
+          if (entry.prevHash != prev) {
+            verified = false;
+            reason = "prev_hash_mismatch_at_entry_" + std::to_string(entry.id);
+            break;
+          }
+          const std::string expected = crypto::sha256_hex(
+              entry.prevHash + "|" + entry.eventType + "|" +
+              entry.payloadHash + "|" + entry.createdAt);
+          if (expected != entry.chainHash) {
+            verified = false;
+            reason = "chain_hash_mismatch_at_entry_" +
+                     std::to_string(entry.id);
+            break;
+          }
+          prev = entry.chainHash;
+        }
+
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["sessionId"] = session_id;
+        payload["verified"] = verified;
+        payload["entries"] = crow::json::wvalue::list();
+        for (size_t i = 0; i < entries.size(); ++i) {
+          crow::json::wvalue row;
+          row["id"] = entries[i].id;
+          row["auditEventId"] = entries[i].auditEventId;
+          row["eventType"] = entries[i].eventType;
+          row["createdAt"] = entries[i].createdAt;
+          row["prevHash"] = entries[i].prevHash;
+          row["payloadHash"] = entries[i].payloadHash;
+          row["chainHash"] = entries[i].chainHash;
+          payload["entries"][static_cast<int>(i)] = std::move(row);
+        }
+        if (!verified) payload["reason"] = reason;
         return crow::response{payload};
       });
 
@@ -1503,6 +1789,358 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
 // ══════════════════════════════════════════════════════════════════════
 
 void register_audit_routes(CrowApp &app, AppContext &ctx) {
+  // GET /api/security/alerts
+  CROW_ROUTE(app, "/api/security/alerts")([&ctx](const crow::request &request) {
+    auto auth = ctx.find_auth(request);
+    if (!auth) return crow::response(401, "Unauthorized");
+    if (!has_permission(ctx, *auth, "audit.read"))
+      return crow::response(403, "Forbidden");
+
+    const char *since_param = request.url_params.get("sinceId");
+    const int since_id = parse_int_param(since_param).value_or(0);
+
+    std::vector<AuditEvent> snapshot;
+    int max_event_id = since_id;
+    {
+      std::lock_guard<std::mutex> lock(ctx.audit_mutex);
+      snapshot.reserve(ctx.audit_events.size());
+      for (const auto &event : ctx.audit_events) {
+        if (event.id > max_event_id) max_event_id = event.id;
+        if (event.id > since_id) snapshot.push_back(event);
+      }
+    }
+
+    crow::json::wvalue payload;
+    payload["status"] = "ok";
+    payload["sinceId"] = since_id;
+    payload["maxEventId"] = max_event_id;
+    payload["items"] = crow::json::wvalue::list();
+
+    int index = 0;
+    for (const auto &event : snapshot) {
+      const auto classification = classify_security_alert_type(event.type);
+      if (!classification) continue;
+      payload["items"][index]["id"] = event.id;
+      payload["items"][index]["eventType"] = event.type;
+      payload["items"][index]["createdAt"] = event.createdAt;
+      payload["items"][index]["actor"] = event.actor;
+      payload["items"][index]["severity"] = classification->severity;
+      payload["items"][index]["title"] = classification->title;
+      payload["items"][index]["hint"] = classification->hint;
+      auto session_id = extract_session_id_from_audit_event(event);
+      if (session_id) {
+        payload["items"][index]["sessionId"] = *session_id;
+      }
+      ++index;
+      if (index >= 100) break;
+    }
+
+    return crow::response{payload};
+  });
+
+  // POST /api/security/incidents/escalate
+  CROW_ROUTE(app, "/api/security/incidents/escalate")
+      .methods(crow::HTTPMethod::Post)([&ctx](const crow::request &request) {
+        auto auth = ctx.find_auth(request);
+        if (!auth) return crow::response(401, "Unauthorized");
+        if (!has_permission(ctx, *auth, "audit.read"))
+          return crow::response(403, "Forbidden");
+
+        auto body = crow::json::load(request.body);
+        int critical_count = 0;
+        int window_seconds = 0;
+        std::string profile = "normal";
+        if (body) {
+          if (body.has("criticalCount")) critical_count = body["criticalCount"].i();
+          if (body.has("windowSeconds")) window_seconds = body["windowSeconds"].i();
+          if (body.has("profile")) profile = body["profile"].s();
+        }
+
+        AuditEvent event;
+        event.id = ctx.next_audit_id.fetch_add(1);
+        event.type = "security.incident.escalated";
+        event.actor = auth->user;
+        event.role = auth->role;
+        event.createdAt = now_utc();
+        event.payloadJson =
+            "{\"criticalCount\":" + std::to_string(std::max(0, critical_count)) +
+            ",\"windowSeconds\":" + std::to_string(std::max(0, window_seconds)) +
+            ",\"profile\":\"" + json_escape(profile) +
+            "\",\"source\":\"frontend.live_alert\"}";
+        event.payloadIsJson = true;
+        ctx.append_audit(event);
+
+        crow::json::wvalue payload;
+        payload["status"] = "accepted";
+        payload["id"] = event.id;
+        return crow::response{payload};
+      });
+
+  // GET /api/security/containment
+  CROW_ROUTE(app, "/api/security/containment")([&ctx](const crow::request &request) {
+    auto auth = ctx.find_auth(request);
+    if (!auth) return crow::response(401, "Unauthorized");
+    if (!has_permission(ctx, *auth, "audit.read"))
+      return crow::response(403, "Forbidden");
+
+    bool enabled = false;
+    std::string updated_at;
+    std::string updated_by;
+    std::string reason;
+    {
+      std::lock_guard<std::mutex> lock(ctx.containment_mutex);
+      enabled = ctx.containment_mode_enabled;
+      updated_at = ctx.containment_updated_at;
+      updated_by = ctx.containment_updated_by;
+      reason = ctx.containment_reason;
+    }
+
+    crow::json::wvalue payload;
+    payload["status"] = "ok";
+    payload["enabled"] = enabled;
+    payload["updatedAt"] = updated_at;
+    payload["updatedBy"] = updated_by;
+    payload["reason"] = reason;
+    return crow::response{payload};
+  });
+
+  // POST /api/security/containment
+  CROW_ROUTE(app, "/api/security/containment")
+      .methods(crow::HTTPMethod::Post)([&ctx](const crow::request &request) {
+        auto auth = ctx.find_auth(request);
+        if (!auth) return crow::response(401, "Unauthorized");
+        if (!has_permission(ctx, *auth, "resources.manage"))
+          return crow::response(403, "Forbidden");
+
+        auto body = crow::json::load(request.body);
+        if (!body || !body.has("enabled"))
+          return crow::response(400, "Missing enabled field");
+
+        const bool enabled = body["enabled"].b();
+        std::string reason = body.has("reason") ? std::string(body["reason"].s()) : "";
+        if (reason.size() > 280)
+          return crow::response(400, "reason is too long (max 280 chars)");
+
+        const std::string updated_at = now_utc();
+        {
+          std::lock_guard<std::mutex> lock(ctx.containment_mutex);
+          ctx.containment_mode_enabled = enabled;
+          ctx.containment_updated_at = updated_at;
+          ctx.containment_updated_by = auth->user;
+          ctx.containment_reason = reason;
+        }
+
+        AuditEvent event;
+        event.id = ctx.next_audit_id.fetch_add(1);
+        event.type = enabled ? "security.containment.enabled"
+                             : "security.containment.disabled";
+        event.actor = auth->user;
+        event.role = auth->role;
+        event.createdAt = updated_at;
+        event.payloadJson =
+            "{\"enabled\":" + std::string(enabled ? "true" : "false") +
+            ",\"reason\":\"" + json_escape(reason) +
+            "\",\"source\":\"frontend.incident_banner\"}";
+        event.payloadIsJson = true;
+        ctx.append_audit(event);
+
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["enabled"] = enabled;
+        payload["updatedAt"] = updated_at;
+        payload["updatedBy"] = auth->user;
+        payload["reason"] = reason;
+        payload["auditId"] = event.id;
+        return crow::response{payload};
+      });
+
+  // GET /api/security/incidents/active
+  CROW_ROUTE(app, "/api/security/incidents/active")([&ctx](const crow::request &request) {
+    auto auth = ctx.find_auth(request);
+    if (!auth) return crow::response(401, "Unauthorized");
+    if (!has_permission(ctx, *auth, "audit.read"))
+      return crow::response(403, "Forbidden");
+
+    bool active = false;
+    int incident_id = 0;
+    int critical_count = 0;
+    int window_seconds = 0;
+    std::string profile;
+    std::string title;
+    std::string summary;
+    std::string opened_at;
+    std::string opened_by;
+    std::string closed_at;
+    std::string closed_by;
+    std::string close_reason;
+    {
+      std::lock_guard<std::mutex> lock(ctx.incident_mutex);
+      active = ctx.incident_active;
+      incident_id = ctx.incident_id;
+      critical_count = ctx.incident_critical_count;
+      window_seconds = ctx.incident_window_seconds;
+      profile = ctx.incident_profile;
+      title = ctx.incident_title;
+      summary = ctx.incident_summary;
+      opened_at = ctx.incident_opened_at;
+      opened_by = ctx.incident_opened_by;
+      closed_at = ctx.incident_closed_at;
+      closed_by = ctx.incident_closed_by;
+      close_reason = ctx.incident_close_reason;
+    }
+
+    crow::json::wvalue payload;
+    payload["status"] = "ok";
+    payload["active"] = active;
+    payload["incident"]["id"] = incident_id;
+    payload["incident"]["criticalCount"] = critical_count;
+    payload["incident"]["windowSeconds"] = window_seconds;
+    payload["incident"]["profile"] = profile;
+    payload["incident"]["title"] = title;
+    payload["incident"]["summary"] = summary;
+    payload["incident"]["openedAt"] = opened_at;
+    payload["incident"]["openedBy"] = opened_by;
+    payload["incident"]["closedAt"] = closed_at;
+    payload["incident"]["closedBy"] = closed_by;
+    payload["incident"]["closeReason"] = close_reason;
+    return crow::response{payload};
+  });
+
+  // POST /api/security/incidents/open
+  CROW_ROUTE(app, "/api/security/incidents/open")
+      .methods(crow::HTTPMethod::Post)([&ctx](const crow::request &request) {
+        auto auth = ctx.find_auth(request);
+        if (!auth) return crow::response(401, "Unauthorized");
+        if (!has_permission(ctx, *auth, "audit.read"))
+          return crow::response(403, "Forbidden");
+
+        auto body = crow::json::load(request.body);
+        int critical_count = 0;
+        int window_seconds = 0;
+        std::string profile = "normal";
+        std::string title = "Potential Security Incident";
+        std::string summary = "Escalated from live security signals.";
+        if (body) {
+          if (body.has("criticalCount")) critical_count = body["criticalCount"].i();
+          if (body.has("windowSeconds")) window_seconds = body["windowSeconds"].i();
+          if (body.has("profile")) profile = body["profile"].s();
+          if (body.has("title")) title = body["title"].s();
+          if (body.has("summary")) summary = body["summary"].s();
+        }
+        if (title.size() > 140)
+          return crow::response(400, "title is too long (max 140 chars)");
+        if (summary.size() > 280)
+          return crow::response(400, "summary is too long (max 280 chars)");
+
+        int incident_id = 0;
+        std::string opened_at;
+        {
+          std::lock_guard<std::mutex> lock(ctx.incident_mutex);
+          if (ctx.incident_active) {
+            return crow::response(409, "An incident case is already active");
+          }
+          incident_id = ctx.next_incident_id.fetch_add(1);
+          opened_at = now_utc();
+          ctx.incident_active = true;
+          ctx.incident_id = incident_id;
+          ctx.incident_critical_count = std::max(0, critical_count);
+          ctx.incident_window_seconds = std::max(0, window_seconds);
+          ctx.incident_profile = profile;
+          ctx.incident_title = title;
+          ctx.incident_summary = summary;
+          ctx.incident_opened_at = opened_at;
+          ctx.incident_opened_by = auth->user;
+          ctx.incident_closed_at.clear();
+          ctx.incident_closed_by.clear();
+          ctx.incident_close_reason.clear();
+        }
+
+        AuditEvent event;
+        event.id = ctx.next_audit_id.fetch_add(1);
+        event.type = "security.incident.opened";
+        event.actor = auth->user;
+        event.role = auth->role;
+        event.createdAt = opened_at;
+        event.payloadJson =
+            "{\"incidentId\":" + std::to_string(incident_id) +
+            ",\"criticalCount\":" + std::to_string(std::max(0, critical_count)) +
+            ",\"windowSeconds\":" + std::to_string(std::max(0, window_seconds)) +
+            ",\"profile\":\"" + json_escape(profile) +
+            "\",\"title\":\"" + json_escape(title) +
+            "\",\"source\":\"frontend.incident_banner\"}";
+        event.payloadIsJson = true;
+        ctx.append_audit(event);
+
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["active"] = true;
+        payload["incident"]["id"] = incident_id;
+        payload["incident"]["criticalCount"] = std::max(0, critical_count);
+        payload["incident"]["windowSeconds"] = std::max(0, window_seconds);
+        payload["incident"]["profile"] = profile;
+        payload["incident"]["title"] = title;
+        payload["incident"]["summary"] = summary;
+        payload["incident"]["openedAt"] = opened_at;
+        payload["incident"]["openedBy"] = auth->user;
+        payload["auditId"] = event.id;
+        return crow::response{payload};
+      });
+
+  // POST /api/security/incidents/close
+  CROW_ROUTE(app, "/api/security/incidents/close")
+      .methods(crow::HTTPMethod::Post)([&ctx](const crow::request &request) {
+        auto auth = ctx.find_auth(request);
+        if (!auth) return crow::response(401, "Unauthorized");
+        if (!has_permission(ctx, *auth, "resources.manage"))
+          return crow::response(403, "Forbidden");
+
+        auto body = crow::json::load(request.body);
+        std::string reason = body && body.has("reason") ? std::string(body["reason"].s()) : "";
+        if (reason.size() > 280)
+          return crow::response(400, "reason is too long (max 280 chars)");
+
+        int incident_id = 0;
+        std::string incident_title;
+        std::string closed_at;
+        {
+          std::lock_guard<std::mutex> lock(ctx.incident_mutex);
+          if (!ctx.incident_active) {
+            return crow::response(404, "No active incident case");
+          }
+          incident_id = ctx.incident_id;
+          incident_title = ctx.incident_title;
+          closed_at = now_utc();
+          ctx.incident_active = false;
+          ctx.incident_closed_at = closed_at;
+          ctx.incident_closed_by = auth->user;
+          ctx.incident_close_reason = reason;
+        }
+
+        AuditEvent event;
+        event.id = ctx.next_audit_id.fetch_add(1);
+        event.type = "security.incident.closed";
+        event.actor = auth->user;
+        event.role = auth->role;
+        event.createdAt = closed_at;
+        event.payloadJson =
+            "{\"incidentId\":" + std::to_string(incident_id) +
+            ",\"title\":\"" + json_escape(incident_title) +
+            "\",\"reason\":\"" + json_escape(reason) +
+            "\",\"source\":\"frontend.incident_banner\"}";
+        event.payloadIsJson = true;
+        ctx.append_audit(event);
+
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["active"] = false;
+        payload["incidentId"] = incident_id;
+        payload["closedAt"] = closed_at;
+        payload["closedBy"] = auth->user;
+        payload["reason"] = reason;
+        payload["auditId"] = event.id;
+        return crow::response{payload};
+      });
+
   // POST /api/audit
   CROW_ROUTE(app, "/api/audit").methods(crow::HTTPMethod::Post)(
       [&ctx](const crow::request &request) {

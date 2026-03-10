@@ -1,5 +1,101 @@
 # Changelog
 
+## v0.5.21 - 2026-03-09
+### Security UX: Live Notification Stream
+- Added in-app **live security toast notifications** in the main console.
+- New high-signal audit events now raise immediate user-facing alerts:
+  - authentication anomalies (`auth.login.failure`, `auth.rate_limit`)
+  - unjustified session openings (`session.create.unjustified`)
+  - behavior anomaly signals (`behavior.anomaly.*`)
+- Alerts include event type + relative timestamp, support manual dismiss, and auto-expire to reduce noise.
+- Live toast delivery now includes **priority ordering + per-type throttling** to surface critical signals first and suppress repetitive noise.
+- Added operator-selectable live-alert filter modes (`strict`, `normal`, `permissive`) with persisted preference.
+- Added **severity-aware display caps** (e.g., warning and critical limits) to avoid UI flood while preserving high-priority visibility.
+- Added automatic **incident escalation banner** when multiple critical signals are detected within a short rolling window.
+- Added backend escalation audit endpoint and event:
+  - `POST /api/security/incidents/escalate`
+  - emits `security.incident.escalated` for end-to-end incident traceability
+- Live escalation banner now correlates and surfaces suspicious session IDs with direct audit shortcuts.
+- Correlated suspect sessions are now prioritized by a computed risk score.
+- Added `Terminate active suspects` action (confirmation-gated, permission-aware) from incident escalation banner.
+- Added incident-driven **Containment Mode** toggle (admin) with new backend APIs:
+  - `GET /api/security/containment`
+  - `POST /api/security/containment`
+- While containment is enabled, session creation now requires `justification` server-side and emits `session.create.blocked.containment` when denied.
+- Added active incident lifecycle APIs for explicit SOC case management:
+  - `GET /api/security/incidents/active`
+  - `POST /api/security/incidents/open`
+  - `POST /api/security/incidents/close`
+- Escalation banner now supports opening and closing incident cases and displays active case metadata.
+- Added dedicated backend endpoint for incremental live alert retrieval:
+  - `GET /api/security/alerts?sinceId=<id>`
+
+### Bastion-Agent Hardening: One-Time Tunnel Tickets
+- Removed token-in-URL tunnel authentication path for bastion-agent WebSocket connections.
+- Added one-time short-lived ticket issuance endpoint for tunnel establishment:
+  - `POST /api/tunnel/ticket`
+- Tunnel WebSocket now requires `ticket` + `resource_id` and consumes the ticket on first use (anti-replay).
+- Added new audit event `security.tunnel.ticket.issued` for tunnel ticket traceability.
+- Updated Go bastion-agent flow to request a fresh tunnel ticket for each local connection before opening WebSocket.
+- Tunnel ticket usage is now source-IP bound (issuance IP must match WebSocket handshake IP).
+- Added split tunnel authenticator model:
+  - ticket endpoint now returns `ticket` + `proof`
+  - WebSocket tunnel handshake requires the one-time proof in `X-EndoriumFort-Tunnel-Proof`
+- Tunnel ticket validation now binds to agent `User-Agent` for stronger replay resistance.
+- Added cryptographic challenge-response validation for WebSocket tunnel handshake:
+  - agent sends `X-EndoriumFort-Tunnel-Timestamp`, `X-EndoriumFort-Tunnel-Nonce`, `X-EndoriumFort-Tunnel-Signature`
+  - backend verifies HMAC-SHA256 signature derived from one-time tunnel proof material
+  - backend rejects stale signatures beyond strict skew window to reduce delayed replay risk
+- Added server-issued tunnel challenge (`challenge`) to ticket response and mandatory `X-EndoriumFort-Tunnel-Challenge` echo at handshake time.
+- Added backend nonce replay cache (ticket+nonce short TTL) to reject duplicate handshake nonce reuse attempts.
+- Added tunnel signing key-ID agility model:
+  - ticket response now includes `signingKeyId`
+  - agent sends `X-EndoriumFort-Tunnel-Key-Id`
+  - backend accepts only active key IDs (current + grace) to allow safe key rotation windows
+- Added server-side cryptographic attestation layer:
+  - ticket response now includes `serverAttestation`
+  - agent sends `X-EndoriumFort-Tunnel-Attestation`
+  - backend verifies attestation against rotating in-memory signing secrets (current + previous grace window)
+  - attestation is included in the agent handshake signature payload for stronger binding
+- Added per-user tunnel ticket issuance throttling with dedicated events:
+  - `security.tunnel.ticket.rate_limited`
+  - `security.tunnel.ticket.rejected`
+- Agent now enforces strict transport policy by default (HTTPS/WSS), with explicit lab override only (`--allow-http` / `EF_ALLOW_INSECURE_HTTP=1`).
+- Agent now supports multi-tunnel mode in a single process instance:
+  - repeated `--tunnel <resource_id>:<local_port>` on `connect`
+  - one Ctrl+C cleanly stops all active local tunnel listeners
+- Added optional live tunnel management mode (`--manage`) on `connect`:
+  - `add <resource_id>:<local_port>` to start a new tunnel at runtime
+  - `remove <local_port>` to stop one tunnel without stopping others
+  - `list` to display active tunnels
+  - `stats` to display active tunnels with TX/RX counters and state
+  - `quit` to stop all tunnels and exit cleanly
+- Added tunnel health and telemetry in the agent runtime:
+  - tunnel state lifecycle (`starting`, `healthy`, `degraded`, `down`, `stopped`)
+  - per-tunnel counters for total/active connections and TX/RX bytes
+- Added optional TUI mode (`--tui`) for live tunnel supervision from a single process.
+- Added optional structured logging mode (`--log-json`) for machine-consumable agent logs.
+- Added WebSocket connect resiliency with exponential backoff + jitter on tunnel connection establishment.
+- Added token rotation assist on auth failures by refreshing token from `EF_TOKEN` or secure local token file.
+- Hardened local secret handling: token file is now read only if permissions are strict (`600`), and interactive password input uses best-effort byte zeroization after use.
+
+## v0.5.20 - 2026-03-09
+### Bastion Innovation: Session DNA + Purpose-Bound Access + Risk Preview
+- Added backend **Session DNA** chain storage and APIs for tamper-evident per-session lineage:
+  - `GET /api/sessions/:id/dna`
+  - chain entries include `prev_hash`, `payload_hash`, `chain_hash`
+  - verification result returned to detect integrity mismatches
+- Added backend **risk preview** endpoint:
+  - `POST /api/sessions/risk-preview`
+  - computes score and effective risk level from resource profile and contextual inputs
+- Added **purpose-bound policy** for high/critical-risk resources:
+  - session creation now supports `purpose` and `purposeEvidence`
+  - high/critical resources require `purpose` server-side
+- Frontend integration:
+  - access prompt now shows live risk preview and factors
+  - access prompt captures purpose and optional evidence
+  - sessions panel includes **Session DNA** modal viewer with integrity status
+
 ## v0.5.19 - 2026-03-09
 ### Admin UX: Granular Permission Management Panel
 - Added a new **Granular Action Permissions** section in the Admin user-permission panel.
