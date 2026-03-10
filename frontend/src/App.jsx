@@ -215,6 +215,7 @@ export default function App() {
   const [activeTerminalSession, setActiveTerminalSession] = useState(null);
   const [terminalStatus, setTerminalStatus] = useState('idle');
   const [terminalError, setTerminalError] = useState('');
+  const [terminalInfo, setTerminalInfo] = useState('');
   const [sshPassword, setSshPassword] = useState('');
   const [terminalReady, setTerminalReady] = useState(false);
   const [autoConnectSessionId, setAutoConnectSessionId] = useState(null);
@@ -1356,12 +1357,69 @@ export default function App() {
     activeTerminalSession
   ]);
 
-  const openTerminal = (session) => {
+  const resolveSessionResource = (session) => {
+    if (!session) return null;
+    const sessionResourceId = Number(session.resourceId) || 0;
+    if (sessionResourceId > 0) {
+      const byId = resources.find((item) => Number(item.id) === sessionResourceId);
+      if (byId) return byId;
+    }
+
+    const sessionTarget = String(session.target || '').trim();
+    const sessionProtocol = String(session.protocol || '').toLowerCase();
+    const sessionPort = Number(session.port) || 0;
+
+    return resources.find((item) => {
+      const resourceTarget = String(item.target || '').trim();
+      const resourceProtocol = String(item.protocol || '').toLowerCase();
+      const resourcePort = Number(item.port) || 0;
+      if (!resourceTarget || !resourceProtocol || resourcePort <= 0) {
+        return false;
+      }
+      return (
+        resourceTarget === sessionTarget &&
+        resourceProtocol === sessionProtocol &&
+        resourcePort === sessionPort
+      );
+    }) || null;
+  };
+
+  const openTerminal = async (session) => {
     setActiveTerminalSession(session);
     setSshPassword('');
     setTerminalError('');
+    setTerminalInfo('');
     setTerminalStatus('idle');
     setTerminalReady(false);
+
+    const resource = resolveSessionResource(session);
+    if (!resource || !resource.hasCredentials) {
+      setTerminalInfo('Manual password required for this session.');
+      return;
+    }
+
+    setTerminalInfo('Attempting automatic reconnect with vault credentials...');
+
+    try {
+      const lease = await issueEphemeralCredential(resource.id);
+      const creds = await consumeEphemeralCredential(lease.leaseId);
+      if (creds.sshPassword) {
+        setSshPassword(creds.sshPassword);
+        setAutoConnectSessionId(session.id);
+        setTerminalInfo('Vault credentials loaded. Reconnecting...');
+      }
+    } catch (_) {
+      try {
+        const creds = await fetchResourceCredentials(resource.id);
+        if (creds.sshPassword) {
+          setSshPassword(creds.sshPassword);
+          setAutoConnectSessionId(session.id);
+          setTerminalInfo('Vault credentials loaded. Reconnecting...');
+        }
+      } catch (_) {
+        setTerminalInfo('Automatic credential recovery failed. Enter password manually.');
+      }
+    }
   };
 
   const buildWebSocketUrl = (path, params = {}) => {
@@ -1379,6 +1437,7 @@ export default function App() {
   };
 
   const connectTerminal = () => {
+    setTerminalInfo('');
     if (!activeTerminalSession) {
       setTerminalError('Pick a session to connect.');
       return;
@@ -3909,6 +3968,7 @@ export default function App() {
           </button>
         </div>
         {terminalError && <p className="error">{terminalError}</p>}
+        {terminalInfo && <p className="muted">{terminalInfo}</p>}
         <div className="terminal-shell" ref={terminalRef} />
       </section>
       )}

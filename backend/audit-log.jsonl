@@ -87,3 +87,20 @@
 {"id":6,"type":"security.tunnel.ticket.issued","actor":"admin","role":"admin","createdAt":"2026-03-10T12:20:42Z","payload":{"resourceId":1,"sourceIp":"127.0.0.1","sourceUserAgent":"EndoriumFortAgent/0.3.0","expiresAt":"2026-03-10T12:21:12Z","ttlSeconds":30}}
 {"id":7,"type":"security.tunnel.ticket.rejected","actor":"unknown","role":"","createdAt":"2026-03-10T12:20:43Z","payload":{"resourceId":1,"sourceIp":"127.0.0.1","sourceUserAgent":"EndoriumFortAgent/0.3.0"}}
 {"id":8,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-10T12:20:43Z","payload":{"userId":1,"username":"admin"}}
+{"id":9,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-10T14:18:44Z","payload":{"userId":1,"username":"admin"}}
+{"id":10,"type":"resource.create","actor":"admin","role":"admin","createdAt":"2026-03-10T14:25:25Z","payload":{"resourceId":2,"name":"VM","target":"10.47.174.134","protocol":"ssh","port":22,"requireAccessJustification":true,"requireDualApproval":false,"enableCommandGuard":true,"adaptiveAccessPolicy":true,"riskLevel":"medium","description":"VM test","imageUrl":"https://brandslogos.com/wp-content/uploads/images/large/debian-logo.png","createdAt":"2026-03-10T14:25:25Z","updatedAt":"2026-03-10T14:25:25Z"}}
+{"id":11,"type":"session.create","actor":"admin","role":"admin","createdAt":"2026-03-10T14:26:15Z","payload":{"sessionId":2,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"active","createdAt":"2026-03-10T14:26:15Z","justification":"test de la connexion","ticketId":"1728","purpose":"test","purposeEvidence":"ticket notes"}}
+{"id":12,"type":"session.purpose.bound","actor":"admin","role":"admin","createdAt":"2026-03-10T14:26:15Z","payload":{"sessionId":2,"purpose":"test"}}
+{"id":13,"type":"credential.ephemeral.issue","actor":"admin","role":"admin","createdAt":"2026-03-10T14:26:15Z","payload":{"leaseId":1,"resourceId":2,"expiresAt":"2026-03-10T14:28:15Z"}}
+{"id":14,"type":"credential.ephemeral.consume","actor":"admin","role":"admin","createdAt":"2026-03-10T14:26:15Z","payload":{"leaseId":1,"resourceId":2}}
+{"id":15,"type":"command_guard.block","actor":"system","role":"system","createdAt":"2026-03-10T14:26:45Z","payload":{"sessionId":2,"reason":"non_whitelisted_input"}}
+{"id":16,"type":"command_guard.block","actor":"system","role":"system","createdAt":"2026-03-10T14:26:46Z","payload":{"sessionId":2,"reason":"non_whitelisted_input"}}
+{"id":17,"type":"command_guard.block","actor":"system","role":"system","createdAt":"2026-03-10T14:26:46Z","payload":{"sessionId":2,"reason":"non_whitelisted_input"}}
+{"id":18,"type":"command_guard.block","actor":"system","role":"system","createdAt":"2026-03-10T14:26:47Z","payload":{"sessionId":2,"reason":"non_whitelisted_input"}}
+{"id":19,"type":"command_guard.block","actor":"system","role":"system","createdAt":"2026-03-10T14:26:47Z","payload":{"sessionId":2,"reason":"non_whitelisted_input"}}
+{"id":20,"type":"command_guard.block","actor":"system","role":"system","createdAt":"2026-03-10T14:26:48Z","payload":{"sessionId":2,"reason":"non_whitelisted_input"}}
+{"id":21,"type":"command_guard.block","actor":"system","role":"system","createdAt":"2026-03-10T14:26:48Z","payload":{"sessionId":2,"reason":"non_whitelisted_input"}}
+{"id":22,"type":"command_guard.block","actor":"system","role":"system","createdAt":"2026-03-10T14:26:48Z","payload":{"sessionId":2,"reason":"non_whitelisted_input"}}
+{"id":23,"type":"command_guard.block","actor":"system","role":"system","createdAt":"2026-03-10T14:26:49Z","payload":{"sessionId":2,"reason":"non_whitelisted_input"}}
+{"id":24,"type":"session.close","actor":"system","role":"system","createdAt":"2026-03-10T14:27:16Z","payload":{"sessionId":2,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-03-10T14:26:15Z","terminatedAt":"2026-03-10T14:27:16Z"}}
+{"id":25,"type":"recording.watermark","actor":"system","role":"system","createdAt":"2026-03-10T14:27:16Z","payload":{"sessionId":2,"recordingId":1,"watermark":"wm-2-60080-50807"}}
