@@ -10,7 +10,7 @@
   <a href="https://github.com/NergYR/EndoriumFort/actions/workflows/codeql.yml"><img src="https://img.shields.io/github/actions/workflow/status/NergYR/EndoriumFort/codeql.yml?branch=master&label=CodeQL&style=flat-square" alt="CodeQL"></a>
 </p>
 
-# 🏰 EndoriumFort
+# EndoriumFort
 
 **EndoriumFort** is an open-source **Privileged Access Management (PAM)** bastion system designed to secure, monitor, and audit remote access to your infrastructure. Inspired by [Wallix](https://www.wallix.com/), [Systancia Gate](https://www.systancia.com/), [Teleport](https://goteleport.com/), and [Apache Guacamole](https://guacamole.apache.org/).
 
@@ -18,40 +18,40 @@
 
 ---
 
-## ✨ Highlights
+## Highlights
 
 | Feature | Description |
 |---------|-------------|
-| 🔐 **Credential Vault** | Store SSH credentials securely — auto-injected on connection |
-| 🖥️ **Web SSH Terminal** | Full xterm.js terminal in the browser via WebSocket |
-| 🌐 **HTTP/HTTPS Proxy** | Transparent web proxy with cookie-based auth |
-| 🚇 **Agent Tunnel** | Systancia-style local agent for zero-rewrite TCP tunneling |
-| 👁️ **Session Shadowing** | Real-time read-only observation of active sessions |
-| 🎬 **Session Recording** | Asciinema v2 format with animated in-browser replay |
-| 🔑 **2FA / TOTP** | RFC 6238 two-factor authentication with QR setup |
-| 🛡️ **Granular Access Control** | Fine-grained permissions per action with per-user allow/deny overrides (role defaults still available) |
-| 📊 **Live Dashboard** | Real-time KPI stats, session monitoring, security alerts |
-| 🧭 **Access-First Workspace** | Open resources and operate sessions from one page without context switching |
-| 🚨 **Security Center** | Live anomaly hints (login failures, stale sessions, admin-change activity, MFA posture) |
-| ⚡ **Quick Refresh** | One-click synchronization of sessions, resources, KPIs, users, and audit feed |
-| 🕒 **Recent Sessions Queue** | Prioritized latest sessions with direct terminate/audit actions |
-| 🧾 **Access Justification Trail** | Admin-configurable per-resource reason popup + ticket ID attached to session creation audits |
-| ✅ **Dual Approval Workflow** | Per-resource 4-eyes control with operator request submission and admin approve/deny queue |
-| 🚫 **SSH Command Guard** | Optional server-side dangerous command blocking with dedicated audit events |
-| 📈 **Adaptive Risk Policy** | Per-resource risk level + ticket requirements for high-risk access |
-| 🧪 **Risk Preview** | Real-time session risk scoring before opening access (factors + effective level) |
-| 🧬 **Session DNA** | Tamper-evident per-session audit chain with integrity verification endpoint/UI |
-| 🎯 **Purpose-Bound Access** | High/critical-risk sessions require explicit purpose and optional evidence |
-| 🔔 **Live Security Notifications** | In-app toast alerts with configurable strict/normal/permissive filtering, per-type throttling, and severity-aware display caps |
-| 🚨 **Incident Escalation Banner** | Automatic high-visibility escalation when repeated critical signals are detected in a short time window |
-| 📂 **Incident Lifecycle Cases** | Open and close active incident coordination cases directly from the escalation banner |
-| 🧯 **Containment Mode** | Incident-time guardrail that forces explicit session justification before opening access |
-| 🧠 **Behavior Anomaly Signal** | Command-volume spike detection on session close (`behavior.anomaly.command_spike`) |
-| 🌙 **Dark Mode** | Full dark theme with localStorage persistence |
+| **Credential Vault** | Store SSH credentials securely - auto-injected on connection |
+| **Web SSH Terminal** | Full xterm.js terminal in the browser via WebSocket |
+| **HTTP/HTTPS Proxy** | Transparent web proxy with cookie-based auth |
+| **Agent Tunnel** | Systancia-style local agent for zero-rewrite TCP tunneling |
+| **Session Shadowing** | Real-time read-only observation of active sessions |
+| **Session Recording** | Asciinema v2 format with animated in-browser replay |
+| **2FA / TOTP** | RFC 6238 two-factor authentication with QR setup |
+| **Granular Access Control** | Fine-grained permissions per action with per-user allow/deny overrides (role defaults still available) |
+| **Live Dashboard** | Real-time KPI stats, session monitoring, security alerts |
+| **Access-First Workspace** | Open resources and operate sessions from one page without context switching |
+| **Security Center** | Live anomaly hints (login failures, stale sessions, admin-change activity, MFA posture) |
+| **Quick Refresh** | One-click synchronization of sessions, resources, KPIs, users, and audit feed |
+| **Recent Sessions Queue** | Prioritized latest sessions with direct terminate/audit actions |
+| **Access Justification Trail** | Admin-configurable per-resource reason popup + ticket ID attached to session creation audits |
+| **Dual Approval Workflow** | Per-resource 4-eyes control with operator request submission and admin approve/deny queue |
+| **SSH Command Guard** | Optional server-side dangerous command blocking with dedicated audit events |
+| **Adaptive Risk Policy** | Per-resource risk level + ticket requirements for high-risk access |
+| **Risk Preview** | Real-time session risk scoring before opening access (factors + effective level) |
+| **Session DNA** | Tamper-evident per-session audit chain with integrity verification endpoint/UI |
+| **Purpose-Bound Access** | High/critical-risk sessions require explicit purpose and optional evidence |
+| **Live Security Notifications** | In-app toast alerts with configurable strict/normal/permissive filtering, per-type throttling, and severity-aware display caps |
+| **Incident Escalation Banner** | Automatic high-visibility escalation when repeated critical signals are detected in a short time window |
+| **Incident Lifecycle Cases** | Open and close active incident coordination cases directly from the escalation banner |
+| **Containment Mode** | Incident-time guardrail that forces explicit session justification before opening access |
+| **Behavior Anomaly Signal** | Command-volume spike detection on session close (`behavior.anomaly.command_spike`) |
+| **Dark Mode** | Full dark theme with localStorage persistence |
 
 ---
 
-## 📐 Architecture
+## Architecture
 
 ```
 ┌──────────┐     HTTPS/WSS      ┌──────────────┐     SSH/TCP/HTTP     ┌──────────┐
@@ -75,7 +75,7 @@ EndoriumFort operates in two modes:
 
 ---
 
-## 🗂️ Project Structure
+## Project Structure
 
 ```
 EndoriumFort/
@@ -101,7 +101,7 @@ EndoriumFort/
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -163,7 +163,7 @@ Opens:
 
 ---
 
-## 🖥️ Usage
+## Usage
 
 ### Web Dashboard
 
@@ -180,7 +180,7 @@ Opens:
   - operators submit access requests from the same connect modal (reason + optional ticket)
   - admins approve/deny from the built-in Access Requests queue
   - for high-risk adaptive resources, `ticketId` is enforced server-side
-5. **Sessions** — Monitor, shadow (👁), or terminate active sessions
+5. **Sessions** - Monitor, shadow (read-only), or terminate active sessions
   - open **Session DNA** to inspect integrity chain entries and verification status
 6. **Audit** — Search and filter all security events
 7. **Recordings** — Replay past SSH sessions with the animated Asciinema player (admin/auditor)
@@ -280,11 +280,11 @@ Security note (agent tunnel hardening):
 - Token file loading now enforces strict permissions (mode `600`) for better local secret hygiene.
 - Optional `--log-json` enables structured logs for easier SIEM/observability pipelines.
 
-Or simply **click a resource tile** with the 🚀 agent protocol — the frontend generates the command automatically with a random port.
+Or simply **click a resource tile** with the agent protocol - the frontend generates the command automatically with a random port.
 
 ---
 
-## 🔒 Security Features
+## Security Features
 
 | Feature | Details |
 |---------|---------|
@@ -305,7 +305,7 @@ Or simply **click a resource tile** with the 🚀 agent protocol — the fronten
 
 ---
 
-## 📡 API Reference
+## API Reference
 
 ### Authentication
 
@@ -381,7 +381,7 @@ Or simply **click a resource tile** with the 🚀 agent protocol — the fronten
 
 ---
 
-## 🐳 Docker Deployment
+## Docker Deployment
 
 ### Quick Start with Docker
 
@@ -448,7 +448,7 @@ Required secrets in GitHub repository settings:
 
 ---
 
-## 🏗️ Build System
+## Build System
 
 EndoriumFort uses a **smart versioning system** based on SHA-256 hashing of source files:
 
@@ -477,7 +477,7 @@ The build scripts automatically cross-compile the agent:
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
@@ -490,7 +490,7 @@ The build scripts automatically cross-compile the agent:
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 
 - [x] SSH terminal with recording & replay
 - [x] HTTP/HTTPS transparent proxy
@@ -511,26 +511,26 @@ The build scripts automatically cross-compile the agent:
 
 ---
 
-## 📄 License
+## License
 
 This project is released under the **EndoriumFort Source-Available License v1.0**.
 
 **You are free to:**
-- ✅ Use the software for personal, educational, or commercial purposes
-- ✅ Redistribute verbatim copies with attribution
+- Use the software for personal, educational, or commercial purposes
+- Redistribute verbatim copies with attribution
 
 **You must:**
-- 📎 **Cite this repository** in any use: [github.com/NergYR/EndoriumFort](https://github.com/NergYR/EndoriumFort)
+- **Cite this repository** in any use: [github.com/NergYR/EndoriumFort](https://github.com/NergYR/EndoriumFort)
 
 **You may not:**
-- ❌ Modify, alter, or create derivative works
-- ❌ Sublicense or relicense under different terms
+- Modify, alter, or create derivative works
+- Sublicense or relicense under different terms
 
 See [LICENSE](LICENSE) for full terms.
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions via pull requests are welcome! Since the license does not allow derivative works, contributions must be submitted back to the original repository.
 
@@ -542,7 +542,7 @@ Contributions via pull requests are welcome! Since the license does not allow de
 
 ---
 
-## 👤 Author
+## Author
 
 **NergYR** — [github.com/NergYR](https://github.com/NergYR)
 

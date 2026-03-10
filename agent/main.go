@@ -415,7 +415,7 @@ func wsDialer(insecureTLS bool) *websocket.Dialer {
 		HandshakeTimeout: 10 * time.Second,
 		ReadBufferSize:   16384,
 		WriteBufferSize:  16384,
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureTLS},
+		TLSClientConfig:  &tls.Config{InsecureSkipVerify: insecureTLS},
 	}
 }
 
@@ -739,7 +739,7 @@ func runManageLoop(manager *TunnelManager, quit chan struct{}) {
 				continue
 			}
 			binding := TunnelBinding{
-				Resource: Resource{ID: specs[0].ResourceID, Name: fmt.Sprintf("resource-%d", specs[0].ResourceID)},
+				Resource:  Resource{ID: specs[0].ResourceID, Name: fmt.Sprintf("resource-%d", specs[0].ResourceID)},
 				LocalPort: specs[0].LocalPort,
 			}
 			if err := manager.Start(binding); err != nil {
@@ -1251,13 +1251,13 @@ func apiIssueTunnelTicket(serverURL, token string, resourceID int, insecureTLS b
 	}
 
 	var result struct {
-		Ticket       string `json:"ticket"`
-		Proof        string `json:"proof"`
-		Challenge    string `json:"challenge"`
-		SigningKeyID string `json:"signingKeyId"`
+		Ticket            string `json:"ticket"`
+		Proof             string `json:"proof"`
+		Challenge         string `json:"challenge"`
+		SigningKeyID      string `json:"signingKeyId"`
 		ServerAttestation string `json:"serverAttestation"`
-		SourceIP     string `json:"sourceIp"`
-		ExpiresAt    string `json:"expiresAt"`
+		SourceIP          string `json:"sourceIp"`
+		ExpiresAt         string `json:"expiresAt"`
 	}
 	if decErr := json.NewDecoder(resp.Body).Decode(&result); decErr != nil {
 		return "", "", "", "", "", "", "", fmt.Errorf("réponse invalide: %v", decErr)
