@@ -19,7 +19,7 @@ function createStorage() {
   };
 }
 
-test('fetchSessions sends auth header when token is set', async () => {
+test('fetchSessions sends auth header when token is set', { concurrency: false }, async () => {
   globalThis.localStorage = createStorage();
   const events = [];
   globalThis.window = { dispatchEvent: (evt) => events.push(evt.type) };
@@ -46,7 +46,7 @@ test('fetchSessions sends auth header when token is set', async () => {
   assert.equal(events.length, 0);
 });
 
-test('fetchSessions handles 401 by clearing auth and throwing session-expired error', async () => {
+test('fetchSessions handles 401 by clearing auth and throwing session-expired error', { concurrency: false }, async () => {
   globalThis.localStorage = createStorage();
   globalThis.localStorage.setItem('endoriumfort_auth', JSON.stringify({ token: 'eft_old' }));
   const events = [];
