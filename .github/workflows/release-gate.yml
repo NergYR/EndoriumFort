@@ -17,7 +17,7 @@ jobs:
     name: Changelog & Migration Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -59,7 +59,7 @@ jobs:
     name: Backend Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install backend dependencies
         run: |
           sudo apt-get update
@@ -85,7 +85,7 @@ jobs:
     name: Frontend Unit Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -112,7 +112,7 @@ jobs:
     name: Frontend E2E Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install backend dependencies
         run: |
@@ -194,7 +194,7 @@ jobs:
     name: Agent Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.8"
@@ -210,7 +210,7 @@ jobs:
     name: Supply Chain Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -275,7 +275,7 @@ jobs:
     name: Docker Compose Smoke Gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Build and start compose stack
         run: docker compose up -d --build
