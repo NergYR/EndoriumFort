@@ -1,0 +1,25 @@
+# Default owner for the whole repository
+* @NergYR
+
+# CI/CD and supply chain critical paths
+.github/workflows/ @NergYR
+.github/dependabot.yml @NergYR
+Dockerfile @NergYR
+docker-compose.yml @NergYR
+
+# Backend security/runtime surfaces
+backend/src/ @NergYR
+backend/CMakeLists.txt @NergYR
+
+# Frontend runtime surfaces
+frontend/src/ @NergYR
+frontend/package.json @NergYR
+frontend/package-lock.json @NergYR
+
+# Agent runtime surfaces
+agent/ @NergYR
+
+# Release and security governance docs
+SECURITY.md @NergYR
+CHANGELOG.md @NergYR
+README.md @NergYR
