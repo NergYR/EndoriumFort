@@ -435,7 +435,8 @@ void register_ssh_routes(CrowApp &app, AppContext &ctx) {
                 input.find('\r') != std::string::npos ||
                 input.find('\n') != std::string::npos ||
                 input.find('\t') != std::string::npos ||
-                input.find('\b') != std::string::npos;
+              input.find('\b') != std::string::npos ||
+              input.find('\x7f') != std::string::npos;
             const bool safe_chars =
                 std::regex_match(input, allowed_chars) || has_control_sequence;
 

@@ -364,6 +364,7 @@ export default function App() {
   const terminalInstanceRef = useRef(null);
   const fitAddonRef = useRef(null);
   const socketRef = useRef(null);
+  const terminalInputListenerRef = useRef(null);
   const securityFeedBootstrappedRef = useRef(false);
   const lastSecurityAuditIdRef = useRef(0);
   const liveAlertCooldownByTypeRef = useRef({});
@@ -1328,6 +1329,10 @@ export default function App() {
 
     return () => {
       window.removeEventListener('resize', handleResize);
+      if (terminalInputListenerRef.current) {
+        terminalInputListenerRef.current.dispose();
+        terminalInputListenerRef.current = null;
+      }
       if (socketRef.current) {
         socketRef.current.close();
         socketRef.current = null;
@@ -1423,9 +1428,7 @@ export default function App() {
   };
 
   const buildWebSocketUrl = (path, params = {}) => {
-    const host = window.location.hostname || '';
-    const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
-    const wsProtocol = (window.location.protocol === 'https:' || !isLocalHost) ? 'wss:' : 'ws:';
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = new URL(path, window.location.origin);
     url.protocol = wsProtocol;
     Object.entries(params).forEach(([key, value]) => {
@@ -1463,12 +1466,26 @@ export default function App() {
     }
 
     const wsUrl = buildWebSocketUrl('/api/ws/ssh');
+
+    // Prevent duplicated key forwarding when reconnecting to the same terminal.
+    if (terminalInputListenerRef.current) {
+      terminalInputListenerRef.current.dispose();
+      terminalInputListenerRef.current = null;
+    }
+    if (socketRef.current) {
+      socketRef.current.close();
+      socketRef.current = null;
+    }
+
     const socket = new WebSocket(wsUrl);
+    let socketOpened = false;
     socket.binaryType = 'arraybuffer';
     socketRef.current = socket;
     setTerminalStatus('connecting');
 
     socket.addEventListener('open', () => {
+      if (socketRef.current !== socket) return;
+      socketOpened = true;
       setTerminalStatus('live');
       terminal.focus();
       socket.send(
@@ -1480,14 +1497,17 @@ export default function App() {
           rows: terminal.rows
         })
       );
-      terminal.onData((data) => {
+      terminalInputListenerRef.current = terminal.onData((data) => {
         if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: 'input', data }));
+          // Some remote shells expect backspace as Ctrl-H (^H) instead of DEL.
+          const normalizedInput = data.replace(/\x7f/g, '\b');
+          socket.send(JSON.stringify({ type: 'input', data: normalizedInput }));
         }
       });
     });
 
     socket.addEventListener('message', (event) => {
+      if (socketRef.current !== socket) return;
       if (typeof event.data === 'string') {
         try {
           const payload = JSON.parse(event.data);
@@ -1503,13 +1523,30 @@ export default function App() {
       terminal.write(decoder.decode(event.data));
     });
 
-    socket.addEventListener('close', () => {
+    socket.addEventListener('close', (event) => {
+      if (socketRef.current !== socket) return;
+      if (terminalInputListenerRef.current) {
+        terminalInputListenerRef.current.dispose();
+        terminalInputListenerRef.current = null;
+      }
+      socketRef.current = null;
+      if (!socketOpened) {
+        setTerminalStatus('error');
+        setTerminalError('SSH live connection rejected. Session may be expired; re-login and retry.');
+        return;
+      }
+      if (event?.code === 1008 || event?.code === 1006) {
+        setTerminalStatus('error');
+        setTerminalError('SSH live connection interrupted (auth or proxy). Re-login and retry.');
+        return;
+      }
       setTerminalStatus('closed');
     });
 
     socket.addEventListener('error', () => {
+      if (socketRef.current !== socket) return;
       setTerminalStatus('error');
-      setTerminalError('WebSocket error. Vérifie HTTPS/WSS, token et proxy Nginx.');
+      setTerminalError('WebSocket transport error. Check reverse proxy routing and session authentication.');
     });
   };
 
