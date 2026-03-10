@@ -186,6 +186,13 @@ const extractSessionIdFromAuditItem = (item) => {
   }
 };
 
+const DEFAULT_SSH_SNIPPETS = [
+  { id: 'health', label: 'Health Snapshot', command: 'whoami && hostname && uptime' },
+  { id: 'net', label: 'Network Quick Check', command: 'ip a && ss -tulpen | head -n 30' },
+  { id: 'disk', label: 'Disk Pressure', command: 'df -h && du -sh /var/log 2>/dev/null' },
+  { id: 'proc', label: 'Top Processes', command: 'ps aux --sort=-%cpu | head -n 15' }
+];
+
 export default function App() {
   const [status, setStatus] = useState('loading');
   const [detail, setDetail] = useState('');
@@ -217,6 +224,17 @@ export default function App() {
   const [terminalError, setTerminalError] = useState('');
   const [terminalInfo, setTerminalInfo] = useState('');
   const [sshPassword, setSshPassword] = useState('');
+  const [snippetLabel, setSnippetLabel] = useState('');
+  const [snippetCommand, setSnippetCommand] = useState('');
+  const [customSnippets, setCustomSnippets] = useState(() => {
+    try {
+      const raw = localStorage.getItem('endoriumfort_custom_ssh_snippets');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  });
   const [terminalReady, setTerminalReady] = useState(false);
   const [autoConnectSessionId, setAutoConnectSessionId] = useState(null);
   const [auditOpen, setAuditOpen] = useState(false);
@@ -384,6 +402,24 @@ export default function App() {
       localStorage.setItem('endoriumfort_live_alert_profile', liveAlertProfile);
     } catch (_) {}
   }, [liveAlertProfile]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('endoriumfort_custom_ssh_snippets', JSON.stringify(customSnippets));
+    } catch (_) {}
+  }, [customSnippets]);
+
+  const sshSnippetLibrary = useMemo(() => {
+    const normalizedCustom = customSnippets
+      .map((item) => ({
+        id: String(item.id || ''),
+        label: String(item.label || '').trim(),
+        command: String(item.command || '').trim()
+      }))
+      .filter((item) => item.id && item.label && item.command)
+      .map((item) => ({ ...item, custom: true }));
+    return [...DEFAULT_SSH_SNIPPETS.map((item) => ({ ...item, custom: false })), ...normalizedCustom];
+  }, [customSnippets]);
   const tabGuide = useMemo(() => {
     const base = {
       overview: {
@@ -1548,6 +1584,41 @@ export default function App() {
       setTerminalStatus('error');
       setTerminalError('WebSocket transport error. Check reverse proxy routing and session authentication.');
     });
+  };
+
+  const sendSnippetToTerminal = (snippet, execute = false) => {
+    if (!snippet?.command) return;
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setTerminalError('Connect the SSH terminal before sending snippets.');
+      return;
+    }
+    const payload = execute ? `${snippet.command}\n` : snippet.command;
+    socket.send(JSON.stringify({ type: 'input', data: payload }));
+    setTerminalInfo(
+      execute
+        ? `Snippet executed: ${snippet.label}`
+        : `Snippet injected (press Enter to run): ${snippet.label}`
+    );
+  };
+
+  const addCustomSnippet = () => {
+    const label = snippetLabel.trim();
+    const command = snippetCommand.trim();
+    if (!label || !command) {
+      setTerminalError('Snippet label and command are required.');
+      return;
+    }
+    const id = `custom-${Date.now()}`;
+    setCustomSnippets((prev) => [...prev, { id, label, command }]);
+    setSnippetLabel('');
+    setSnippetCommand('');
+    setTerminalError('');
+    setTerminalInfo(`Snippet saved: ${label}`);
+  };
+
+  const removeCustomSnippet = (snippetId) => {
+    setCustomSnippets((prev) => prev.filter((item) => item.id !== snippetId));
   };
 
   const connectToResource = async (resource, accessMeta = {}) => {
@@ -4003,6 +4074,60 @@ export default function App() {
           <button type="button" onClick={connectTerminal}>
             Connect
           </button>
+        </div>
+        <div className="snippet-studio">
+          <div className="snippet-studio-head">
+            <h4>SSH Snippets Studio</h4>
+            <p>Inject or execute repeatable operational commands without retyping.</p>
+          </div>
+          <div className="snippet-grid">
+            {sshSnippetLibrary.map((snippet) => (
+              <article key={snippet.id} className="snippet-card">
+                <strong>{snippet.label}</strong>
+                <code>{snippet.command}</code>
+                <div className="snippet-actions">
+                  <button type="button" className="ghost" onClick={() => sendSnippetToTerminal(snippet, false)}>
+                    Inject
+                  </button>
+                  <button type="button" onClick={() => sendSnippetToTerminal(snippet, true)}>
+                    Run
+                  </button>
+                  {snippet.custom && (
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => removeCustomSnippet(snippet.id)}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="snippet-builder">
+            <label>
+              Snippet label
+              <input
+                type="text"
+                value={snippetLabel}
+                onChange={(event) => setSnippetLabel(event.target.value)}
+                placeholder="Example: App logs"
+              />
+            </label>
+            <label>
+              Command
+              <input
+                type="text"
+                value={snippetCommand}
+                onChange={(event) => setSnippetCommand(event.target.value)}
+                placeholder="tail -n 80 /var/log/app.log"
+              />
+            </label>
+            <button type="button" className="secondary" onClick={addCustomSnippet}>
+              Save snippet
+            </button>
+          </div>
         </div>
         {terminalError && <p className="error">{terminalError}</p>}
         {terminalInfo && <p className="muted">{terminalInfo}</p>}

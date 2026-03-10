@@ -1148,6 +1148,73 @@ button:disabled {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
 }
 
+.snippet-studio {
+  border: 1px solid var(--stroke);
+  background: var(--card-bg-soft);
+  border-radius: 14px;
+  padding: 0.9rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.snippet-studio-head h4 {
+  margin: 0;
+}
+
+.snippet-studio-head p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+}
+
+.snippet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.7rem;
+}
+
+.snippet-card {
+  border: 1px solid rgba(26, 43, 75, 0.15);
+  border-radius: 12px;
+  padding: 0.65rem;
+  display: grid;
+  gap: 0.45rem;
+  background: var(--panel);
+}
+
+.snippet-card strong {
+  font-size: 0.9rem;
+}
+
+.snippet-card code {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.78rem;
+  color: var(--ink-2);
+  background: rgba(26, 43, 75, 0.08);
+  border-radius: 8px;
+  padding: 0.4rem 0.5rem;
+}
+
+.snippet-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.snippet-builder {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.8fr) auto;
+  gap: 0.65rem;
+  align-items: end;
+}
+
+.snippet-builder label {
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
 /* Shadow session panel */
 .shadow-panel {
   border: 2px solid rgba(245, 158, 11, 0.4);
@@ -1618,6 +1685,10 @@ button:disabled {
   }
 
   .terminal-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .snippet-builder {
     grid-template-columns: 1fr;
   }
 

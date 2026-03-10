@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.0-dev - 2026-03-11
+### Session Operations UX
+- Added **SSH Snippets Studio** in the live terminal panel (`frontend/src/App.jsx`).
+- Introduced prebuilt operational snippets (health snapshot, network checks, disk pressure, top processes) with one-click inject/run actions.
+- Added custom snippet creation and deletion with browser-local persistence for each operator workstation.
+- Styled and made responsive the snippet workspace (`frontend/src/styles.css`) for desktop and mobile operators.
+
 ## v1.0.0 - 2026-03-10
 ### General Availability
 - Declared EndoriumFort `v1.0.0` as the first stable GA release.

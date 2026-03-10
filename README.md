@@ -24,6 +24,7 @@
 |---------|-------------|
 | **Credential Vault** | Store SSH credentials securely - auto-injected on connection |
 | **Web SSH Terminal** | Full xterm.js terminal in the browser via WebSocket |
+| **SSH Snippets Studio** | Prebuilt + custom reusable SSH command snippets with one-click inject/execute |
 | **HTTP/HTTPS Proxy** | Transparent web proxy with cookie-based auth |
 | **Agent Tunnel** | Systancia-style local agent for zero-rewrite TCP tunneling |
 | **Session Shadowing** | Real-time read-only observation of active sessions |
@@ -181,6 +182,8 @@ Opens:
   - admins approve/deny from the built-in Access Requests queue
   - for high-risk adaptive resources, `ticketId` is enforced server-side
 5. **Sessions** - Monitor, shadow (read-only), or terminate active sessions
+  - use **SSH Snippets Studio** to inject or execute recurring troubleshooting commands
+  - save custom snippets per operator browser profile for faster interventions
   - open **Session DNA** to inspect integrity chain entries and verification status
 6. **Audit** — Search and filter all security events
 7. **Recordings** — Replay past SSH sessions with the animated Asciinema player (admin/auditor)
