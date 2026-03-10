@@ -133,9 +133,9 @@ jobs:
           }
           JSON
           if [[ "$HAS_DOCKERHUB" == "true" ]]; then
-            cosign attest --yes --predicate provenance.json "${{ env.DOCKERHUB_REPO }}@${DIGEST}"
+            cosign attest --yes --type slsaprovenance --predicate provenance.json "${{ env.DOCKERHUB_REPO }}@${DIGEST}"
           fi
-          cosign attest --yes --predicate provenance.json "${{ env.GHCR_REPO }}@${DIGEST}"
+          cosign attest --yes --type slsaprovenance --predicate provenance.json "${{ env.GHCR_REPO }}@${DIGEST}"
 
       - name: Verify container image signatures
         env:

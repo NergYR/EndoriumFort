@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.5.25 - 2026-03-10
+### GitHub Actions Reliability
+- Docker publish workflow now creates Cosign attestations with explicit `--type slsaprovenance`, matching the attestation verification gate.
+- CodeQL upload category now uses a unique namespace (`/endoriumfort-codeql/...`) to avoid category collisions with other code-scanning workflows on the same commit.
+
 ## v0.5.24 - 2026-03-10
 ### Final CI/Container Compatibility Fixes
 - Frontend unit test command is now Node 20 compatible in CI by using an explicit test file path (`node --test ./test/api.test.mjs`) instead of a shell-dependent glob.
