@@ -12,6 +12,7 @@
 - Added dedicated watchlist alert stream for watched session status transitions.
 - Added watchlist panel in sessions workspace with compact monitored session view and mobile-responsive layout.
 - Added **Audit CSV Export** for the currently filtered audit timeline directly from the audit panel.
+- Added **Session SLO Insights** panel in Sessions workspace (completion rate, average closed-session duration, stale active sessions).
 
 ## v1.0.0 - 2026-03-10
 ### General Availability

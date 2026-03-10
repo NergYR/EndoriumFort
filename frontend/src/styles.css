@@ -976,6 +976,38 @@ button:disabled {
   margin-bottom: 0.9rem;
 }
 
+.slo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 0.55rem;
+  margin-bottom: 0.7rem;
+}
+
+.slo-card {
+  border: 1px solid rgba(26, 43, 75, 0.12);
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+  display: grid;
+  gap: 0.2rem;
+  background: var(--panel);
+}
+
+.slo-card span {
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.slo-card strong {
+  font-size: 1.1rem;
+}
+
+.slo-card p {
+  margin: 0;
+}
+
 .watchlist-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

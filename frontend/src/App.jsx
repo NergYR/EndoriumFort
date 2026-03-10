@@ -2470,6 +2470,42 @@ export default function App() {
     return watched.slice(0, 8);
   }, [sortedSessions, watchedSessionIds]);
 
+  const sessionSlo = useMemo(() => {
+    const total = sessions.length;
+    const active = sessions.filter((item) => item.status === 'active').length;
+    const terminated = sessions.filter((item) => item.status === 'terminated').length;
+    const completionRate = total > 0 ? Math.round((terminated / total) * 100) : 0;
+
+    const closedDurationsMin = sessions
+      .map((item) => {
+        const opened = Date.parse(item.createdAt || '') || 0;
+        const closed = Date.parse(item.terminatedAt || '') || 0;
+        if (!opened || !closed || closed <= opened) return null;
+        return (closed - opened) / 60000;
+      })
+      .filter((value) => Number.isFinite(value));
+
+    const avgDurationMin = closedDurationsMin.length
+      ? Math.round(closedDurationsMin.reduce((sum, value) => sum + value, 0) / closedDurationsMin.length)
+      : 0;
+
+    const staleActive = sessions.filter((item) => {
+      if (item.status !== 'active') return false;
+      const opened = Date.parse(item.createdAt || '') || 0;
+      if (!opened) return false;
+      return opened < Date.now() - 4 * 60 * 60 * 1000;
+    }).length;
+
+    return {
+      total,
+      active,
+      terminated,
+      completionRate,
+      avgDurationMin,
+      staleActive
+    };
+  }, [sessions]);
+
   useEffect(() => {
     if (!watchedSessionIds.length) {
       watchlistStatusRef.current = {};
@@ -3943,6 +3979,23 @@ export default function App() {
           )}
 
           <div className="watchlist-panel">
+            <div className="slo-grid">
+              <article className="slo-card">
+                <span>Completion rate</span>
+                <strong>{sessionSlo.completionRate}%</strong>
+                <p className="muted">Terminated sessions / total sessions</p>
+              </article>
+              <article className="slo-card">
+                <span>Average duration</span>
+                <strong>{sessionSlo.avgDurationMin} min</strong>
+                <p className="muted">Based on closed session history</p>
+              </article>
+              <article className="slo-card">
+                <span>Stale active sessions</span>
+                <strong>{sessionSlo.staleActive}</strong>
+                <p className="muted">Active over 4 hours</p>
+              </article>
+            </div>
             <div className="panel-header" style={{ marginBottom: '0.35rem' }}>
               <div>
                 <h3 style={{ fontSize: '1rem' }}>Critical Session Watchlist</h3>
