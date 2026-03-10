@@ -120,16 +120,30 @@ jobs:
         run: |
           cat > provenance.json <<JSON
           {
-            "_type": "https://in-toto.io/Statement/v0.1",
-            "subject": [
-              {"name": "endoriumfort-image", "digest": {"sha256": "${DIGEST#sha256:}"}}
-            ],
-            "predicateType": "https://slsa.dev/provenance/v1",
-            "predicate": {
-              "buildType": "github-actions",
-              "builder": {"id": "https://github.com/${{ github.repository }}"},
-              "invocation": {"configSource": {"uri": "${{ github.server_url }}/${{ github.repository }}"}}
-            }
+            "buildType": "https://github.com/Attestations/GitHubActionsWorkflow@v1",
+            "builder": {
+              "id": "https://github.com/${{ github.repository }}/.github/workflows/docker-publish.yml@${{ github.ref }}"
+            },
+            "invocation": {
+              "configSource": {
+                "uri": "git+${{ github.server_url }}/${{ github.repository }}.git",
+                "digest": {"sha1": "${{ github.sha }}"},
+                "entryPoint": ".github/workflows/docker-publish.yml"
+              },
+              "parameters": {
+                "event_name": "${{ github.event_name }}",
+                "ref": "${{ github.ref }}"
+              },
+              "environment": {
+                "runner": "github-actions"
+              }
+            },
+            "materials": [
+              {
+                "uri": "git+${{ github.server_url }}/${{ github.repository }}.git",
+                "digest": {"sha1": "${{ github.sha }}"}
+              }
+            ]
           }
           JSON
           if [[ "$HAS_DOCKERHUB" == "true" ]]; then
