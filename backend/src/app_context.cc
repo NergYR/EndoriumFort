@@ -14,6 +14,21 @@
 #include <arpa/inet.h>
 #endif
 
+namespace {
+std::string build_token_from_bytes(const unsigned char *bytes, size_t len) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string token;
+  token.reserve(4 + len * 2);
+  token = "eft_";
+  for (size_t i = 0; i < len; ++i) {
+    const unsigned char b = bytes[i];
+    token.push_back(kHex[(b >> 4) & 0x0F]);
+    token.push_back(kHex[b & 0x0F]);
+  }
+  return token;
+}
+}  // namespace
+
 // ── Secure token generation (using /dev/urandom on Linux/macOS) ─────────
 
 std::string AppContext::generate_token() {
@@ -23,11 +38,7 @@ std::string AppContext::generate_token() {
   if (urandom.good()) {
     urandom.read(reinterpret_cast<char *>(bytes), sizeof(bytes));
     if (urandom.gcount() == sizeof(bytes)) {
-      char buf[70];
-      int offset = snprintf(buf, sizeof(buf), "eft_");
-      for (size_t i = 0; i < sizeof(bytes); ++i)
-        offset += snprintf(buf + offset, sizeof(buf) - offset, "%02x", bytes[i]);
-      return std::string(buf);
+      return build_token_from_bytes(bytes, sizeof(bytes));
     }
   }
 #endif
@@ -38,11 +49,7 @@ std::string AppContext::generate_token() {
     uint32_t val = rd();
     memcpy(fbytes + i, &val, std::min(sizeof(val), sizeof(fbytes) - i));
   }
-  char buf[70];
-  int offset = snprintf(buf, sizeof(buf), "eft_");
-  for (size_t i = 0; i < sizeof(fbytes); ++i)
-    offset += snprintf(buf + offset, sizeof(buf) - offset, "%02x", fbytes[i]);
-  return std::string(buf);
+  return build_token_from_bytes(fbytes, sizeof(fbytes));
 }
 
 // ── Rate limiting ───────────────────────────────────────────────────────
