@@ -101,7 +101,7 @@ jobs:
             org.opencontainers.image.vendor=NergYR
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.8.1
+        uses: sigstore/cosign-installer@v4.1.0
 
       - name: Sign published container images (keyless)
         env:
