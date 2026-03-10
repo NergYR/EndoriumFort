@@ -193,6 +193,8 @@ const DEFAULT_SSH_SNIPPETS = [
   { id: 'proc', label: 'Top Processes', command: 'ps aux --sort=-%cpu | head -n 15' }
 ];
 
+const ACCESS_PLAYBOOK_STORAGE_KEY = 'endoriumfort_access_playbooks';
+
 export default function App() {
   const [status, setStatus] = useState('loading');
   const [detail, setDetail] = useState('');
@@ -290,6 +292,15 @@ export default function App() {
   const [accessPromptPurpose, setAccessPromptPurpose] = useState('');
   const [accessPromptPurposeEvidence, setAccessPromptPurposeEvidence] = useState('');
   const [accessPromptMode, setAccessPromptMode] = useState('connect');
+  const [accessPlaybooks, setAccessPlaybooks] = useState(() => {
+    try {
+      const raw = localStorage.getItem(ACCESS_PLAYBOOK_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  });
   const [riskPreview, setRiskPreview] = useState(null);
   const [riskPreviewLoading, setRiskPreviewLoading] = useState(false);
   const [riskPreviewError, setRiskPreviewError] = useState('');
@@ -408,6 +419,20 @@ export default function App() {
       localStorage.setItem('endoriumfort_custom_ssh_snippets', JSON.stringify(customSnippets));
     } catch (_) {}
   }, [customSnippets]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACCESS_PLAYBOOK_STORAGE_KEY, JSON.stringify(accessPlaybooks));
+    } catch (_) {}
+  }, [accessPlaybooks]);
+
+  const currentAccessPlaybook = useMemo(() => {
+    const resourceId = Number(accessPromptResource?.id) || 0;
+    if (!resourceId) return null;
+    return (
+      accessPlaybooks.find((item) => Number(item.resourceId) === resourceId) || null
+    );
+  }, [accessPlaybooks, accessPromptResource]);
 
   const sshSnippetLibrary = useMemo(() => {
     const normalizedCustom = customSnippets
@@ -1710,6 +1735,8 @@ export default function App() {
     const sessionBackedProtocol = protocol !== 'http' && protocol !== 'https' && protocol !== 'agent';
 
     if (resource.requireDualApproval && !canManagePlatform) {
+      const existingPlaybook =
+        accessPlaybooks.find((item) => Number(item.resourceId) === Number(resource.id)) || null;
       const approved = accessRequests.find(
         (item) =>
           item.resourceId === resource.id &&
@@ -1726,27 +1753,71 @@ export default function App() {
       }
       setAccessPromptMode('request');
       setAccessPromptResource(resource);
-      setAccessPromptReason('');
-      setAccessPromptTicketId('');
-      setAccessPromptPurpose('');
-      setAccessPromptPurposeEvidence('');
+      setAccessPromptReason(existingPlaybook?.justification || '');
+      setAccessPromptTicketId(existingPlaybook?.ticketId || '');
+      setAccessPromptPurpose(existingPlaybook?.purpose || '');
+      setAccessPromptPurposeEvidence(existingPlaybook?.purposeEvidence || '');
       setRiskPreview(null);
       setRiskPreviewError('');
       return;
     }
 
     if (resource.requireAccessJustification || (containmentEnabled && sessionBackedProtocol)) {
+      const existingPlaybook =
+        accessPlaybooks.find((item) => Number(item.resourceId) === Number(resource.id)) || null;
       setAccessPromptMode('connect');
       setAccessPromptResource(resource);
-      setAccessPromptReason('');
-      setAccessPromptTicketId('');
-      setAccessPromptPurpose('');
-      setAccessPromptPurposeEvidence('');
+      setAccessPromptReason(existingPlaybook?.justification || '');
+      setAccessPromptTicketId(existingPlaybook?.ticketId || '');
+      setAccessPromptPurpose(existingPlaybook?.purpose || '');
+      setAccessPromptPurposeEvidence(existingPlaybook?.purposeEvidence || '');
       setRiskPreview(null);
       setRiskPreviewError('');
       return;
     }
     await connectToResource(resource);
+  };
+
+  const applyCurrentAccessPlaybook = () => {
+    if (!currentAccessPlaybook) {
+      setSessionError('No saved playbook for this resource.');
+      return;
+    }
+    setAccessPromptReason(currentAccessPlaybook.justification || '');
+    setAccessPromptTicketId(currentAccessPlaybook.ticketId || '');
+    setAccessPromptPurpose(currentAccessPlaybook.purpose || '');
+    setAccessPromptPurposeEvidence(currentAccessPlaybook.purposeEvidence || '');
+    setSessionError('');
+  };
+
+  const saveCurrentAccessPlaybook = () => {
+    const resourceId = Number(accessPromptResource?.id) || 0;
+    if (!resourceId) return;
+    const playbook = {
+      resourceId,
+      justification: accessPromptReason.trim(),
+      ticketId: accessPromptTicketId.trim(),
+      purpose: accessPromptPurpose.trim(),
+      purposeEvidence: accessPromptPurposeEvidence.trim(),
+      updatedAt: new Date().toISOString()
+    };
+    if (!playbook.justification && !playbook.ticketId && !playbook.purpose && !playbook.purposeEvidence) {
+      setSessionError('Playbook cannot be empty. Fill at least one field before saving.');
+      return;
+    }
+    setAccessPlaybooks((prev) => {
+      const next = prev.filter((item) => Number(item.resourceId) !== resourceId);
+      return [...next, playbook];
+    });
+    setSessionError('');
+    setTerminalInfo(`Access playbook saved for ${accessPromptResource?.name || 'resource'}.`);
+  };
+
+  const deleteCurrentAccessPlaybook = () => {
+    const resourceId = Number(accessPromptResource?.id) || 0;
+    if (!resourceId) return;
+    setAccessPlaybooks((prev) => prev.filter((item) => Number(item.resourceId) !== resourceId));
+    setSessionError('');
   };
 
   const onSubmitAccessPrompt = async (event) => {
@@ -4228,6 +4299,29 @@ export default function App() {
                     </p>
                   </>
                 )}
+              </div>
+              <div className="playbook-strip">
+                <div>
+                  <strong>Access Playbook</strong>
+                  <p className="muted">
+                    {currentAccessPlaybook
+                      ? `Saved for this resource (${new Date(currentAccessPlaybook.updatedAt || Date.now()).toLocaleString()}).`
+                      : 'No playbook yet for this resource.'}
+                  </p>
+                </div>
+                <div className="playbook-actions">
+                  <button type="button" className="ghost" onClick={applyCurrentAccessPlaybook}>
+                    Apply
+                  </button>
+                  <button type="button" className="secondary" onClick={saveCurrentAccessPlaybook}>
+                    Save
+                  </button>
+                  {currentAccessPlaybook && (
+                    <button type="button" className="danger" onClick={deleteCurrentAccessPlaybook}>
+                      Delete
+                    </button>
+                  )}
+                </div>
               </div>
               <label>
                 Access reason

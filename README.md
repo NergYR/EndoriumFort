@@ -37,6 +37,7 @@
 | **Quick Refresh** | One-click synchronization of sessions, resources, KPIs, users, and audit feed |
 | **Recent Sessions Queue** | Prioritized latest sessions with direct terminate/audit actions |
 | **Access Justification Trail** | Admin-configurable per-resource reason popup + ticket ID attached to session creation audits |
+| **Access Playbooks** | Per-resource saved justification/purpose templates to accelerate compliant access requests |
 | **Dual Approval Workflow** | Per-resource 4-eyes control with operator request submission and admin approve/deny queue |
 | **SSH Command Guard** | Optional server-side dangerous command blocking with dedicated audit events |
 | **Adaptive Risk Policy** | Per-resource risk level + ticket requirements for high-risk access |
@@ -181,6 +182,7 @@ Opens:
   - operators submit access requests from the same connect modal (reason + optional ticket)
   - admins approve/deny from the built-in Access Requests queue
   - for high-risk adaptive resources, `ticketId` is enforced server-side
+  - use **Access Playbook** actions in the access modal to save/apply recurring justification and purpose templates per resource
 5. **Sessions** - Monitor, shadow (read-only), or terminate active sessions
   - use **SSH Snippets Studio** to inject or execute recurring troubleshooting commands
   - save custom snippets per operator browser profile for faster interventions

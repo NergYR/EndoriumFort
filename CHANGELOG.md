@@ -6,6 +6,8 @@
 - Introduced prebuilt operational snippets (health snapshot, network checks, disk pressure, top processes) with one-click inject/run actions.
 - Added custom snippet creation and deletion with browser-local persistence for each operator workstation.
 - Styled and made responsive the snippet workspace (`frontend/src/styles.css`) for desktop and mobile operators.
+- Added **Access Playbooks** in the connection justification modal with per-resource save/apply/delete actions.
+- Access Playbooks persist locally in the browser and prefill reason/ticket/purpose fields for faster compliant access flows.
 
 ## v1.0.0 - 2026-03-10
 ### General Availability
