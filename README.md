@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.1-blue?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/github/v/release/NergYR/EndoriumFort?style=flat-square" alt="Latest release">
   <img src="https://img.shields.io/badge/license-Source--Available-orange?style=flat-square" alt="License">
   <img src="https://img.shields.io/badge/backend-C%2B%2B%2017-00599C?style=flat-square&logo=cplusplus" alt="C++">
   <img src="https://img.shields.io/badge/frontend-React%2018-61DAFB?style=flat-square&logo=react" alt="React">
@@ -82,19 +82,19 @@ EndoriumFort/
 ├── backend/            # C++17 API server (Crow framework)
 │   ├── src/            #   main.cc, routes, SSH, tunnel, proxy, RDP
 │   ├── CMakeLists.txt  #   CMake build with FetchContent (Asio, Crow)
-│   └── VERSION         #   Backend version (0.0.137)
+│   └── VERSION         #   Backend version (0.0.144)
 ├── frontend/           # React 18 + Vite 7 SPA
 │   ├── src/            #   App.jsx, styles.css, api.js, WebProxyViewer
 │   ├── package.json    #   Dependencies (xterm.js, React)
-│   └── VERSION         #   Frontend version (0.1.4)
+│   └── VERSION         #   Frontend version (0.1.16)
 ├── agent/              # Go CLI tunnel agent
 │   ├── main.go         #   Login, list, connect commands
 │   ├── go.mod          #   gorilla/websocket
-│   └── VERSION         #   Agent version (0.3.3)
+│   └── VERSION         #   Agent version (0.3.9)
 ├── build-all.sh        # Linux/macOS build script (smart versioning)
 ├── build-all.ps1       # Windows build script (PowerShell)
 ├── run-dev.sh          # Dev launcher (backend + frontend)
-├── VERSION             # Global version (0.3.1)
+├── VERSION             # Global version (0.5.28)
 ├── CHANGELOG.md        # Version history
 └── LICENSE             # Source-Available License
 ```
@@ -305,6 +305,26 @@ Or simply **click a resource tile** with the agent protocol - the frontend gener
 
 ---
 
+## Stability & Support (v1)
+
+EndoriumFort is maintained with a v1-oriented support policy:
+
+- Stable scope: SSH web terminal, HTTP/HTTPS proxy, agent tunnel, audit trail, session recording, RBAC/permission model, and 2FA/TOTP.
+- Security support: only the latest tagged release is supported for security fixes (see `SECURITY.md`).
+- Compatibility target: Linux-first deployments with official release assets for Linux/macOS/Windows agent binaries.
+- Experimental or roadmap items remain explicitly marked in `## Roadmap` and are not covered by strict backward compatibility guarantees.
+
+### Upgrade and Rollback
+
+Minimal production-safe flow:
+
+1. Backup persistent data (`ef-data` volume or SQLite DB + recordings).
+2. Upgrade to the latest tag image/binaries.
+3. Run health checks (`GET /api/health`) and a login/session smoke test.
+4. If required, roll back to the previous tag and restore the backup.
+
+---
+
 ## API Reference
 
 ### Authentication
@@ -445,6 +465,29 @@ A GitHub Actions workflow automatically builds and pushes the Docker image on ev
 Required secrets in GitHub repository settings:
 - `DOCKERHUB_USERNAME` — Docker Hub username
 - `DOCKERHUB_TOKEN` — Docker Hub access token
+
+### Release Artifact Verification
+
+For tag releases, verify checksums and signed bundles from release assets:
+
+```bash
+# 1) Verify checksums file integrity
+sha256sum -c checksums-sha256.txt
+
+# 2) Verify keyless signature bundle for checksums
+cosign verify-blob \
+  --certificate-identity-regexp ".*" \
+  --certificate-oidc-issuer-regexp ".*" \
+  --bundle checksums-sha256.txt.bundle.json \
+  checksums-sha256.txt
+
+# 3) Verify keyless signature bundle for repository SBOM
+cosign verify-blob \
+  --certificate-identity-regexp ".*" \
+  --certificate-oidc-issuer-regexp ".*" \
+  --bundle repository-sbom.cdx.json.bundle.json \
+  repository-sbom.cdx.json
+```
 
 ---
 
