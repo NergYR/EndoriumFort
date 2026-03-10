@@ -256,6 +256,8 @@ jobs:
       - name: Verify SBOM signature
         run: |
           cosign verify-blob \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/release-gate.yml@.*$" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --certificate sbom.cdx.json.pem \
             --signature sbom.cdx.json.sig \
             sbom.cdx.json >/dev/null
