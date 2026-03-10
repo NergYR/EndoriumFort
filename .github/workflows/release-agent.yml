@@ -70,15 +70,13 @@ jobs:
         working-directory: release
         run: |
           cosign sign-blob --yes checksums-sha256.txt \
-            --output-signature checksums-sha256.txt.sig \
-            --output-certificate checksums-sha256.txt.pem
+            --bundle checksums-sha256.txt.bundle.json
 
       - name: Sign linux amd64 binary (keyless)
         working-directory: release
         run: |
           cosign sign-blob --yes endoriumfort-agent-linux-amd64 \
-            --output-signature endoriumfort-agent-linux-amd64.sig \
-            --output-certificate endoriumfort-agent-linux-amd64.pem
+            --bundle endoriumfort-agent-linux-amd64.bundle.json
 
       - name: Verify signed release blobs
         working-directory: release
@@ -86,14 +84,12 @@ jobs:
           cosign verify-blob \
             --certificate-identity-regexp ".*" \
             --certificate-oidc-issuer-regexp ".*" \
-            --certificate checksums-sha256.txt.pem \
-            --signature checksums-sha256.txt.sig \
+            --bundle checksums-sha256.txt.bundle.json \
             checksums-sha256.txt >/dev/null
           cosign verify-blob \
             --certificate-identity-regexp ".*" \
             --certificate-oidc-issuer-regexp ".*" \
-            --certificate endoriumfort-agent-linux-amd64.pem \
-            --signature endoriumfort-agent-linux-amd64.sig \
+            --bundle endoriumfort-agent-linux-amd64.bundle.json \
             endoriumfort-agent-linux-amd64 >/dev/null
 
       - name: Generate repository SBOM (CycloneDX)
@@ -107,8 +103,7 @@ jobs:
         working-directory: release
         run: |
           cosign sign-blob --yes repository-sbom.cdx.json \
-            --output-signature repository-sbom.cdx.json.sig \
-            --output-certificate repository-sbom.cdx.json.pem
+            --bundle repository-sbom.cdx.json.bundle.json
 
       - name: Verify signed SBOM
         working-directory: release
@@ -116,8 +111,7 @@ jobs:
           cosign verify-blob \
             --certificate-identity-regexp ".*" \
             --certificate-oidc-issuer-regexp ".*" \
-            --certificate repository-sbom.cdx.json.pem \
-            --signature repository-sbom.cdx.json.sig \
+            --bundle repository-sbom.cdx.json.bundle.json \
             repository-sbom.cdx.json >/dev/null
 
       - name: Create GitHub Release
@@ -163,11 +157,8 @@ jobs:
             release/endoriumfort-agent-darwin-amd64
             release/endoriumfort-agent-darwin-arm64
             release/checksums-sha256.txt
-            release/checksums-sha256.txt.sig
-            release/checksums-sha256.txt.pem
-            release/endoriumfort-agent-linux-amd64.sig
-            release/endoriumfort-agent-linux-amd64.pem
+            release/checksums-sha256.txt.bundle.json
+            release/endoriumfort-agent-linux-amd64.bundle.json
             release/repository-sbom.cdx.json
-            release/repository-sbom.cdx.json.sig
-            release/repository-sbom.cdx.json.pem
+            release/repository-sbom.cdx.json.bundle.json
           generate_release_notes: true
