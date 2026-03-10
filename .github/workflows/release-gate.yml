@@ -22,6 +22,7 @@ jobs:
           fetch-depth: 0
 
       - name: Enforce changelog updates for code changes
+        if: github.actor != 'dependabot[bot]'
         run: |
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
@@ -38,6 +39,7 @@ jobs:
           fi
 
       - name: Enforce migration section in PR body when schema/config changes
+        if: github.actor != 'dependabot[bot]'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |

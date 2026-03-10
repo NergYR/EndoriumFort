@@ -15,12 +15,21 @@ permissions:
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
+    name: Analyze (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        language: ["cpp", "javascript", "go"]
+        include:
+          - name: c-cpp
+            language: c-cpp
+            key: cpp
+          - name: javascript-typescript
+            language: javascript-typescript
+            key: javascript
+          - name: go
+            language: go
+            key: go
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,20 +40,20 @@ jobs:
           languages: ${{ matrix.language }}
 
       - name: Install backend dependencies (cpp)
-        if: matrix.language == 'cpp'
+        if: matrix.key == 'cpp'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake g++ libsqlite3-dev libssh2-1-dev pkg-config
 
       - name: Build backend (cpp)
-        if: matrix.language == 'cpp'
+        if: matrix.key == 'cpp'
         run: |
           cd backend
           cmake -S . -B build
           cmake --build build --target endoriumfort_backend -j"$(nproc)"
 
       - name: Setup Node (javascript)
-        if: matrix.language == 'javascript'
+        if: matrix.key == 'javascript'
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -52,21 +61,21 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Build frontend (javascript)
-        if: matrix.language == 'javascript'
+        if: matrix.key == 'javascript'
         run: |
           cd frontend
           npm ci
           npm run build
 
       - name: Setup Go (go)
-        if: matrix.language == 'go'
+        if: matrix.key == 'go'
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
           cache-dependency-path: agent/go.sum
 
       - name: Build agent (go)
-        if: matrix.language == 'go'
+        if: matrix.key == 'go'
         run: |
           cd agent
           go test ./...
@@ -75,4 +84,4 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
         with:
-          category: "/endoriumfort-codeql/${{ github.workflow }}/${{ matrix.language }}"
+          category: "/endoriumfort-codeql/${{ github.workflow }}/${{ matrix.key }}"

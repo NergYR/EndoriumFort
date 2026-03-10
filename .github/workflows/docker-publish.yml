@@ -156,16 +156,30 @@ jobs:
           DIGEST: ${{ steps.build_push.outputs.digest }}
           HAS_DOCKERHUB: ${{ steps.dockerhub.outputs.enabled }}
         run: |
+          verify_attestation() {
+            local image_ref="$1"
+            for i in {1..8}; do
+              if cosign verify-attestation --certificate-identity-regexp ".*" \
+                --certificate-oidc-issuer-regexp ".*" \
+                --type slsaprovenance \
+                "$image_ref" >/dev/null; then
+                return 0
+              fi
+              # Fallback for registries exposing attestations without typed lookup immediately.
+              if cosign verify-attestation --certificate-identity-regexp ".*" \
+                --certificate-oidc-issuer-regexp ".*" \
+                "$image_ref" >/dev/null; then
+                return 0
+              fi
+              sleep 5
+            done
+            return 1
+          }
+
           if [[ "$HAS_DOCKERHUB" == "true" ]]; then
-            cosign verify-attestation --certificate-identity-regexp ".*" \
-              --certificate-oidc-issuer-regexp ".*" \
-              --type slsaprovenance \
-              "${{ env.DOCKERHUB_REPO }}@${DIGEST}" >/dev/null
+            verify_attestation "${{ env.DOCKERHUB_REPO }}@${DIGEST}"
           fi
-          cosign verify-attestation --certificate-identity-regexp ".*" \
-            --certificate-oidc-issuer-regexp ".*" \
-            --type slsaprovenance \
-            "${{ env.GHCR_REPO }}@${DIGEST}" >/dev/null
+          verify_attestation "${{ env.GHCR_REPO }}@${DIGEST}"
 
       - name: Image digest
         run: echo "Image pushed with digest ${{ steps.build_push.outputs.digest }}"
