@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.0 - 2026-03-10
+### General Availability
+- Declared EndoriumFort `v1.0.0` as the first stable GA release.
+- Aligned root and component version files to `1.0.0` (`VERSION`, `backend/VERSION`, `frontend/VERSION`, `agent/VERSION`, `frontend/package.json`).
+- Consolidated release readiness baseline after CI hardening, CodeQL fixes, keyless Cosign verification updates, and signed artifact pipeline stabilization.
+
 ## v0.5.29 - 2026-03-10
 ### Go Toolchain Security Baseline
 - Upgraded Go toolchain baseline to `1.25.8` for the agent and CI pipelines to address standard-library vulnerabilities reported by `govulncheck` (`GO-2026-4601`, `GO-2026-4602`).

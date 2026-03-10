@@ -82,19 +82,19 @@ EndoriumFort/
 ├── backend/            # C++17 API server (Crow framework)
 │   ├── src/            #   main.cc, routes, SSH, tunnel, proxy, RDP
 │   ├── CMakeLists.txt  #   CMake build with FetchContent (Asio, Crow)
-│   └── VERSION         #   Backend version (0.0.144)
+│   └── VERSION         #   Backend version (1.0.0)
 ├── frontend/           # React 18 + Vite 7 SPA
 │   ├── src/            #   App.jsx, styles.css, api.js, WebProxyViewer
 │   ├── package.json    #   Dependencies (xterm.js, React)
-│   └── VERSION         #   Frontend version (0.1.16)
+│   └── VERSION         #   Frontend version (1.0.0)
 ├── agent/              # Go CLI tunnel agent
 │   ├── main.go         #   Login, list, connect commands
 │   ├── go.mod          #   gorilla/websocket
-│   └── VERSION         #   Agent version (0.3.9)
+│   └── VERSION         #   Agent version (1.0.0)
 ├── build-all.sh        # Linux/macOS build script (smart versioning)
 ├── build-all.ps1       # Windows build script (PowerShell)
 ├── run-dev.sh          # Dev launcher (backend + frontend)
-├── VERSION             # Global version (0.5.28)
+├── VERSION             # Global version (1.0.0)
 ├── CHANGELOG.md        # Version history
 └── LICENSE             # Source-Available License
 ```
