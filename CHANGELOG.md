@@ -8,6 +8,9 @@
 - Styled and made responsive the snippet workspace (`frontend/src/styles.css`) for desktop and mobile operators.
 - Added **Access Playbooks** in the connection justification modal with per-resource save/apply/delete actions.
 - Access Playbooks persist locally in the browser and prefill reason/ticket/purpose fields for faster compliant access flows.
+- Added **Critical Session Watchlist** with pin/unpin controls directly on session cards.
+- Added dedicated watchlist alert stream for watched session status transitions.
+- Added watchlist panel in sessions workspace with compact monitored session view and mobile-responsive layout.
 
 ## v1.0.0 - 2026-03-10
 ### General Availability

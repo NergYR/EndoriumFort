@@ -968,6 +968,51 @@ button:disabled {
   grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
 }
 
+.watchlist-panel {
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  background: var(--card-bg-soft);
+  padding: 0.75rem 0.85rem;
+  margin-bottom: 0.9rem;
+}
+
+.watchlist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.55rem;
+}
+
+.watchlist-item {
+  border: 1px solid rgba(26, 43, 75, 0.12);
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+  display: grid;
+  gap: 0.35rem;
+  background: var(--panel);
+}
+
+.watch-alert-list {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 0.65rem;
+}
+
+.watch-alert-item {
+  border: 1px solid rgba(255, 92, 138, 0.35);
+  border-radius: 10px;
+  background: rgba(255, 92, 138, 0.08);
+  padding: 0.5rem 0.6rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.watch-alert-item p {
+  margin: 0;
+  font-size: 0.82rem;
+}
+
 .session-card {
   background: var(--card-bg-soft);
   border-radius: 12px;
@@ -985,6 +1030,12 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.session-card-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
 }
 
 .session-card h4 {
@@ -1730,6 +1781,16 @@ button:disabled {
 
   .session-grid {
     grid-template-columns: 1fr;
+  }
+
+  .watch-alert-item {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .session-card-tools {
+    flex-direction: column;
+    align-items: flex-end;
   }
 
   .ops-grid {

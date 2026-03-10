@@ -36,6 +36,7 @@
 | **Security Center** | Live anomaly hints (login failures, stale sessions, admin-change activity, MFA posture) |
 | **Quick Refresh** | One-click synchronization of sessions, resources, KPIs, users, and audit feed |
 | **Recent Sessions Queue** | Prioritized latest sessions with direct terminate/audit actions |
+| **Critical Session Watchlist** | Pin sessions for dedicated status-change tracking during incidents |
 | **Access Justification Trail** | Admin-configurable per-resource reason popup + ticket ID attached to session creation audits |
 | **Access Playbooks** | Per-resource saved justification/purpose templates to accelerate compliant access requests |
 | **Dual Approval Workflow** | Per-resource 4-eyes control with operator request submission and admin approve/deny queue |
@@ -184,6 +185,7 @@ Opens:
   - for high-risk adaptive resources, `ticketId` is enforced server-side
   - use **Access Playbook** actions in the access modal to save/apply recurring justification and purpose templates per resource
 5. **Sessions** - Monitor, shadow (read-only), or terminate active sessions
+  - pin critical sessions in **Watchlist** to track state transitions (active/closed/errors) faster
   - use **SSH Snippets Studio** to inject or execute recurring troubleshooting commands
   - save custom snippets per operator browser profile for faster interventions
   - open **Session DNA** to inspect integrity chain entries and verification status

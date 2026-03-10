@@ -194,6 +194,7 @@ const DEFAULT_SSH_SNIPPETS = [
 ];
 
 const ACCESS_PLAYBOOK_STORAGE_KEY = 'endoriumfort_access_playbooks';
+const SESSION_WATCHLIST_STORAGE_KEY = 'endoriumfort_session_watchlist';
 
 export default function App() {
   const [status, setStatus] = useState('loading');
@@ -301,6 +302,16 @@ export default function App() {
       return [];
     }
   });
+  const [watchedSessionIds, setWatchedSessionIds] = useState(() => {
+    try {
+      const raw = localStorage.getItem(SESSION_WATCHLIST_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.map((item) => Number(item)).filter((id) => id > 0) : [];
+    } catch (_) {
+      return [];
+    }
+  });
+  const [watchlistAlerts, setWatchlistAlerts] = useState([]);
   const [riskPreview, setRiskPreview] = useState(null);
   const [riskPreviewLoading, setRiskPreviewLoading] = useState(false);
   const [riskPreviewError, setRiskPreviewError] = useState('');
@@ -399,6 +410,7 @@ export default function App() {
   const liveAlertCooldownByTypeRef = useRef({});
   const liveIncidentCriticalTimestampsRef = useRef([]);
   const liveIncidentCooldownUntilRef = useRef(0);
+  const watchlistStatusRef = useRef({});
 
   const canManagePlatform = hasCapability(auth.role, auth.permissions, 'manageResources');
   const canViewAudit = hasCapability(auth.role, auth.permissions, 'viewAudit');
@@ -425,6 +437,12 @@ export default function App() {
       localStorage.setItem(ACCESS_PLAYBOOK_STORAGE_KEY, JSON.stringify(accessPlaybooks));
     } catch (_) {}
   }, [accessPlaybooks]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SESSION_WATCHLIST_STORAGE_KEY, JSON.stringify(watchedSessionIds));
+    } catch (_) {}
+  }, [watchedSessionIds]);
 
   const currentAccessPlaybook = useMemo(() => {
     const resourceId = Number(accessPromptResource?.id) || 0;
@@ -1320,6 +1338,20 @@ export default function App() {
     } catch (error) {
       setSessionError(error.message || 'Unable to terminate session');
     }
+  };
+
+  const toggleWatchSession = (sessionId) => {
+    const normalized = Number(sessionId) || 0;
+    if (!normalized) return;
+    setWatchedSessionIds((prev) =>
+      prev.includes(normalized)
+        ? prev.filter((id) => id !== normalized)
+        : [...prev, normalized]
+    );
+  };
+
+  const dismissWatchAlert = (alertKey) => {
+    setWatchlistAlerts((prev) => prev.filter((item) => item.key !== alertKey));
   };
 
   const loadAudit = async () => {
@@ -2430,6 +2462,42 @@ export default function App() {
     () => sortedSessions.slice(0, 6),
     [sortedSessions]
   );
+
+  const watchedSessions = useMemo(() => {
+    const watched = sortedSessions.filter((session) =>
+      watchedSessionIds.includes(Number(session.id))
+    );
+    return watched.slice(0, 8);
+  }, [sortedSessions, watchedSessionIds]);
+
+  useEffect(() => {
+    if (!watchedSessionIds.length) {
+      watchlistStatusRef.current = {};
+      return;
+    }
+    const nextStatus = {};
+    const nextAlerts = [];
+    watchedSessionIds.forEach((sessionId) => {
+      const found = sessions.find((item) => Number(item.id) === Number(sessionId));
+      if (!found) return;
+      const normalizedStatus = String(found.status || 'unknown').toLowerCase();
+      nextStatus[String(sessionId)] = normalizedStatus;
+      const previous = watchlistStatusRef.current[String(sessionId)];
+      if (previous && previous !== normalizedStatus) {
+        nextAlerts.push({
+          key: `watch:${sessionId}:${Date.now()}`,
+          sessionId,
+          status: normalizedStatus,
+          message: `Session #${sessionId} status changed: ${previous} -> ${normalizedStatus}`,
+          createdAt: new Date().toISOString()
+        });
+      }
+    });
+    watchlistStatusRef.current = nextStatus;
+    if (nextAlerts.length) {
+      setWatchlistAlerts((prev) => [...nextAlerts, ...prev].slice(0, 6));
+    }
+  }, [sessions, watchedSessionIds]);
 
   const securityAlerts = useMemo(() => {
     const now = Date.now();
@@ -3838,6 +3906,43 @@ export default function App() {
             </div>
           )}
 
+          <div className="watchlist-panel">
+            <div className="panel-header" style={{ marginBottom: '0.35rem' }}>
+              <div>
+                <h3 style={{ fontSize: '1rem' }}>Critical Session Watchlist</h3>
+                <p>Pin sessions to monitor status changes faster.</p>
+              </div>
+              <span className={`pill ${watchedSessions.length ? 'loading' : 'ok'}`}>
+                {watchedSessions.length} watched
+              </span>
+            </div>
+            {watchlistAlerts.length > 0 && (
+              <div className="watch-alert-list">
+                {watchlistAlerts.map((alert) => (
+                  <article key={alert.key} className="watch-alert-item">
+                    <p>{alert.message}</p>
+                    <button type="button" className="ghost" onClick={() => dismissWatchAlert(alert.key)}>
+                      Dismiss
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+            {watchedSessions.length ? (
+              <div className="watchlist-grid">
+                {watchedSessions.map((session) => (
+                  <article key={`watch-${session.id}`} className="watchlist-item">
+                    <strong>#{session.id} {session.user} -&gt; {session.target}</strong>
+                    <span className={`pill ${session.status}`}>{session.status}</span>
+                    <p className="muted">Opened {formatRelativeDate(session.createdAt)}</p>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">No watched sessions yet. Use Pin on any session card.</p>
+            )}
+          </div>
+
           <div className="session-grid">
             {sessions.map((session) => (
               <article className="session-card" key={session.id}>
@@ -3848,9 +3953,18 @@ export default function App() {
                       {session.protocol} : {session.port}
                     </span>
                   </div>
-                  <span className={`pill ${session.status}`}>
-                    {session.status}
-                  </span>
+                  <div className="session-card-tools">
+                    <button
+                      type="button"
+                      className={watchedSessionIds.includes(Number(session.id)) ? 'secondary' : 'ghost'}
+                      onClick={() => toggleWatchSession(session.id)}
+                    >
+                      {watchedSessionIds.includes(Number(session.id)) ? 'Pinned' : 'Pin'}
+                    </button>
+                    <span className={`pill ${session.status}`}>
+                      {session.status}
+                    </span>
+                  </div>
                 </header>
                 <p className="session-route">
                   <strong>{session.user}</strong>
