@@ -1268,18 +1268,17 @@ func apiIssueTunnelTicket(serverURL, token string, resourceID int, insecureTLS b
 	if strings.TrimSpace(result.Proof) == "" {
 		return "", "", "", "", "", "", "", fmt.Errorf("preuve tunnel manquante")
 	}
+	if strings.TrimSpace(result.Challenge) == "" {
+		return "", "", "", "", "", "", "", fmt.Errorf("challenge tunnel manquant")
+	}
+	if strings.TrimSpace(result.SigningKeyID) == "" {
+		return "", "", "", "", "", "", "", fmt.Errorf("signingKeyId tunnel manquant")
+	}
+	if strings.TrimSpace(result.ServerAttestation) == "" {
+		return "", "", "", "", "", "", "", fmt.Errorf("serverAttestation tunnel manquant")
+	}
 	if strings.TrimSpace(result.SourceIP) == "" {
 		return "", "", "", "", "", "", "", fmt.Errorf("sourceIp tunnel manquant")
-	}
-
-	// Backward compatibility: older backends may not return challenge/key/attestation.
-	if strings.TrimSpace(result.Challenge) == "" ||
-		strings.TrimSpace(result.SigningKeyID) == "" ||
-		strings.TrimSpace(result.ServerAttestation) == "" {
-		logEvent("warning", "tunnel.preflight.legacy_backend", map[string]interface{}{
-			"resourceId": resourceID,
-			"message":    "backend ticket response missing challenge/signing metadata; using legacy compatibility mode",
-		})
 	}
 
 	return result.Ticket, result.Proof, result.Challenge, result.SigningKeyID, result.ServerAttestation, result.SourceIP, result.ExpiresAt, nil
