@@ -6,6 +6,7 @@
 - Updated workflows using Go (`ci.yml`, `release-gate.yml`, `release-agent.yml`, `codeql.yml`) to use `actions/setup-go` with `1.25.8`.
 - Updated `agent/go.mod` toolchain directive and README references to match the new minimum Go version.
 - Reworked token generation in `backend/src/app_context.cc` to remove offset-based `snprintf` chaining and fix CodeQL alert `cpp/overflowing-snprintf`.
+- Removed remaining `snprintf` formatting in backend (`crypto.h`, `totp.h`, `session_recording.cc`, `main.cc.bak`) to prevent additional `cpp/overflowing-snprintf` findings.
 
 ## v0.5.25 - 2026-03-10
 ### GitHub Actions Reliability

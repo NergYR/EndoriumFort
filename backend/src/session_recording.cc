@@ -95,6 +95,7 @@ int64_t SessionRecorder::duration_ms() const {
 }
 
 std::string SessionRecorder::json_escape_cast(const char *data, size_t len) {
+  static constexpr char kHex[] = "0123456789abcdef";
   std::string result;
   result.reserve(len * 2);
   for (size_t i = 0; i < len; ++i) {
@@ -109,9 +110,9 @@ std::string SessionRecorder::json_escape_cast(const char *data, size_t len) {
     case '\f': result += "\\f"; break;
     default:
       if (c < 0x20) {
-        char buf[8];
-        snprintf(buf, sizeof(buf), "\\u%04x", c);
-        result += buf;
+        result += "\\u00";
+        result.push_back(kHex[(c >> 4) & 0x0F]);
+        result.push_back(kHex[c & 0x0F]);
       } else {
         result += static_cast<char>(c);
       }

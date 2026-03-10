@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <iomanip>
 #include <random>
 #include <sstream>
 #include <string>
@@ -219,9 +220,9 @@ inline std::string generate_code(const std::string &base32_secret,
                                   int period = 30) {
   uint64_t time_step = static_cast<uint64_t>(std::time(nullptr)) / period;
   uint32_t code = compute_totp(base32_secret, time_step);
-  char buf[8];
-  snprintf(buf, sizeof(buf), "%06u", code);
-  return std::string(buf);
+  std::ostringstream oss;
+  oss << std::setw(6) << std::setfill('0') << code;
+  return oss.str();
 }
 
 inline bool verify_code(const std::string &base32_secret,
@@ -230,9 +231,9 @@ inline bool verify_code(const std::string &base32_secret,
   uint64_t current = static_cast<uint64_t>(std::time(nullptr)) / period;
   for (int i = -window; i <= window; ++i) {
     uint32_t expected = compute_totp(base32_secret, current + i);
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%06u", expected);
-    if (user_code == std::string(buf))
+    std::ostringstream oss;
+    oss << std::setw(6) << std::setfill('0') << expected;
+    if (user_code == oss.str())
       return true;
   }
   return false;

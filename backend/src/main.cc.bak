@@ -816,10 +816,12 @@ int main() {
     std::uniform_int_distribution<uint64_t> dist;
     uint64_t a = dist(gen);
     uint64_t b = dist(gen);
-    char buf[40];
-    snprintf(buf, sizeof(buf), "eft_%016llx%016llx",
-             (unsigned long long)a, (unsigned long long)b);
-    return std::string(buf);
+    std::ostringstream oss;
+    oss << "eft_"
+        << std::hex << std::setfill('0')
+        << std::setw(16) << static_cast<unsigned long long>(a)
+        << std::setw(16) << static_cast<unsigned long long>(b);
+    return oss.str();
   };
 
   std::mutex resource_mutex;

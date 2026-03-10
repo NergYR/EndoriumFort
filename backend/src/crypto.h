@@ -202,10 +202,11 @@ inline std::string generate_salt() {
   std::uniform_int_distribution<uint64_t> dist;
   uint64_t a = dist(gen);
   uint64_t b = dist(gen);
-  char buf[33];
-  snprintf(buf, sizeof(buf), "%016llx%016llx",
-           (unsigned long long)a, (unsigned long long)b);
-  return std::string(buf);
+  std::ostringstream oss;
+  oss << std::hex << std::setfill('0')
+      << std::setw(16) << static_cast<unsigned long long>(a)
+      << std::setw(16) << static_cast<unsigned long long>(b);
+  return oss.str();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
