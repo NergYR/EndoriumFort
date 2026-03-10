@@ -37,6 +37,7 @@
 | **Quick Refresh** | One-click synchronization of sessions, resources, KPIs, users, and audit feed |
 | **Recent Sessions Queue** | Prioritized latest sessions with direct terminate/audit actions |
 | **Critical Session Watchlist** | Pin sessions for dedicated status-change tracking during incidents |
+| **Audit CSV Export** | Export current filtered audit timeline for compliance and investigation workflows |
 | **Access Justification Trail** | Admin-configurable per-resource reason popup + ticket ID attached to session creation audits |
 | **Access Playbooks** | Per-resource saved justification/purpose templates to accelerate compliant access requests |
 | **Dual Approval Workflow** | Per-resource 4-eyes control with operator request submission and admin approve/deny queue |
@@ -190,6 +191,7 @@ Opens:
   - save custom snippets per operator browser profile for faster interventions
   - open **Session DNA** to inspect integrity chain entries and verification status
 6. **Audit** — Search and filter all security events
+  - export the current filtered audit view as CSV for reporting and case evidence
 7. **Recordings** — Replay past SSH sessions with the animated Asciinema player (admin/auditor)
 8. **Admin dashboard** — Manage users/resources/permissions and view platform stats
 9. **Granular permissions**:

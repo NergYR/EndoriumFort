@@ -2601,6 +2601,42 @@ export default function App() {
     return item.payloadRaw || '';
   };
 
+  const toCsvCell = (value) => {
+    const raw = String(value ?? '');
+    const escaped = raw.replace(/"/g, '""');
+    return `"${escaped}"`;
+  };
+
+  const exportFilteredAuditCsv = () => {
+    if (!filteredAuditItems.length) {
+      setAuditError('No audit rows to export with current filters.');
+      return;
+    }
+
+    const header = ['id', 'type', 'actor', 'createdAt', 'detail'];
+    const rows = filteredAuditItems.map((item) => [
+      item.id,
+      item.type,
+      item.actor,
+      item.createdAt,
+      renderAuditDetail(item) || ''
+    ]);
+    const csvLines = [header, ...rows].map((row) => row.map(toCsvCell).join(','));
+    const csvPayload = `\uFEFF${csvLines.join('\n')}`;
+
+    const blob = new Blob([csvPayload], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `audit-export-${stamp}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setAuditError('');
+  };
+
   const formatRelativeDate = (value) => {
     const timestamp = Date.parse(value || '');
     if (!timestamp) return value || 'n/a';
@@ -4059,6 +4095,14 @@ export default function App() {
                 disabled={loadingAudit}
               >
                 Refresh
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={exportFilteredAuditCsv}
+                disabled={!filteredAuditItems.length}
+              >
+                Export CSV
               </button>
               {auditFilter && (
                 <button

@@ -11,6 +11,7 @@
 - Added **Critical Session Watchlist** with pin/unpin controls directly on session cards.
 - Added dedicated watchlist alert stream for watched session status transitions.
 - Added watchlist panel in sessions workspace with compact monitored session view and mobile-responsive layout.
+- Added **Audit CSV Export** for the currently filtered audit timeline directly from the audit panel.
 
 ## v1.0.0 - 2026-03-10
 ### General Availability
