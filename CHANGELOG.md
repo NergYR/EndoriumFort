@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.29 - 2026-03-10
+### Go Toolchain Security Baseline
+- Upgraded Go toolchain baseline to `1.25.8` for the agent and CI pipelines to address standard-library vulnerabilities reported by `govulncheck` (`GO-2026-4601`, `GO-2026-4602`).
+- Updated workflows using Go (`ci.yml`, `release-gate.yml`, `release-agent.yml`, `codeql.yml`) to use `actions/setup-go` with `1.25.8`.
+- Updated `agent/go.mod` toolchain directive and README references to match the new minimum Go version.
+
 ## v0.5.25 - 2026-03-10
 ### GitHub Actions Reliability
 - Docker publish workflow now creates Cosign attestations with explicit `--type slsaprovenance`, matching the attestation verification gate.

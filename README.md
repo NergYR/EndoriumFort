@@ -3,7 +3,7 @@
   <img src="https://img.shields.io/badge/license-Source--Available-orange?style=flat-square" alt="License">
   <img src="https://img.shields.io/badge/backend-C%2B%2B%2017-00599C?style=flat-square&logo=cplusplus" alt="C++">
   <img src="https://img.shields.io/badge/frontend-React%2018-61DAFB?style=flat-square&logo=react" alt="React">
-  <img src="https://img.shields.io/badge/agent-Go%201.24-00ADD8?style=flat-square&logo=go" alt="Go">
+  <img src="https://img.shields.io/badge/agent-Go%201.25.8-00ADD8?style=flat-square&logo=go" alt="Go">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square" alt="Platform">
   <a href="https://github.com/NergYR/EndoriumFort/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/NergYR/EndoriumFort/ci.yml?branch=master&label=CI&style=flat-square" alt="CI"></a>
   <a href="https://github.com/NergYR/EndoriumFort/actions/workflows/release-gate.yml"><img src="https://img.shields.io/github/actions/workflow/status/NergYR/EndoriumFort/release-gate.yml?branch=master&label=Release%20Gate&style=flat-square" alt="Release Gate"></a>
@@ -112,7 +112,7 @@ EndoriumFort/
 | **SQLite3** (dev headers) | Database |
 | **libssh2** (dev headers) | SSH terminal support |
 | **Node.js** ≥ 18 | Frontend build |
-| **Go** ≥ 1.24 | Agent build |
+| **Go** ≥ 1.25.8 | Agent build |
 
 #### Install on Debian / Ubuntu / Kali
 
@@ -483,7 +483,7 @@ The build scripts automatically cross-compile the agent:
 |-------|-----------|
 | **Backend** | C++17, [Crow](https://crowcpp.org/) 1.2, SQLite3, libssh2, Asio |
 | **Frontend** | React 18, Vite 7, [xterm.js](https://xtermjs.org/) v6 |
-| **Agent** | Go 1.24, [gorilla/websocket](https://github.com/gorilla/websocket) |
+| **Agent** | Go 1.25.8, [gorilla/websocket](https://github.com/gorilla/websocket) |
 | **Build** | CMake 3.16+, npm, Go toolchain |
 | **Database** | SQLite3 (file-based, zero config) |
 | **Protocols** | SSH, HTTP/HTTPS, RDP (FreeRDP), VNC (planned), TCP tunnel |

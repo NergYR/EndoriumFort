@@ -42,7 +42,7 @@ jobs:
         if: matrix.key == 'go'
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.25.8"
           cache-dependency-path: agent/go.sum
 
       - name: Initialize CodeQL
