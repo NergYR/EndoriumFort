@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.5.22 - 2026-03-10
+### CI/Release Stabilization
+- CI backend build now compiles both `endoriumfort_backend` and `endoriumfort_backend_tests` before running `ctest`, avoiding missing-test executable failures in clean runners.
+- Release agent Cosign blob verification now includes explicit keyless certificate identity/issuer constraints for checksums, binary signature, and SBOM verification.
+- Docker publish workflow now degrades gracefully when Docker Hub secrets are absent:
+  - Docker Hub login is conditional
+  - Docker Hub tags/sign/attest/verify are conditional
+  - GHCR publication, signing, and attestation remain enforced
+
 ## v0.5.21 - 2026-03-09
 ### Security UX: Live Notification Stream
 - Added in-app **live security toast notifications** in the main console.

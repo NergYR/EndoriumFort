@@ -28,7 +28,7 @@ jobs:
 
       - name: Build backend
         working-directory: backend
-        run: cmake --build build --target endoriumfort_backend -j"$(nproc)"
+        run: cmake --build build --target endoriumfort_backend endoriumfort_backend_tests -j"$(nproc)"
 
       - name: Run backend tests
         working-directory: backend/build

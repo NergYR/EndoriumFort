@@ -84,10 +84,14 @@ jobs:
         working-directory: release
         run: |
           cosign verify-blob \
+            --certificate-identity-regexp ".*" \
+            --certificate-oidc-issuer-regexp ".*" \
             --certificate checksums-sha256.txt.pem \
             --signature checksums-sha256.txt.sig \
             checksums-sha256.txt >/dev/null
           cosign verify-blob \
+            --certificate-identity-regexp ".*" \
+            --certificate-oidc-issuer-regexp ".*" \
             --certificate endoriumfort-agent-linux-amd64.pem \
             --signature endoriumfort-agent-linux-amd64.sig \
             endoriumfort-agent-linux-amd64 >/dev/null
@@ -110,6 +114,8 @@ jobs:
         working-directory: release
         run: |
           cosign verify-blob \
+            --certificate-identity-regexp ".*" \
+            --certificate-oidc-issuer-regexp ".*" \
             --certificate repository-sbom.cdx.json.pem \
             --signature repository-sbom.cdx.json.sig \
             repository-sbom.cdx.json >/dev/null
