@@ -14,6 +14,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 env:
   DOCKERHUB_REPO: nergyr/endoriumfort
@@ -65,6 +66,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
+        id: build_push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -79,5 +81,60 @@ jobs:
             org.opencontainers.image.source=https://github.com/NergYR/EndoriumFort
             org.opencontainers.image.vendor=NergYR
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.8.1
+
+      - name: Sign published container images (keyless)
+        env:
+          DIGEST: ${{ steps.build_push.outputs.digest }}
+        run: |
+          cosign sign --yes "${{ env.DOCKERHUB_REPO }}@${DIGEST}"
+          cosign sign --yes "${{ env.GHCR_REPO }}@${DIGEST}"
+
+      - name: Create and attach provenance attestation
+        env:
+          DIGEST: ${{ steps.build_push.outputs.digest }}
+        run: |
+          cat > provenance.json <<JSON
+          {
+            "_type": "https://in-toto.io/Statement/v0.1",
+            "subject": [
+              {"name": "endoriumfort-image", "digest": {"sha256": "${DIGEST#sha256:}"}}
+            ],
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "predicate": {
+              "buildType": "github-actions",
+              "builder": {"id": "https://github.com/${{ github.repository }}"},
+              "invocation": {"configSource": {"uri": "${{ github.server_url }}/${{ github.repository }}"}}
+            }
+          }
+          JSON
+          cosign attest --yes --predicate provenance.json "${{ env.DOCKERHUB_REPO }}@${DIGEST}"
+          cosign attest --yes --predicate provenance.json "${{ env.GHCR_REPO }}@${DIGEST}"
+
+      - name: Verify container image signatures
+        env:
+          DIGEST: ${{ steps.build_push.outputs.digest }}
+        run: |
+          cosign verify --certificate-identity-regexp ".*" \
+            --certificate-oidc-issuer-regexp ".*" \
+            "${{ env.DOCKERHUB_REPO }}@${DIGEST}" >/dev/null
+          cosign verify --certificate-identity-regexp ".*" \
+            --certificate-oidc-issuer-regexp ".*" \
+            "${{ env.GHCR_REPO }}@${DIGEST}" >/dev/null
+
+      - name: Verify container image attestations
+        env:
+          DIGEST: ${{ steps.build_push.outputs.digest }}
+        run: |
+          cosign verify-attestation --certificate-identity-regexp ".*" \
+            --certificate-oidc-issuer-regexp ".*" \
+            --type slsaprovenance \
+            "${{ env.DOCKERHUB_REPO }}@${DIGEST}" >/dev/null
+          cosign verify-attestation --certificate-identity-regexp ".*" \
+            --certificate-oidc-issuer-regexp ".*" \
+            --type slsaprovenance \
+            "${{ env.GHCR_REPO }}@${DIGEST}" >/dev/null
+
       - name: Image digest
-        run: echo "Image pushed with digest ${{ steps.meta.outputs.version }}"
+        run: echo "Image pushed with digest ${{ steps.build_push.outputs.digest }}"

@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(endoriumfort_backend LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -82,4 +84,23 @@ endif()
 
 if (WIN32)
   target_link_libraries(endoriumfort_backend PRIVATE ws2_32 mswsock)
+endif()
+
+if (BUILD_TESTING)
+  add_executable(endoriumfort_backend_tests
+    tests/utils_test.cc
+  )
+
+  target_include_directories(endoriumfort_backend_tests
+    PRIVATE
+      ${crow_SOURCE_DIR}/include
+      ${asio_SOURCE_DIR}/asio/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_compile_definitions(endoriumfort_backend_tests
+    PRIVATE ASIO_STANDALONE
+  )
+
+  add_test(NAME backend_utils_test COMMAND endoriumfort_backend_tests)
 endif()

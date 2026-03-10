@@ -79,6 +79,24 @@
 - Added token rotation assist on auth failures by refreshing token from `EF_TOKEN` or secure local token file.
 - Hardened local secret handling: token file is now read only if permissions are strict (`600`), and interactive password input uses best-effort byte zeroization after use.
 
+### Release Readiness Gates
+- Added `Release Gate` workflow for PRs with blocking checks:
+  - changelog/migration enforcement for runtime-impacting changes
+  - backend build + tests
+  - frontend unit tests + build
+  - frontend Playwright login e2e smoke
+  - agent tests + build
+  - supply-chain checks (`npm audit`, `govulncheck`, SBOM generation)
+  - `docker compose` smoke startup + health check
+- Agent release workflow now signs release artifacts using Sigstore Cosign keyless signatures:
+  - signed `checksums-sha256.txt`
+  - signed `endoriumfort-agent-linux-amd64` sample binary attestation
+- Docker publish workflow now signs pushed container images (Docker Hub + GHCR) with Cosign keyless signatures and performs in-pipeline signature verification.
+- Docker publish workflow now emits and verifies Cosign keyless attestations (`verify-attestation`) for image provenance validation.
+- Agent release workflow now also generates a CycloneDX SBOM and publishes it as signed release artifacts (`repository-sbom.cdx.json` + signature + certificate).
+- Release Gate now publishes diagnostics artifacts systematically (backend test logs, frontend unit logs, e2e logs/reports, compose smoke logs) to speed up incident triage.
+- Release Gate supply-chain checks now include keyless SBOM signature generation + verification before publishing artifacts.
+
 ## v0.5.20 - 2026-03-09
 ### Bastion Innovation: Session DNA + Purpose-Bound Access + Risk Preview
 - Added backend **Session DNA** chain storage and APIs for tamper-evident per-session lineage:
