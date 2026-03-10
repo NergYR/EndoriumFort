@@ -32,6 +32,7 @@ RUN if [ ! -f backend/src/version.h ]; then \
 # Build
 RUN cmake -S backend -B backend/build \
       -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TESTING=OFF \
       -DCMAKE_CXX_FLAGS="-O2" \
   && cmake --build backend/build -j"$(nproc)"
 

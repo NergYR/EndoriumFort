@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.5.24 - 2026-03-10
+### Final CI/Container Compatibility Fixes
+- Frontend unit test command is now Node 20 compatible in CI by using an explicit test file path (`node --test ./test/api.test.mjs`) instead of a shell-dependent glob.
+- Docker image backend build now explicitly sets `-DBUILD_TESTING=OFF` to prevent test target resolution failures in container build contexts that only copy runtime sources.
+
 ## v0.5.22 - 2026-03-10
 ### CI/Release Stabilization
 - CI backend build now compiles both `endoriumfort_backend` and `endoriumfort_backend_tests` before running `ctest`, avoiding missing-test executable failures in clean runners.
