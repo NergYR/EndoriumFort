@@ -11,6 +11,8 @@
 #include "tunnel.h"
 
 #include <cstdlib>
+#include <cctype>
+#include <string>
 
 #ifdef ENDORIUMFORT_SSH_ENABLED
 #ifndef _WIN32
@@ -33,6 +35,21 @@ int main() {
       return default_value;
     }
   };
+  auto parse_bool_env = [](const char *name, bool default_value) -> bool {
+    const char *raw = std::getenv(name);
+    if (!raw || *raw == '\0') return default_value;
+    std::string value = raw;
+    for (char &ch : value) {
+      ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (value == "1" || value == "true" || value == "yes" || value == "on") {
+      return true;
+    }
+    if (value == "0" || value == "false" || value == "no" || value == "off") {
+      return false;
+    }
+    return default_value;
+  };
 
   // ── Initialise database and load data ──
   ctx.init_database();
@@ -47,8 +64,16 @@ int main() {
         << "[relay] ENDORIUMFORT_RELAY_ENROLL_SECRET is not set; relay enrollment is disabled"
         << '\n';
   }
+  ctx.relay_certificate_required = parse_bool_env(
+      "ENDORIUMFORT_RELAY_CERT_REQUIRED", ctx.relay_certificate_required);
+  ctx.relay_certificate_ttl_seconds = parse_positive_int_env(
+      "ENDORIUMFORT_RELAY_CERT_TTL_SECONDS",
+      ctx.relay_certificate_ttl_seconds);
   ctx.relay_token_ttl_seconds = parse_positive_int_env(
       "ENDORIUMFORT_RELAY_TOKEN_TTL_SECONDS", ctx.relay_token_ttl_seconds);
+  ctx.relay_enrollment_token_ttl_seconds = parse_positive_int_env(
+      "ENDORIUMFORT_RELAY_ENROLL_TOKEN_TTL_SECONDS",
+      ctx.relay_enrollment_token_ttl_seconds);
   ctx.relay_heartbeat_stale_seconds = parse_positive_int_env(
       "ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS",
       ctx.relay_heartbeat_stale_seconds);

@@ -49,6 +49,8 @@ import {
   setContainmentMode,
   fetchRelays,
   fetchRelayConfig,
+  createRelayEnrollmentToken,
+  createRelayCertificate,
   assignRelayToResource,
   clearRelayForResource,
   fetchRelayResolution
@@ -331,11 +333,25 @@ export default function App() {
   const [relayError, setRelayError] = useState('');
   const [relayConfig, setRelayConfig] = useState({
     enrollmentEnabled: false,
+    certificateRequired: true,
+    certificateTtlSeconds: 2592000,
+    enrollmentTokenTtlSeconds: 600,
     tokenTtlSeconds: 86400,
     heartbeatStaleSeconds: 90
   });
+  const [relayCertificate, setRelayCertificate] = useState('');
+  const [relayCertificateId, setRelayCertificateId] = useState('');
+  const [relayCertificateExpiresAt, setRelayCertificateExpiresAt] = useState('');
+  const [issuingRelayCertificate, setIssuingRelayCertificate] = useState(false);
+  const [relayCertificateCopyStatus, setRelayCertificateCopyStatus] = useState('');
+  const [relayEnrollmentToken, setRelayEnrollmentToken] = useState('');
+  const [relayEnrollmentTokenExpiresAt, setRelayEnrollmentTokenExpiresAt] = useState('');
+  const [issuingRelayEnrollmentToken, setIssuingRelayEnrollmentToken] = useState(false);
+  const [relayEnrollmentCopyStatus, setRelayEnrollmentCopyStatus] = useState('');
   const [relayBindings, setRelayBindings] = useState({});
+  const [sessionRelayHints, setSessionRelayHints] = useState({});
   const [relayAssignBusyResourceId, setRelayAssignBusyResourceId] = useState(0);
+  const [relayAssignOnlineOnly, setRelayAssignOnlineOnly] = useState(true);
   // 2FA state
   const [twoFARequired, setTwoFARequired] = useState(false);
   const [totpCode, setTotpCode] = useState('');
@@ -552,6 +568,8 @@ export default function App() {
       offline: Math.max(0, relays.length - online)
     };
   }, [relays]);
+
+  const isRelayOnline = (relay) => String(relay?.status || '').toLowerCase() === 'online';
 
   const navigate = (path) => {
     if (window.location.pathname !== path) {
@@ -777,6 +795,9 @@ export default function App() {
         setRelays(items);
         setRelayConfig({
           enrollmentEnabled: !!configData?.enrollmentEnabled,
+          certificateRequired: configData?.certificateRequired !== false,
+          certificateTtlSeconds: Number(configData?.certificateTtlSeconds) || 2592000,
+          enrollmentTokenTtlSeconds: Number(configData?.enrollmentTokenTtlSeconds) || 600,
           tokenTtlSeconds: Number(configData?.tokenTtlSeconds) || 86400,
           heartbeatStaleSeconds: Number(configData?.heartbeatStaleSeconds) || 90
         });
@@ -1375,6 +1396,9 @@ export default function App() {
         setRelays(Array.isArray(maybeRelays?.items) ? maybeRelays.items : []);
         setRelayConfig({
           enrollmentEnabled: !!maybeRelayConfig?.enrollmentEnabled,
+          certificateRequired: maybeRelayConfig?.certificateRequired !== false,
+          certificateTtlSeconds: Number(maybeRelayConfig?.certificateTtlSeconds) || 2592000,
+          enrollmentTokenTtlSeconds: Number(maybeRelayConfig?.enrollmentTokenTtlSeconds) || 600,
           tokenTtlSeconds: Number(maybeRelayConfig?.tokenTtlSeconds) || 86400,
           heartbeatStaleSeconds: Number(maybeRelayConfig?.heartbeatStaleSeconds) || 90
         });
@@ -1562,6 +1586,70 @@ export default function App() {
       );
     }) || null;
   };
+
+  useEffect(() => {
+    if (!auth.token || !sessions.length) {
+      setSessionRelayHints({});
+      return;
+    }
+
+    const resourceIds = Array.from(
+      new Set(
+        sessions
+          .map((session) => Number(resolveSessionResource(session)?.id) || 0)
+          .filter((id) => id > 0)
+      )
+    );
+
+    if (!resourceIds.length) {
+      setSessionRelayHints({});
+      return;
+    }
+
+    let active = true;
+    Promise.all(
+      resourceIds.map(async (resourceId) => {
+        try {
+          const data = await fetchRelayResolution(resourceId);
+          return [resourceId, data];
+        } catch (_) {
+          return [resourceId, null];
+        }
+      })
+    )
+      .then((entries) => {
+        if (!active) return;
+        const resolutionByResourceId = {};
+        entries.forEach(([resourceId, data]) => {
+          resolutionByResourceId[resourceId] = data;
+        });
+
+        const hints = {};
+        sessions.forEach((session) => {
+          const resourceId = Number(resolveSessionResource(session)?.id) || 0;
+          if (!resourceId) return;
+          const resolution = resolutionByResourceId[resourceId];
+          const route = String(resolution?.route || 'direct').toLowerCase() === 'relay' ? 'relay' : 'direct';
+          const relayLabel = resolution?.relay?.label || resolution?.relay?.relayId || '';
+          const relayStatus = String(resolution?.relay?.status || '').toLowerCase() || 'offline';
+          hints[session.id] = {
+            route,
+            relayLabel,
+            relayStatus,
+            relayAssigned: !!resolution?.relayAssigned
+          };
+        });
+        setSessionRelayHints(hints);
+      })
+      .catch(() => {
+        if (!active) return;
+        setSessionRelayHints({});
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [auth.token, sessions, resources]);
 
   const openTerminal = async (session) => {
     setActiveTerminalSession(session);
@@ -2274,6 +2362,63 @@ export default function App() {
       setRelayError(error.message || 'Unable to update relay assignment');
     } finally {
       setRelayAssignBusyResourceId(0);
+    }
+  };
+
+  const onIssueRelayEnrollmentToken = async () => {
+    if (issuingRelayEnrollmentToken) return;
+    setIssuingRelayEnrollmentToken(true);
+    setRelayEnrollmentCopyStatus('');
+    try {
+      const data = await createRelayEnrollmentToken({
+        ttlSeconds: relayConfig.enrollmentTokenTtlSeconds
+      });
+      setRelayEnrollmentToken(String(data?.enrollmentToken || ''));
+      setRelayEnrollmentTokenExpiresAt(String(data?.expiresAt || ''));
+      setRelayError('');
+    } catch (error) {
+      setRelayError(error.message || 'Unable to issue relay enrollment token');
+    } finally {
+      setIssuingRelayEnrollmentToken(false);
+    }
+  };
+
+  const onIssueRelayCertificate = async () => {
+    if (issuingRelayCertificate) return;
+    setIssuingRelayCertificate(true);
+    setRelayCertificateCopyStatus('');
+    try {
+      const data = await createRelayCertificate({
+        ttlSeconds: relayConfig.certificateTtlSeconds
+      });
+      setRelayCertificate(String(data?.certificate || ''));
+      setRelayCertificateId(String(data?.certificateId || ''));
+      setRelayCertificateExpiresAt(String(data?.expiresAt || ''));
+      setRelayError('');
+    } catch (error) {
+      setRelayError(error.message || 'Unable to issue relay certificate');
+    } finally {
+      setIssuingRelayCertificate(false);
+    }
+  };
+
+  const onCopyRelayCertificate = async () => {
+    if (!relayCertificate) return;
+    try {
+      await navigator.clipboard.writeText(relayCertificate);
+      setRelayCertificateCopyStatus('Certificate copied');
+    } catch (_) {
+      setRelayCertificateCopyStatus('Copy failed');
+    }
+  };
+
+  const onCopyRelayEnrollmentToken = async () => {
+    if (!relayEnrollmentToken) return;
+    try {
+      await navigator.clipboard.writeText(relayEnrollmentToken);
+      setRelayEnrollmentCopyStatus('Token copied');
+    } catch (_) {
+      setRelayEnrollmentCopyStatus('Copy failed');
     }
   };
 
@@ -3268,8 +3413,74 @@ export default function App() {
             </div>
 
             <p className="muted">
-              Token TTL: {relayConfig.tokenTtlSeconds}s • Offline threshold: {relayConfig.heartbeatStaleSeconds}s
+              Cert required: {relayConfig.certificateRequired ? 'yes' : 'no'} • Cert TTL: {relayConfig.certificateTtlSeconds}s • Token TTL: {relayConfig.tokenTtlSeconds}s • Offline threshold: {relayConfig.heartbeatStaleSeconds}s
             </p>
+
+            <div className="relay-enroll-panel">
+              <div>
+                <h4>Direct Relay Enroll</h4>
+                <p className="muted">
+                  Generate a relay certificate and a short-lived enrollment token from the admin UI, then use both on the relay bootstrap request.
+                </p>
+              </div>
+              <div className="resource-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={onIssueRelayCertificate}
+                  disabled={issuingRelayCertificate}
+                >
+                  {issuingRelayCertificate ? 'Generating certificate...' : 'Generate relay certificate'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={onCopyRelayCertificate}
+                  disabled={!relayCertificate}
+                >
+                  Copy certificate
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={onIssueRelayEnrollmentToken}
+                  disabled={issuingRelayEnrollmentToken || !relayConfig.enrollmentEnabled}
+                >
+                  {issuingRelayEnrollmentToken ? 'Generating token...' : 'Generate enrollment token'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={onCopyRelayEnrollmentToken}
+                  disabled={!relayEnrollmentToken}
+                >
+                  Copy token
+                </button>
+              </div>
+              {relayCertificate && (
+                <div className="relay-enroll-token-box">
+                  <p><strong>Certificate ID</strong>: <code>{relayCertificateId || 'n/a'}</code></p>
+                  <p><strong>Certificate</strong>: <code>{relayCertificate}</code></p>
+                  <p className="muted">Expires at: {relayCertificateExpiresAt || 'n/a'}</p>
+                  {relayCertificateCopyStatus && <p className="muted">{relayCertificateCopyStatus}</p>}
+                </div>
+              )}
+              {!relayConfig.enrollmentEnabled && (
+                <p className="muted">
+                  Enrollment secret is not configured on backend. Set `ENDORIUMFORT_RELAY_ENROLL_SECRET` first.
+                </p>
+              )}
+              {relayEnrollmentToken && (
+                <div className="relay-enroll-token-box">
+                  <p><strong>Token</strong>: <code>{relayEnrollmentToken}</code></p>
+                  <p className="muted">Expires at: {relayEnrollmentTokenExpiresAt || 'n/a'}</p>
+                  <code className="relay-enroll-command">
+                    curl -X POST https://localhost:8080/api/relays/enroll -H "Content-Type: application/json" -H "X-EndoriumFort-Relay-Enrollment-Token: {relayEnrollmentToken}" -H "X-EndoriumFort-Relay-Certificate: &lt;relay-certificate&gt;" -d '{{"relayId":"relay-edge-01","label":"Edge Relay 01","version":"1.0.0","capabilities":["ssh","rdp","vnc"]}}'
+                  </code>
+                  {relayEnrollmentCopyStatus && <p className="muted">{relayEnrollmentCopyStatus}</p>}
+                </div>
+              )}
+            </div>
 
             {relayError && <p className="error">{relayError}</p>}
 
@@ -3298,12 +3509,23 @@ export default function App() {
                 <h3>Resource Routing Assignments</h3>
                 <p>Bind each resource to one relay, or keep direct routing fallback.</p>
               </div>
+              <label className="relay-filter-toggle">
+                <input
+                  type="checkbox"
+                  checked={relayAssignOnlineOnly}
+                  onChange={(event) => setRelayAssignOnlineOnly(event.target.checked)}
+                />
+                Online relays only
+              </label>
             </div>
             <div className="resource-list relay-assignment-list">
               {resources.length ? (
                 resources.map((resource) => {
                   const selected = relayBindings[resource.id] || '';
                   const busy = relayAssignBusyResourceId === resource.id;
+                  const relayOptions = relayAssignOnlineOnly
+                    ? relays.filter((relay) => isRelayOnline(relay) || relay.relayId === selected)
+                    : relays;
                   return (
                     <article className="resource-row relay-assign-row" key={`assign-${resource.id}`}>
                       <div>
@@ -3317,7 +3539,7 @@ export default function App() {
                           onChange={(event) => onAssignRelay(resource.id, event.target.value)}
                         >
                           <option value="">direct (no relay)</option>
-                          {relays.map((relay) => (
+                          {relayOptions.map((relay) => (
                             <option key={`relay-opt-${resource.id}-${relay.relayId}`} value={relay.relayId}>
                               {relay.label || relay.relayId} ({String(relay.status || 'offline').toLowerCase()})
                             </option>
@@ -4282,6 +4504,16 @@ export default function App() {
                   <span className="arrow">to</span>
                   <strong>{session.target}</strong>
                 </p>
+                <div className="session-route-hints">
+                  <span className={`pill ${sessionRelayHints[session.id]?.route === 'relay' ? 'loading' : 'ready'}`}>
+                    {sessionRelayHints[session.id]?.route === 'relay' ? 'via relay' : 'direct route'}
+                  </span>
+                  {sessionRelayHints[session.id]?.route === 'relay' && sessionRelayHints[session.id]?.relayLabel && (
+                    <span className="muted session-relay-label">
+                      {sessionRelayHints[session.id].relayLabel} ({sessionRelayHints[session.id].relayStatus || 'offline'})
+                    </span>
+                  )}
+                </div>
                 <div className="session-meta">
                   <span>Opened: {session.createdAt}</span>
                   {session.terminatedAt && (

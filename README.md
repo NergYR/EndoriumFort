@@ -190,6 +190,7 @@ Opens:
 5. **Sessions** - Monitor, shadow (read-only), or terminate active sessions
   - monitor **Session SLO Insights** (completion rate, average duration, stale active sessions)
   - pin critical sessions in **Watchlist** to track state transitions (active/closed/errors) faster
+  - each session card now shows effective routing path (`direct route` or `via relay`) with relay label/status when applicable
   - use **SSH Snippets Studio** to inject or execute recurring troubleshooting commands
   - save custom snippets per operator browser profile for faster interventions
   - open **Session DNA** to inspect integrity chain entries and verification status
@@ -200,7 +201,9 @@ Opens:
   - includes **Relay Fabric** operations panel for distributed bastion control-plane:
     - live relay fleet inventory with online/offline status
     - per-resource relay assignment from the admin console
-    - runtime relay policy visibility (enrollment enabled, token TTL, stale threshold)
+    - online-only assignment toggle to prevent accidental routing toward stale relays
+    - direct relay bootstrap from UI with relay certificate + short-lived one-time enrollment token generation
+    - runtime relay policy visibility (certificate policy, enrollment enabled, token TTL, stale threshold)
 9. **Granular permissions**:
   - role gives a default permission baseline
   - admin can override each permission per user (`allow`, `deny`, or `inherit`)
@@ -231,6 +234,15 @@ Opens:
   - enroll relay nodes with a shared enrollment secret:
     - `POST /api/relays/enroll`
     - header: `X-EndoriumFort-Relay-Secret`
+  - enroll relay nodes with an admin-issued short-lived one-time token:
+    - `POST /api/relays/enroll`
+    - header: `X-EndoriumFort-Relay-Enrollment-Token`
+  - relay must present an admin-issued certificate for enrollment and heartbeat:
+    - header: `X-EndoriumFort-Relay-Certificate`
+  - mint relay certificates from admin API:
+    - `POST /api/relays/certificate`
+  - mint relay enrollment tokens from admin API:
+    - `POST /api/relays/enrollment-token`
   - keep relay health fresh with heartbeat:
     - `POST /api/relays/heartbeat`
     - header: `X-EndoriumFort-Relay-Token`
@@ -243,12 +255,16 @@ Opens:
   - resolve runtime path for a resource (direct or relay):
     - `GET /api/relays/resolve/:resourceId`
   - relay route automatically falls back to `direct` when assigned relay is stale/offline
+  - relay enrollment/heartbeat routes require secure transport (`HTTPS`) except local loopback lab usage
 
 ### Relay Runtime Configuration
 
 Set relay control-plane hardening values in backend runtime:
 
 - `ENDORIUMFORT_RELAY_ENROLL_SECRET`: shared secret required by `POST /api/relays/enroll`
+- `ENDORIUMFORT_RELAY_CERT_REQUIRED`: require relay certificate presentation on enroll/heartbeat (default `true`)
+- `ENDORIUMFORT_RELAY_CERT_TTL_SECONDS`: admin-issued relay certificate TTL (default `2592000`)
+- `ENDORIUMFORT_RELAY_ENROLL_TOKEN_TTL_SECONDS`: admin-issued one-time enrollment token TTL (default `600`)
 - `ENDORIUMFORT_RELAY_TOKEN_TTL_SECONDS`: relay auth token TTL (default `86400`)
 - `ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS`: relay stale threshold for online/offline decision (default `90`)
 

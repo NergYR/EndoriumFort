@@ -1021,6 +1021,55 @@ button:disabled {
   min-width: 240px;
 }
 
+.relay-filter-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.relay-filter-toggle input {
+  margin: 0;
+}
+
+.relay-enroll-panel {
+  border: 1px solid rgba(26, 43, 75, 0.14);
+  border-radius: 12px;
+  padding: 0.7rem 0.75rem;
+  background: var(--panel);
+  display: grid;
+  gap: 0.55rem;
+}
+
+.relay-enroll-panel h4 {
+  margin: 0;
+}
+
+.relay-enroll-token-box {
+  border: 1px dashed rgba(26, 43, 75, 0.22);
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+  display: grid;
+  gap: 0.35rem;
+  background: var(--card-bg-soft);
+}
+
+.relay-enroll-token-box p {
+  margin: 0;
+}
+
+.relay-enroll-command {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.77rem;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  padding: 0.45rem 0.5rem;
+  background: var(--panel);
+}
+
 .session-grid {
   display: grid;
   gap: 0.7rem;
@@ -1139,6 +1188,17 @@ button:disabled {
   gap: 0.4rem;
   align-items: center;
   margin: 0;
+}
+
+.session-route-hints {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.session-relay-label {
+  font-size: 0.8rem;
 }
 
 .arrow {

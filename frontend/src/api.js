@@ -525,6 +525,32 @@ export async function fetchRelayConfig() {
   return response.json();
 }
 
+export async function createRelayEnrollmentToken(payload = {}) {
+  const response = await fetch('/api/relays/enrollment-token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to create relay enrollment token');
+  return response.json();
+}
+
+export async function createRelayCertificate(payload = {}) {
+  const response = await fetch('/api/relays/certificate', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to create relay certificate');
+  return response.json();
+}
+
 export async function assignRelayToResource(resourceId, relayId) {
   const response = await fetch('/api/relays/assign', {
     method: 'POST',

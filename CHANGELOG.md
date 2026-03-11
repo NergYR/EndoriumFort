@@ -4,6 +4,13 @@
 ### Distributed Bastion Foundations
 - Added **Relay Control Plane (v1)** backend routes for secure relay-node lifecycle and resource routing decisions.
 - Added relay enrollment endpoint `POST /api/relays/enroll` guarded by `X-EndoriumFort-Relay-Secret`.
+- Added one-time short-lived relay enrollment token flow:
+  - admin issuance endpoint `POST /api/relays/enrollment-token`
+  - relay enrollment support via `X-EndoriumFort-Relay-Enrollment-Token`
+- Added relay certificate issuance and validation flow:
+  - admin issuance endpoint `POST /api/relays/certificate`
+  - relay enrollment/heartbeat now support certificate presentation via `X-EndoriumFort-Relay-Certificate`
+  - relay cert can be bound to relay identity and expires automatically by TTL policy
 - Added relay heartbeat endpoint `POST /api/relays/heartbeat` guarded by `X-EndoriumFort-Relay-Token` to maintain online/offline status.
 - Added admin relay inventory endpoint `GET /api/relays` with relay health, capability, and metadata visibility.
 - Added admin resource-binding endpoint `POST /api/relays/assign` to assign or clear one relay per resource.
@@ -11,14 +18,21 @@
 - Added relay in-memory control-plane state in `AppContext` (fleet map, resource bindings, token TTL, heartbeat stale window).
 - Added runtime relay hardening via environment variables:
   - `ENDORIUMFORT_RELAY_ENROLL_SECRET`
+  - `ENDORIUMFORT_RELAY_CERT_REQUIRED`
+  - `ENDORIUMFORT_RELAY_CERT_TTL_SECONDS`
+  - `ENDORIUMFORT_RELAY_ENROLL_TOKEN_TTL_SECONDS`
   - `ENDORIUMFORT_RELAY_TOKEN_TTL_SECONDS`
   - `ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS`
 - Added admin visibility endpoint `GET /api/relays/config` (configuration metadata only, secret excluded).
 - Added **Admin Relay Fabric UI** in `frontend/src/App.jsx` for:
   - relay fleet visibility (status, metadata, managed resource count)
   - per-resource relay assignment controls with direct fallback option
-  - runtime relay configuration visibility (enrollment enabled, TTL, stale threshold)
+  - online-only relay assignment toggle to reduce accidental selection of stale/offline relays
+  - relay certificate generation and copy workflow for secure relay bootstrap
+  - direct relay enrollment token generation with copy-ready bootstrap command
+  - runtime relay configuration visibility (certificate policy, enrollment enabled, TTL, stale threshold)
 - Added relay control-plane frontend API clients in `frontend/src/api.js` and dedicated styling in `frontend/src/styles.css`.
+- Added session-card relay path hints (`direct route` vs `via relay`) with relay label/status visibility in the Sessions workspace.
 
 ### Session Operations UX
 - Added **SSH Snippets Studio** in the live terminal panel (`frontend/src/App.jsx`).
