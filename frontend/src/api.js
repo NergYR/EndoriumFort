@@ -506,3 +506,55 @@ export async function denyAccessRequest(requestId) {
   await ensureResponseOk(response, 'Failed to deny access request');
   return response.json();
 }
+
+// ── Relay Control Plane ───────────────────────────────────────────────
+
+export async function fetchRelays() {
+  const response = await fetch('/api/relays', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch relays');
+  return response.json();
+}
+
+export async function fetchRelayConfig() {
+  const response = await fetch('/api/relays/config', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch relay config');
+  return response.json();
+}
+
+export async function assignRelayToResource(resourceId, relayId) {
+  const response = await fetch('/api/relays/assign', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify({ resourceId, relayId })
+  });
+  await ensureResponseOk(response, 'Failed to assign relay');
+  return response.json();
+}
+
+export async function clearRelayForResource(resourceId) {
+  const response = await fetch('/api/relays/assign', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify({ resourceId })
+  });
+  await ensureResponseOk(response, 'Failed to clear relay assignment');
+  return response.json();
+}
+
+export async function fetchRelayResolution(resourceId) {
+  const response = await fetch(`/api/relays/resolve/${resourceId}`, {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to resolve relay route');
+  return response.json();
+}

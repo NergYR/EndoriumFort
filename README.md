@@ -39,6 +39,7 @@
 | **Critical Session Watchlist** | Pin sessions for dedicated status-change tracking during incidents |
 | **Audit CSV Export** | Export current filtered audit timeline for compliance and investigation workflows |
 | **Session SLO Insights** | Real-time completion rate, average duration, and stale-session signals for operations teams |
+| **Relay Control Plane (v1)** | Secure relay enrollment, heartbeat health, per-resource relay assignment, and route resolution (relay/direct fallback) |
 | **Access Justification Trail** | Admin-configurable per-resource reason popup + ticket ID attached to session creation audits |
 | **Access Playbooks** | Per-resource saved justification/purpose templates to accelerate compliant access requests |
 | **Dual Approval Workflow** | Per-resource 4-eyes control with operator request submission and admin approve/deny queue |
@@ -196,6 +197,10 @@ Opens:
   - export the current filtered audit view as CSV for reporting and case evidence
 7. **Recordings** — Replay past SSH sessions with the animated Asciinema player (admin/auditor)
 8. **Admin dashboard** — Manage users/resources/permissions and view platform stats
+  - includes **Relay Fabric** operations panel for distributed bastion control-plane:
+    - live relay fleet inventory with online/offline status
+    - per-resource relay assignment from the admin console
+    - runtime relay policy visibility (enrollment enabled, token TTL, stale threshold)
 9. **Granular permissions**:
   - role gives a default permission baseline
   - admin can override each permission per user (`allow`, `deny`, or `inherit`)
@@ -222,6 +227,32 @@ Opens:
   - platform admins can enable/disable containment from the incident banner to enforce justifications globally
   - containment state API: `GET /api/security/containment` and `POST /api/security/containment`
   - while containment is active, backend blocks session creation without `justification` and emits `session.create.blocked.containment`
+12. **Relay control-plane (distributed bastion foundations)**:
+  - enroll relay nodes with a shared enrollment secret:
+    - `POST /api/relays/enroll`
+    - header: `X-EndoriumFort-Relay-Secret`
+  - keep relay health fresh with heartbeat:
+    - `POST /api/relays/heartbeat`
+    - header: `X-EndoriumFort-Relay-Token`
+  - list relay fleet health and metadata (admin):
+    - `GET /api/relays`
+  - inspect relay runtime control-plane settings (admin, secret never returned):
+    - `GET /api/relays/config`
+  - bind/unbind one resource to one relay (admin):
+    - `POST /api/relays/assign`
+  - resolve runtime path for a resource (direct or relay):
+    - `GET /api/relays/resolve/:resourceId`
+  - relay route automatically falls back to `direct` when assigned relay is stale/offline
+
+### Relay Runtime Configuration
+
+Set relay control-plane hardening values in backend runtime:
+
+- `ENDORIUMFORT_RELAY_ENROLL_SECRET`: shared secret required by `POST /api/relays/enroll`
+- `ENDORIUMFORT_RELAY_TOKEN_TTL_SECONDS`: relay auth token TTL (default `86400`)
+- `ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS`: relay stale threshold for online/offline decision (default `90`)
+
+If `ENDORIUMFORT_RELAY_ENROLL_SECRET` is not set, enrollment stays fail-closed (disabled).
 
 ### Agent Tunnel
 

@@ -46,7 +46,12 @@ import {
   createAccessRequest,
   approveAccessRequest,
   denyAccessRequest,
-  setContainmentMode
+  setContainmentMode,
+  fetchRelays,
+  fetchRelayConfig,
+  assignRelayToResource,
+  clearRelayForResource,
+  fetchRelayResolution
 } from './api.js';
 
 const ROLE_BLUEPRINTS = [
@@ -321,6 +326,16 @@ export default function App() {
   const [accessRequests, setAccessRequests] = useState([]);
   const [loadingAccessRequests, setLoadingAccessRequests] = useState(false);
   const [accessRequestError, setAccessRequestError] = useState('');
+  const [relays, setRelays] = useState([]);
+  const [loadingRelays, setLoadingRelays] = useState(false);
+  const [relayError, setRelayError] = useState('');
+  const [relayConfig, setRelayConfig] = useState({
+    enrollmentEnabled: false,
+    tokenTtlSeconds: 86400,
+    heartbeatStaleSeconds: 90
+  });
+  const [relayBindings, setRelayBindings] = useState({});
+  const [relayAssignBusyResourceId, setRelayAssignBusyResourceId] = useState(0);
   // 2FA state
   const [twoFARequired, setTwoFARequired] = useState(false);
   const [totpCode, setTotpCode] = useState('');
@@ -529,6 +544,15 @@ export default function App() {
       .slice(0, 6);
   }, [accessRequests]);
 
+  const relayInventorySummary = useMemo(() => {
+    const online = relays.filter((item) => String(item.status).toLowerCase() === 'online').length;
+    return {
+      total: relays.length,
+      online,
+      offline: Math.max(0, relays.length - online)
+    };
+  }, [relays]);
+
   const navigate = (path) => {
     if (window.location.pathname !== path) {
       window.history.pushState({}, '', path);
@@ -730,6 +754,45 @@ export default function App() {
       });
     return () => {
       active = false;
+    };
+  }, [auth.token, canManagePlatform]);
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform) {
+      setRelays([]);
+      setRelayError('');
+      setLoadingRelays(false);
+      return;
+    }
+    let active = true;
+    const load = async () => {
+      setLoadingRelays(true);
+      try {
+        const [fleetData, configData] = await Promise.all([
+          fetchRelays(),
+          fetchRelayConfig()
+        ]);
+        if (!active) return;
+        const items = Array.isArray(fleetData?.items) ? fleetData.items : [];
+        setRelays(items);
+        setRelayConfig({
+          enrollmentEnabled: !!configData?.enrollmentEnabled,
+          tokenTtlSeconds: Number(configData?.tokenTtlSeconds) || 86400,
+          heartbeatStaleSeconds: Number(configData?.heartbeatStaleSeconds) || 90
+        });
+        setRelayError('');
+      } catch (error) {
+        if (!active) return;
+        setRelayError(error.message || 'Unable to load relay fabric');
+      } finally {
+        if (active) setLoadingRelays(false);
+      }
+    };
+    load();
+    const interval = window.setInterval(load, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
     };
   }, [auth.token, canManagePlatform]);
 
@@ -1283,6 +1346,8 @@ export default function App() {
       const requests = [fetchSessions(), fetchResources(), fetchStats()];
       if (canManagePlatform) {
         requests.push(fetchUsers());
+        requests.push(fetchRelays());
+        requests.push(fetchRelayConfig());
       }
       if (canViewAudit) {
         requests.push(fetchAudit());
@@ -1290,16 +1355,32 @@ export default function App() {
         requests.push(fetchActiveSecurityIncident());
       }
       const results = await Promise.all(requests);
-      const [sessionData, resourceData, statsData, maybeUsersOrAudit, maybeAudit, maybeContainment, maybeIncident] = results;
+      const [
+        sessionData,
+        resourceData,
+        statsData,
+        maybeUsers,
+        maybeRelays,
+        maybeRelayConfig,
+        maybeAudit,
+        maybeContainment,
+        maybeIncident
+      ] = results;
 
       setSessions(Array.isArray(sessionData?.items) ? sessionData.items : []);
       setResources(Array.isArray(resourceData?.items) ? resourceData.items : []);
       setStats(statsData || null);
       if (canManagePlatform) {
-        setUsers(Array.isArray(maybeUsersOrAudit?.items) ? maybeUsersOrAudit.items : []);
+        setUsers(Array.isArray(maybeUsers?.items) ? maybeUsers.items : []);
+        setRelays(Array.isArray(maybeRelays?.items) ? maybeRelays.items : []);
+        setRelayConfig({
+          enrollmentEnabled: !!maybeRelayConfig?.enrollmentEnabled,
+          tokenTtlSeconds: Number(maybeRelayConfig?.tokenTtlSeconds) || 86400,
+          heartbeatStaleSeconds: Number(maybeRelayConfig?.heartbeatStaleSeconds) || 90
+        });
       }
       if (canViewAudit) {
-        const auditData = canManagePlatform ? maybeAudit : maybeUsersOrAudit;
+        const auditData = canManagePlatform ? maybeAudit : maybeUsers;
         const items = Array.isArray(auditData?.items) ? auditData.items : [];
         setSecurityAuditItems(items);
         const containmentData = canManagePlatform ? maybeContainment : maybeAudit;
@@ -2159,6 +2240,43 @@ export default function App() {
     }
   };
 
+  const refreshRelayBindings = async () => {
+    const resourceList = Array.isArray(resources) ? resources : [];
+    const next = {};
+    await Promise.all(
+      resourceList.map(async (resource) => {
+        try {
+          const data = await fetchRelayResolution(resource.id);
+          next[resource.id] = data?.relay?.relayId || '';
+        } catch (_) {}
+      })
+    );
+    setRelayBindings(next);
+  };
+
+  const onAssignRelay = async (resourceId, relayId) => {
+    const normalizedResourceId = Number(resourceId) || 0;
+    if (!normalizedResourceId || relayAssignBusyResourceId) return;
+    setRelayAssignBusyResourceId(normalizedResourceId);
+    try {
+      const selectedRelayId = String(relayId || '').trim();
+      if (selectedRelayId) {
+        await assignRelayToResource(normalizedResourceId, selectedRelayId);
+      } else {
+        await clearRelayForResource(normalizedResourceId);
+      }
+      setRelayBindings((prev) => ({
+        ...prev,
+        [normalizedResourceId]: selectedRelayId
+      }));
+      setRelayError('');
+    } catch (error) {
+      setRelayError(error.message || 'Unable to update relay assignment');
+    } finally {
+      setRelayAssignBusyResourceId(0);
+    }
+  };
+
   const onChangeGranularPermissionOverride = async (permission, override) => {
     if (!selectedUserForPermissions) return;
     const key = `${selectedUserForPermissions.id}:${permission}`;
@@ -2222,6 +2340,16 @@ export default function App() {
   useEffect(() => {
     if (auth.token) onLoad2FAStatus();
   }, [auth.token]);
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform || !resources.length) {
+      setRelayBindings({});
+      return;
+    }
+    refreshRelayBindings().catch(() => {
+      setRelayError('Unable to resolve current relay bindings');
+    });
+  }, [auth.token, canManagePlatform, resources]);
 
   useEffect(() => {
     if (!auth.token) return;
@@ -3107,6 +3235,100 @@ export default function App() {
                 ))
               ) : (
                 <p className="muted">No resources created yet.</p>
+              )}
+            </div>
+          </div>
+
+          <div className="panel reveal relay-panel">
+            <div className="panel-header">
+              <div>
+                <h3>Relay Fabric</h3>
+                <p>Distributed bastion control-plane: fleet health and per-resource routing.</p>
+              </div>
+              {loadingRelays && <span className="pill loading">syncing</span>}
+            </div>
+
+            <div className="relay-kpi-grid">
+              <article className="relay-kpi-card">
+                <span>Total relays</span>
+                <strong>{relayInventorySummary.total}</strong>
+              </article>
+              <article className="relay-kpi-card ok">
+                <span>Online</span>
+                <strong>{relayInventorySummary.online}</strong>
+              </article>
+              <article className="relay-kpi-card warning">
+                <span>Offline</span>
+                <strong>{relayInventorySummary.offline}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Enrollment</span>
+                <strong>{relayConfig.enrollmentEnabled ? 'Enabled' : 'Disabled'}</strong>
+              </article>
+            </div>
+
+            <p className="muted">
+              Token TTL: {relayConfig.tokenTtlSeconds}s • Offline threshold: {relayConfig.heartbeatStaleSeconds}s
+            </p>
+
+            {relayError && <p className="error">{relayError}</p>}
+
+            <div className="resource-list relay-fleet-list">
+              {relays.length ? (
+                relays.map((relay) => (
+                  <article className="resource-row relay-row" key={relay.relayId}>
+                    <div>
+                      <h4>{relay.label || relay.relayId}</h4>
+                      <p className="muted">ID: {relay.relayId}</p>
+                      <p className="muted">{relay.sourceIp || 'n/a'} • {relay.version || 'unknown version'}</p>
+                      <p className="muted">Managed resources: {Number(relay.managedResourceCount) || 0}</p>
+                    </div>
+                    <span className={`pill ${String(relay.status).toLowerCase() === 'online' ? 'ok' : 'offline'}`}>
+                      {String(relay.status || 'offline').toLowerCase()}
+                    </span>
+                  </article>
+                ))
+              ) : (
+                <p className="muted">No relay enrolled yet. Configure `ENDORIUMFORT_RELAY_ENROLL_SECRET` and enroll a relay node.</p>
+              )}
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.9rem' }}>
+              <div>
+                <h3>Resource Routing Assignments</h3>
+                <p>Bind each resource to one relay, or keep direct routing fallback.</p>
+              </div>
+            </div>
+            <div className="resource-list relay-assignment-list">
+              {resources.length ? (
+                resources.map((resource) => {
+                  const selected = relayBindings[resource.id] || '';
+                  const busy = relayAssignBusyResourceId === resource.id;
+                  return (
+                    <article className="resource-row relay-assign-row" key={`assign-${resource.id}`}>
+                      <div>
+                        <h4>{resource.name}</h4>
+                        <p className="muted">{resource.protocol} {resource.target}:{resource.port}</p>
+                      </div>
+                      <div className="resource-actions">
+                        <select
+                          value={selected}
+                          disabled={busy || loadingRelays}
+                          onChange={(event) => onAssignRelay(resource.id, event.target.value)}
+                        >
+                          <option value="">direct (no relay)</option>
+                          {relays.map((relay) => (
+                            <option key={`relay-opt-${resource.id}-${relay.relayId}`} value={relay.relayId}>
+                              {relay.label || relay.relayId} ({String(relay.status || 'offline').toLowerCase()})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </article>
+                  );
+                })
+              ) : (
+                <p className="muted">Create resources before assigning relay routes.</p>
               )}
             </div>
           </div>

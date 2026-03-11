@@ -167,6 +167,14 @@ struct AppContext {
   int tunnel_ticket_issue_max_attempts = 20;
   std::chrono::seconds tunnel_ticket_issue_window{60};
 
+  // ── Relay control-plane state ──
+  std::mutex relay_mutex;
+  std::unordered_map<std::string, RelayNode> relays;
+  std::unordered_map<int, std::string> resource_relay_bindings;
+  std::string relay_enroll_secret;
+  int relay_token_ttl_seconds = 86400;  // 24h
+  int relay_heartbeat_stale_seconds = 90;
+
 #ifdef ENDORIUMFORT_SSH_ENABLED
 #ifndef _WIN32
   // ── SSH WebSocket state ──
