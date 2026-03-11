@@ -24,6 +24,7 @@
 |---------|-------------|
 | **Credential Vault** | Store SSH credentials securely - auto-injected on connection |
 | **Web SSH Terminal** | Full xterm.js terminal in the browser via WebSocket |
+| **SSH Snippets Studio** | Prebuilt + custom reusable SSH command snippets with one-click inject/execute |
 | **HTTP/HTTPS Proxy** | Transparent web proxy with cookie-based auth |
 | **Agent Tunnel** | Systancia-style local agent for zero-rewrite TCP tunneling |
 | **Session Shadowing** | Real-time read-only observation of active sessions |
@@ -35,7 +36,11 @@
 | **Security Center** | Live anomaly hints (login failures, stale sessions, admin-change activity, MFA posture) |
 | **Quick Refresh** | One-click synchronization of sessions, resources, KPIs, users, and audit feed |
 | **Recent Sessions Queue** | Prioritized latest sessions with direct terminate/audit actions |
+| **Critical Session Watchlist** | Pin sessions for dedicated status-change tracking during incidents |
+| **Audit CSV Export** | Export current filtered audit timeline for compliance and investigation workflows |
+| **Session SLO Insights** | Real-time completion rate, average duration, and stale-session signals for operations teams |
 | **Access Justification Trail** | Admin-configurable per-resource reason popup + ticket ID attached to session creation audits |
+| **Access Playbooks** | Per-resource saved justification/purpose templates to accelerate compliant access requests |
 | **Dual Approval Workflow** | Per-resource 4-eyes control with operator request submission and admin approve/deny queue |
 | **SSH Command Guard** | Optional server-side dangerous command blocking with dedicated audit events |
 | **Adaptive Risk Policy** | Per-resource risk level + ticket requirements for high-risk access |
@@ -180,9 +185,15 @@ Opens:
   - operators submit access requests from the same connect modal (reason + optional ticket)
   - admins approve/deny from the built-in Access Requests queue
   - for high-risk adaptive resources, `ticketId` is enforced server-side
+  - use **Access Playbook** actions in the access modal to save/apply recurring justification and purpose templates per resource
 5. **Sessions** - Monitor, shadow (read-only), or terminate active sessions
+  - monitor **Session SLO Insights** (completion rate, average duration, stale active sessions)
+  - pin critical sessions in **Watchlist** to track state transitions (active/closed/errors) faster
+  - use **SSH Snippets Studio** to inject or execute recurring troubleshooting commands
+  - save custom snippets per operator browser profile for faster interventions
   - open **Session DNA** to inspect integrity chain entries and verification status
 6. **Audit** — Search and filter all security events
+  - export the current filtered audit view as CSV for reporting and case evidence
 7. **Recordings** — Replay past SSH sessions with the animated Asciinema player (admin/auditor)
 8. **Admin dashboard** — Manage users/resources/permissions and view platform stats
 9. **Granular permissions**:

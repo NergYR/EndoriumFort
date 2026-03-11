@@ -186,6 +186,16 @@ const extractSessionIdFromAuditItem = (item) => {
   }
 };
 
+const DEFAULT_SSH_SNIPPETS = [
+  { id: 'health', label: 'Health Snapshot', command: 'whoami && hostname && uptime' },
+  { id: 'net', label: 'Network Quick Check', command: 'ip a && ss -tulpen | head -n 30' },
+  { id: 'disk', label: 'Disk Pressure', command: 'df -h && du -sh /var/log 2>/dev/null' },
+  { id: 'proc', label: 'Top Processes', command: 'ps aux --sort=-%cpu | head -n 15' }
+];
+
+const ACCESS_PLAYBOOK_STORAGE_KEY = 'endoriumfort_access_playbooks';
+const SESSION_WATCHLIST_STORAGE_KEY = 'endoriumfort_session_watchlist';
+
 export default function App() {
   const [status, setStatus] = useState('loading');
   const [detail, setDetail] = useState('');
@@ -217,6 +227,17 @@ export default function App() {
   const [terminalError, setTerminalError] = useState('');
   const [terminalInfo, setTerminalInfo] = useState('');
   const [sshPassword, setSshPassword] = useState('');
+  const [snippetLabel, setSnippetLabel] = useState('');
+  const [snippetCommand, setSnippetCommand] = useState('');
+  const [customSnippets, setCustomSnippets] = useState(() => {
+    try {
+      const raw = localStorage.getItem('endoriumfort_custom_ssh_snippets');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  });
   const [terminalReady, setTerminalReady] = useState(false);
   const [autoConnectSessionId, setAutoConnectSessionId] = useState(null);
   const [auditOpen, setAuditOpen] = useState(false);
@@ -272,6 +293,25 @@ export default function App() {
   const [accessPromptPurpose, setAccessPromptPurpose] = useState('');
   const [accessPromptPurposeEvidence, setAccessPromptPurposeEvidence] = useState('');
   const [accessPromptMode, setAccessPromptMode] = useState('connect');
+  const [accessPlaybooks, setAccessPlaybooks] = useState(() => {
+    try {
+      const raw = localStorage.getItem(ACCESS_PLAYBOOK_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  });
+  const [watchedSessionIds, setWatchedSessionIds] = useState(() => {
+    try {
+      const raw = localStorage.getItem(SESSION_WATCHLIST_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.map((item) => Number(item)).filter((id) => id > 0) : [];
+    } catch (_) {
+      return [];
+    }
+  });
+  const [watchlistAlerts, setWatchlistAlerts] = useState([]);
   const [riskPreview, setRiskPreview] = useState(null);
   const [riskPreviewLoading, setRiskPreviewLoading] = useState(false);
   const [riskPreviewError, setRiskPreviewError] = useState('');
@@ -370,6 +410,7 @@ export default function App() {
   const liveAlertCooldownByTypeRef = useRef({});
   const liveIncidentCriticalTimestampsRef = useRef([]);
   const liveIncidentCooldownUntilRef = useRef(0);
+  const watchlistStatusRef = useRef({});
 
   const canManagePlatform = hasCapability(auth.role, auth.permissions, 'manageResources');
   const canViewAudit = hasCapability(auth.role, auth.permissions, 'viewAudit');
@@ -384,6 +425,44 @@ export default function App() {
       localStorage.setItem('endoriumfort_live_alert_profile', liveAlertProfile);
     } catch (_) {}
   }, [liveAlertProfile]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('endoriumfort_custom_ssh_snippets', JSON.stringify(customSnippets));
+    } catch (_) {}
+  }, [customSnippets]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACCESS_PLAYBOOK_STORAGE_KEY, JSON.stringify(accessPlaybooks));
+    } catch (_) {}
+  }, [accessPlaybooks]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SESSION_WATCHLIST_STORAGE_KEY, JSON.stringify(watchedSessionIds));
+    } catch (_) {}
+  }, [watchedSessionIds]);
+
+  const currentAccessPlaybook = useMemo(() => {
+    const resourceId = Number(accessPromptResource?.id) || 0;
+    if (!resourceId) return null;
+    return (
+      accessPlaybooks.find((item) => Number(item.resourceId) === resourceId) || null
+    );
+  }, [accessPlaybooks, accessPromptResource]);
+
+  const sshSnippetLibrary = useMemo(() => {
+    const normalizedCustom = customSnippets
+      .map((item) => ({
+        id: String(item.id || ''),
+        label: String(item.label || '').trim(),
+        command: String(item.command || '').trim()
+      }))
+      .filter((item) => item.id && item.label && item.command)
+      .map((item) => ({ ...item, custom: true }));
+    return [...DEFAULT_SSH_SNIPPETS.map((item) => ({ ...item, custom: false })), ...normalizedCustom];
+  }, [customSnippets]);
   const tabGuide = useMemo(() => {
     const base = {
       overview: {
@@ -1261,6 +1340,20 @@ export default function App() {
     }
   };
 
+  const toggleWatchSession = (sessionId) => {
+    const normalized = Number(sessionId) || 0;
+    if (!normalized) return;
+    setWatchedSessionIds((prev) =>
+      prev.includes(normalized)
+        ? prev.filter((id) => id !== normalized)
+        : [...prev, normalized]
+    );
+  };
+
+  const dismissWatchAlert = (alertKey) => {
+    setWatchlistAlerts((prev) => prev.filter((item) => item.key !== alertKey));
+  };
+
   const loadAudit = async () => {
     if (!auth.token) {
       setAuditError('Sign in to view audit logs.');
@@ -1550,6 +1643,41 @@ export default function App() {
     });
   };
 
+  const sendSnippetToTerminal = (snippet, execute = false) => {
+    if (!snippet?.command) return;
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setTerminalError('Connect the SSH terminal before sending snippets.');
+      return;
+    }
+    const payload = execute ? `${snippet.command}\n` : snippet.command;
+    socket.send(JSON.stringify({ type: 'input', data: payload }));
+    setTerminalInfo(
+      execute
+        ? `Snippet executed: ${snippet.label}`
+        : `Snippet injected (press Enter to run): ${snippet.label}`
+    );
+  };
+
+  const addCustomSnippet = () => {
+    const label = snippetLabel.trim();
+    const command = snippetCommand.trim();
+    if (!label || !command) {
+      setTerminalError('Snippet label and command are required.');
+      return;
+    }
+    const id = `custom-${Date.now()}`;
+    setCustomSnippets((prev) => [...prev, { id, label, command }]);
+    setSnippetLabel('');
+    setSnippetCommand('');
+    setTerminalError('');
+    setTerminalInfo(`Snippet saved: ${label}`);
+  };
+
+  const removeCustomSnippet = (snippetId) => {
+    setCustomSnippets((prev) => prev.filter((item) => item.id !== snippetId));
+  };
+
   const connectToResource = async (resource, accessMeta = {}) => {
     if (!auth.token) {
       setSessionError('Sign in to start a session.');
@@ -1639,6 +1767,8 @@ export default function App() {
     const sessionBackedProtocol = protocol !== 'http' && protocol !== 'https' && protocol !== 'agent';
 
     if (resource.requireDualApproval && !canManagePlatform) {
+      const existingPlaybook =
+        accessPlaybooks.find((item) => Number(item.resourceId) === Number(resource.id)) || null;
       const approved = accessRequests.find(
         (item) =>
           item.resourceId === resource.id &&
@@ -1655,27 +1785,71 @@ export default function App() {
       }
       setAccessPromptMode('request');
       setAccessPromptResource(resource);
-      setAccessPromptReason('');
-      setAccessPromptTicketId('');
-      setAccessPromptPurpose('');
-      setAccessPromptPurposeEvidence('');
+      setAccessPromptReason(existingPlaybook?.justification || '');
+      setAccessPromptTicketId(existingPlaybook?.ticketId || '');
+      setAccessPromptPurpose(existingPlaybook?.purpose || '');
+      setAccessPromptPurposeEvidence(existingPlaybook?.purposeEvidence || '');
       setRiskPreview(null);
       setRiskPreviewError('');
       return;
     }
 
     if (resource.requireAccessJustification || (containmentEnabled && sessionBackedProtocol)) {
+      const existingPlaybook =
+        accessPlaybooks.find((item) => Number(item.resourceId) === Number(resource.id)) || null;
       setAccessPromptMode('connect');
       setAccessPromptResource(resource);
-      setAccessPromptReason('');
-      setAccessPromptTicketId('');
-      setAccessPromptPurpose('');
-      setAccessPromptPurposeEvidence('');
+      setAccessPromptReason(existingPlaybook?.justification || '');
+      setAccessPromptTicketId(existingPlaybook?.ticketId || '');
+      setAccessPromptPurpose(existingPlaybook?.purpose || '');
+      setAccessPromptPurposeEvidence(existingPlaybook?.purposeEvidence || '');
       setRiskPreview(null);
       setRiskPreviewError('');
       return;
     }
     await connectToResource(resource);
+  };
+
+  const applyCurrentAccessPlaybook = () => {
+    if (!currentAccessPlaybook) {
+      setSessionError('No saved playbook for this resource.');
+      return;
+    }
+    setAccessPromptReason(currentAccessPlaybook.justification || '');
+    setAccessPromptTicketId(currentAccessPlaybook.ticketId || '');
+    setAccessPromptPurpose(currentAccessPlaybook.purpose || '');
+    setAccessPromptPurposeEvidence(currentAccessPlaybook.purposeEvidence || '');
+    setSessionError('');
+  };
+
+  const saveCurrentAccessPlaybook = () => {
+    const resourceId = Number(accessPromptResource?.id) || 0;
+    if (!resourceId) return;
+    const playbook = {
+      resourceId,
+      justification: accessPromptReason.trim(),
+      ticketId: accessPromptTicketId.trim(),
+      purpose: accessPromptPurpose.trim(),
+      purposeEvidence: accessPromptPurposeEvidence.trim(),
+      updatedAt: new Date().toISOString()
+    };
+    if (!playbook.justification && !playbook.ticketId && !playbook.purpose && !playbook.purposeEvidence) {
+      setSessionError('Playbook cannot be empty. Fill at least one field before saving.');
+      return;
+    }
+    setAccessPlaybooks((prev) => {
+      const next = prev.filter((item) => Number(item.resourceId) !== resourceId);
+      return [...next, playbook];
+    });
+    setSessionError('');
+    setTerminalInfo(`Access playbook saved for ${accessPromptResource?.name || 'resource'}.`);
+  };
+
+  const deleteCurrentAccessPlaybook = () => {
+    const resourceId = Number(accessPromptResource?.id) || 0;
+    if (!resourceId) return;
+    setAccessPlaybooks((prev) => prev.filter((item) => Number(item.resourceId) !== resourceId));
+    setSessionError('');
   };
 
   const onSubmitAccessPrompt = async (event) => {
@@ -2289,6 +2463,78 @@ export default function App() {
     [sortedSessions]
   );
 
+  const watchedSessions = useMemo(() => {
+    const watched = sortedSessions.filter((session) =>
+      watchedSessionIds.includes(Number(session.id))
+    );
+    return watched.slice(0, 8);
+  }, [sortedSessions, watchedSessionIds]);
+
+  const sessionSlo = useMemo(() => {
+    const total = sessions.length;
+    const active = sessions.filter((item) => item.status === 'active').length;
+    const terminated = sessions.filter((item) => item.status === 'terminated').length;
+    const completionRate = total > 0 ? Math.round((terminated / total) * 100) : 0;
+
+    const closedDurationsMin = sessions
+      .map((item) => {
+        const opened = Date.parse(item.createdAt || '') || 0;
+        const closed = Date.parse(item.terminatedAt || '') || 0;
+        if (!opened || !closed || closed <= opened) return null;
+        return (closed - opened) / 60000;
+      })
+      .filter((value) => Number.isFinite(value));
+
+    const avgDurationMin = closedDurationsMin.length
+      ? Math.round(closedDurationsMin.reduce((sum, value) => sum + value, 0) / closedDurationsMin.length)
+      : 0;
+
+    const staleActive = sessions.filter((item) => {
+      if (item.status !== 'active') return false;
+      const opened = Date.parse(item.createdAt || '') || 0;
+      if (!opened) return false;
+      return opened < Date.now() - 4 * 60 * 60 * 1000;
+    }).length;
+
+    return {
+      total,
+      active,
+      terminated,
+      completionRate,
+      avgDurationMin,
+      staleActive
+    };
+  }, [sessions]);
+
+  useEffect(() => {
+    if (!watchedSessionIds.length) {
+      watchlistStatusRef.current = {};
+      return;
+    }
+    const nextStatus = {};
+    const nextAlerts = [];
+    watchedSessionIds.forEach((sessionId) => {
+      const found = sessions.find((item) => Number(item.id) === Number(sessionId));
+      if (!found) return;
+      const normalizedStatus = String(found.status || 'unknown').toLowerCase();
+      nextStatus[String(sessionId)] = normalizedStatus;
+      const previous = watchlistStatusRef.current[String(sessionId)];
+      if (previous && previous !== normalizedStatus) {
+        nextAlerts.push({
+          key: `watch:${sessionId}:${Date.now()}`,
+          sessionId,
+          status: normalizedStatus,
+          message: `Session #${sessionId} status changed: ${previous} -> ${normalizedStatus}`,
+          createdAt: new Date().toISOString()
+        });
+      }
+    });
+    watchlistStatusRef.current = nextStatus;
+    if (nextAlerts.length) {
+      setWatchlistAlerts((prev) => [...nextAlerts, ...prev].slice(0, 6));
+    }
+  }, [sessions, watchedSessionIds]);
+
   const securityAlerts = useMemo(() => {
     const now = Date.now();
     const audits = securityAuditItems;
@@ -2389,6 +2635,42 @@ export default function App() {
       }
     }
     return item.payloadRaw || '';
+  };
+
+  const toCsvCell = (value) => {
+    const raw = String(value ?? '');
+    const escaped = raw.replace(/"/g, '""');
+    return `"${escaped}"`;
+  };
+
+  const exportFilteredAuditCsv = () => {
+    if (!filteredAuditItems.length) {
+      setAuditError('No audit rows to export with current filters.');
+      return;
+    }
+
+    const header = ['id', 'type', 'actor', 'createdAt', 'detail'];
+    const rows = filteredAuditItems.map((item) => [
+      item.id,
+      item.type,
+      item.actor,
+      item.createdAt,
+      renderAuditDetail(item) || ''
+    ]);
+    const csvLines = [header, ...rows].map((row) => row.map(toCsvCell).join(','));
+    const csvPayload = `\uFEFF${csvLines.join('\n')}`;
+
+    const blob = new Blob([csvPayload], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `audit-export-${stamp}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setAuditError('');
   };
 
   const formatRelativeDate = (value) => {
@@ -3696,6 +3978,60 @@ export default function App() {
             </div>
           )}
 
+          <div className="watchlist-panel">
+            <div className="slo-grid">
+              <article className="slo-card">
+                <span>Completion rate</span>
+                <strong>{sessionSlo.completionRate}%</strong>
+                <p className="muted">Terminated sessions / total sessions</p>
+              </article>
+              <article className="slo-card">
+                <span>Average duration</span>
+                <strong>{sessionSlo.avgDurationMin} min</strong>
+                <p className="muted">Based on closed session history</p>
+              </article>
+              <article className="slo-card">
+                <span>Stale active sessions</span>
+                <strong>{sessionSlo.staleActive}</strong>
+                <p className="muted">Active over 4 hours</p>
+              </article>
+            </div>
+            <div className="panel-header" style={{ marginBottom: '0.35rem' }}>
+              <div>
+                <h3 style={{ fontSize: '1rem' }}>Critical Session Watchlist</h3>
+                <p>Pin sessions to monitor status changes faster.</p>
+              </div>
+              <span className={`pill ${watchedSessions.length ? 'loading' : 'ok'}`}>
+                {watchedSessions.length} watched
+              </span>
+            </div>
+            {watchlistAlerts.length > 0 && (
+              <div className="watch-alert-list">
+                {watchlistAlerts.map((alert) => (
+                  <article key={alert.key} className="watch-alert-item">
+                    <p>{alert.message}</p>
+                    <button type="button" className="ghost" onClick={() => dismissWatchAlert(alert.key)}>
+                      Dismiss
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+            {watchedSessions.length ? (
+              <div className="watchlist-grid">
+                {watchedSessions.map((session) => (
+                  <article key={`watch-${session.id}`} className="watchlist-item">
+                    <strong>#{session.id} {session.user} -&gt; {session.target}</strong>
+                    <span className={`pill ${session.status}`}>{session.status}</span>
+                    <p className="muted">Opened {formatRelativeDate(session.createdAt)}</p>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">No watched sessions yet. Use Pin on any session card.</p>
+            )}
+          </div>
+
           <div className="session-grid">
             {sessions.map((session) => (
               <article className="session-card" key={session.id}>
@@ -3706,9 +4042,18 @@ export default function App() {
                       {session.protocol} : {session.port}
                     </span>
                   </div>
-                  <span className={`pill ${session.status}`}>
-                    {session.status}
-                  </span>
+                  <div className="session-card-tools">
+                    <button
+                      type="button"
+                      className={watchedSessionIds.includes(Number(session.id)) ? 'secondary' : 'ghost'}
+                      onClick={() => toggleWatchSession(session.id)}
+                    >
+                      {watchedSessionIds.includes(Number(session.id)) ? 'Pinned' : 'Pin'}
+                    </button>
+                    <span className={`pill ${session.status}`}>
+                      {session.status}
+                    </span>
+                  </div>
                 </header>
                 <p className="session-route">
                   <strong>{session.user}</strong>
@@ -3803,6 +4148,14 @@ export default function App() {
                 disabled={loadingAudit}
               >
                 Refresh
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={exportFilteredAuditCsv}
+                disabled={!filteredAuditItems.length}
+              >
+                Export CSV
               </button>
               {auditFilter && (
                 <button
@@ -4004,6 +4357,60 @@ export default function App() {
             Connect
           </button>
         </div>
+        <div className="snippet-studio">
+          <div className="snippet-studio-head">
+            <h4>SSH Snippets Studio</h4>
+            <p>Inject or execute repeatable operational commands without retyping.</p>
+          </div>
+          <div className="snippet-grid">
+            {sshSnippetLibrary.map((snippet) => (
+              <article key={snippet.id} className="snippet-card">
+                <strong>{snippet.label}</strong>
+                <code>{snippet.command}</code>
+                <div className="snippet-actions">
+                  <button type="button" className="ghost" onClick={() => sendSnippetToTerminal(snippet, false)}>
+                    Inject
+                  </button>
+                  <button type="button" onClick={() => sendSnippetToTerminal(snippet, true)}>
+                    Run
+                  </button>
+                  {snippet.custom && (
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => removeCustomSnippet(snippet.id)}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="snippet-builder">
+            <label>
+              Snippet label
+              <input
+                type="text"
+                value={snippetLabel}
+                onChange={(event) => setSnippetLabel(event.target.value)}
+                placeholder="Example: App logs"
+              />
+            </label>
+            <label>
+              Command
+              <input
+                type="text"
+                value={snippetCommand}
+                onChange={(event) => setSnippetCommand(event.target.value)}
+                placeholder="tail -n 80 /var/log/app.log"
+              />
+            </label>
+            <button type="button" className="secondary" onClick={addCustomSnippet}>
+              Save snippet
+            </button>
+          </div>
+        </div>
         {terminalError && <p className="error">{terminalError}</p>}
         {terminalInfo && <p className="muted">{terminalInfo}</p>}
         <div className="terminal-shell" ref={terminalRef} />
@@ -4103,6 +4510,29 @@ export default function App() {
                     </p>
                   </>
                 )}
+              </div>
+              <div className="playbook-strip">
+                <div>
+                  <strong>Access Playbook</strong>
+                  <p className="muted">
+                    {currentAccessPlaybook
+                      ? `Saved for this resource (${new Date(currentAccessPlaybook.updatedAt || Date.now()).toLocaleString()}).`
+                      : 'No playbook yet for this resource.'}
+                  </p>
+                </div>
+                <div className="playbook-actions">
+                  <button type="button" className="ghost" onClick={applyCurrentAccessPlaybook}>
+                    Apply
+                  </button>
+                  <button type="button" className="secondary" onClick={saveCurrentAccessPlaybook}>
+                    Save
+                  </button>
+                  {currentAccessPlaybook && (
+                    <button type="button" className="danger" onClick={deleteCurrentAccessPlaybook}>
+                      Delete
+                    </button>
+                  )}
+                </div>
               </div>
               <label>
                 Access reason

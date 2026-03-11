@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.0-dev - 2026-03-11
+### Session Operations UX
+- Added **SSH Snippets Studio** in the live terminal panel (`frontend/src/App.jsx`).
+- Introduced prebuilt operational snippets (health snapshot, network checks, disk pressure, top processes) with one-click inject/run actions.
+- Added custom snippet creation and deletion with browser-local persistence for each operator workstation.
+- Styled and made responsive the snippet workspace (`frontend/src/styles.css`) for desktop and mobile operators.
+- Added **Access Playbooks** in the connection justification modal with per-resource save/apply/delete actions.
+- Access Playbooks persist locally in the browser and prefill reason/ticket/purpose fields for faster compliant access flows.
+- Added **Critical Session Watchlist** with pin/unpin controls directly on session cards.
+- Added dedicated watchlist alert stream for watched session status transitions.
+- Added watchlist panel in sessions workspace with compact monitored session view and mobile-responsive layout.
+- Added **Audit CSV Export** for the currently filtered audit timeline directly from the audit panel.
+- Added **Session SLO Insights** panel in Sessions workspace (completion rate, average closed-session duration, stale active sessions).
+
 ## v1.0.0 - 2026-03-10
 ### General Availability
 - Declared EndoriumFort `v1.0.0` as the first stable GA release.
