@@ -55,7 +55,18 @@ function Ensure-WixUiExtension {
     return $true
   }
 
-  & wix extension add WixToolset.UI.wixext 2>$null
+  $wixVersion = ((& wix --version 2>$null | Select-Object -First 1) -as [string]).Trim()
+  if ($wixVersion) {
+    & wix extension add "WixToolset.UI.wixext/$wixVersion" 2>$null
+  }
+  if ($LASTEXITCODE -ne 0) {
+    & wix extension add WixToolset.UI.wixext 2>$null
+  }
+  if ($LASTEXITCODE -ne 0) {
+    if ($wixVersion) {
+      & wix extension add -g "WixToolset.UI.wixext/$wixVersion" 2>$null
+    }
+  }
   if ($LASTEXITCODE -ne 0) {
     & wix extension add -g WixToolset.UI.wixext 2>$null
   }

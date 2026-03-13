@@ -300,8 +300,9 @@ jobs:
         run: |
           dotnet tool install --global wix
           "$env:USERPROFILE\\.dotnet\\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          wix extension add -g WixToolset.UI.wixext || Write-Host "WiX UI extension install skipped; build script will fallback without branded UI if needed."
-          wix extension list
+          $wixVersion = (wix --version).Trim()
+          wix extension add -g "WixToolset.UI.wixext/$wixVersion" || wix extension add -g WixToolset.UI.wixext || Write-Host "WiX UI extension install skipped; build script will fallback without branded UI if needed."
+          wix extension list || Write-Host "No WiX extensions listed."
 
       - name: Build MSI installer
         shell: pwsh
