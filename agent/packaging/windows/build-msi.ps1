@@ -152,7 +152,10 @@ try {
   }
 
   $wxsPath = Join-Path $work "EndoriumFortAgent.wxs"
-  @"
+  function Write-WixSource {
+    param([string]$UiBlockContent)
+
+    @"
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="EndoriumFort Agent"
            Manufacturer="EndoriumFort"
@@ -162,7 +165,7 @@ try {
            Scope="perUser">
 
     <MediaTemplate EmbedCab="yes" />
-${uiBlock}
+${UiBlockContent}
 
     <StandardDirectory Id="ProgramFilesFolder">
       <Directory Id="INSTALLFOLDER" Name="EndoriumFort Agent" />
@@ -213,14 +216,40 @@ ${uiBlock}
   </Package>
 </Wix>
 "@ | Set-Content -Path $wxsPath -Encoding UTF8
+  }
+
+  Write-WixSource -UiBlockContent $uiBlock
 
   $msiOut = Join-Path $OutputDir "EndoriumFortAgent-$Version-windows-amd64.msi"
   if (Test-Path $msiOut) {
     Remove-Item -Path $msiOut -Force
   }
-  & wix build $wxsPath -o $msiOut @wixBuildExtArgs
-  if ($LASTEXITCODE -ne 0) {
-    throw "wix build failed with exit code $LASTEXITCODE"
+  $wixBuildOutput = (& wix build $wxsPath -o $msiOut @wixBuildExtArgs 2>&1 | Out-String)
+  $wixExitCode = $LASTEXITCODE
+
+  if ($wixBuildOutput) {
+    Write-Host $wixBuildOutput
+  }
+
+  if ($wixBuildExtArgs.Count -gt 0 -and $wixBuildOutput -match "WIX0144") {
+    Write-Warning "WixToolset.UI.wixext could not be resolved at build time; retrying MSI build without UI branding."
+    $uiBlock = ""
+    $wixBuildExtArgs = @()
+    Write-WixSource -UiBlockContent $uiBlock
+
+    if (Test-Path $msiOut) {
+      Remove-Item -Path $msiOut -Force
+    }
+
+    $wixBuildOutput = (& wix build $wxsPath -o $msiOut 2>&1 | Out-String)
+    $wixExitCode = $LASTEXITCODE
+    if ($wixBuildOutput) {
+      Write-Host $wixBuildOutput
+    }
+  }
+
+  if ($wixExitCode -ne 0) {
+    throw "wix build failed with exit code $wixExitCode"
   }
   if (-not (Test-Path $msiOut)) {
     throw "wix build completed without generating MSI: $msiOut"
