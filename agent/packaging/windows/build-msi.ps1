@@ -1,7 +1,8 @@
 param(
   [string]$Version = "",
   [string]$BinaryPath = "",
-  [string]$OutputDir = ""
+  [string]$OutputDir = "",
+  [string]$BannerPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,6 +30,20 @@ if (-not $OutputDir) {
 }
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
+if (-not $BannerPath) {
+  $bannerCandidates = @(
+    (Join-Path $root "assets\installer-banner.png"),
+    (Join-Path $root "assets\installer-banner.jpg"),
+    (Join-Path $root "assets\installer-banner.jpeg")
+  )
+  foreach ($candidate in $bannerCandidates) {
+    if (Test-Path $candidate) {
+      $BannerPath = $candidate
+      break
+    }
+  }
+}
+
 $wix = Get-Command wix -ErrorAction SilentlyContinue
 if (-not $wix) {
   throw "WiX CLI not found. Install with: dotnet tool install --global wix"
@@ -36,12 +51,89 @@ if (-not $wix) {
 
 $work = Join-Path $env:TEMP ("endoriumfort-msi-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $work -Force | Out-Null
+
+function Convert-ImageToBmp {
+  param(
+    [Parameter(Mandatory = $true)][string]$SourcePath,
+    [Parameter(Mandatory = $true)][string]$DestinationPath,
+    [Parameter(Mandatory = $true)][int]$Width,
+    [Parameter(Mandatory = $true)][int]$Height
+  )
+
+  Add-Type -AssemblyName System.Drawing
+
+  $src = [System.Drawing.Image]::FromFile($SourcePath)
+  try {
+    $bmp = New-Object System.Drawing.Bitmap($Width, $Height)
+    try {
+      $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+      try {
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.Clear([System.Drawing.Color]::White)
+
+        $scaleX = [double]$Width / [double]$src.Width
+        $scaleY = [double]$Height / [double]$src.Height
+        $scale = [Math]::Min($scaleX, $scaleY)
+
+        $drawWidth = [int][Math]::Round($src.Width * $scale)
+        $drawHeight = [int][Math]::Round($src.Height * $scale)
+        $offsetX = [int][Math]::Floor(($Width - $drawWidth) / 2)
+        $offsetY = [int][Math]::Floor(($Height - $drawHeight) / 2)
+
+        $graphics.DrawImage($src, $offsetX, $offsetY, $drawWidth, $drawHeight)
+      }
+      finally {
+        $graphics.Dispose()
+      }
+      $bmp.Save($DestinationPath, [System.Drawing.Imaging.ImageFormat]::Bmp)
+    }
+    finally {
+      $bmp.Dispose()
+    }
+  }
+  finally {
+    $src.Dispose()
+  }
+}
+
 try {
   Copy-Item $BinaryPath (Join-Path $work "endoriumfort-agent.exe") -Force
+  $logoIconPng = Join-Path $root "assets\logo-icon-dark.png"
+  $logoFullPng = Join-Path $root "assets\logo-full-blue.png"
+  if (-not (Test-Path $logoIconPng)) {
+    throw "Logo not found: $logoIconPng"
+  }
+  if (-not (Test-Path $logoFullPng)) {
+    throw "Logo not found: $logoFullPng"
+  }
+  Copy-Item $logoIconPng (Join-Path $work "logo-icon-dark.png") -Force
+  Copy-Item $logoFullPng (Join-Path $work "logo-full-blue.png") -Force
+
+  $uiBlock = ""
+  $wixBuildExtArgs = @()
+  if ($BannerPath) {
+    if (-not (Test-Path $BannerPath)) {
+      throw "Banner not found: $BannerPath"
+    }
+
+    $bannerBmp = Join-Path $work "installer-banner.bmp"
+    $dialogBmp = Join-Path $work "installer-dialog.bmp"
+    Convert-ImageToBmp -SourcePath $BannerPath -DestinationPath $bannerBmp -Width 493 -Height 58
+    Convert-ImageToBmp -SourcePath $BannerPath -DestinationPath $dialogBmp -Width 493 -Height 312
+
+    $uiBlock = @"
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUIBannerBmp" Value="$($bannerBmp.Replace('\\','\\\\'))" />
+    <WixVariable Id="WixUIDialogBmp" Value="$($dialogBmp.Replace('\\','\\\\'))" />
+"@
+    $wixBuildExtArgs = @("-ext", "WixToolset.UI.wixext")
+  }
 
   $wxsPath = Join-Path $work "EndoriumFortAgent.wxs"
   @"
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="EndoriumFort Agent"
            Manufacturer="EndoriumFort"
            Version="$Version"
@@ -49,17 +141,31 @@ try {
            Language="1033"
            Scope="perUser">
 
+    <MediaTemplate EmbedCab="yes" />
+${uiBlock}
+
     <StandardDirectory Id="ProgramFilesFolder">
       <Directory Id="INSTALLFOLDER" Name="EndoriumFort Agent" />
     </StandardDirectory>
 
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuDir" Name="EndoriumFort Agent" />
+    </StandardDirectory>
+
     <Feature Id="MainFeature" Title="EndoriumFort Agent" Level="1">
       <ComponentRef Id="AgentExe" />
+      <ComponentRef Id="BrandAssets" />
       <ComponentRef Id="ProtocolRegistry" />
+      <ComponentRef Id="StartMenuShortcut" />
     </Feature>
 
     <Component Id="AgentExe" Directory="INSTALLFOLDER" Guid="*">
       <File Id="AgentExeFile" Source="$($work.Replace('\','\\'))\\endoriumfort-agent.exe" KeyPath="yes" />
+    </Component>
+
+    <Component Id="BrandAssets" Directory="INSTALLFOLDER" Guid="*">
+      <File Id="LogoIconPng" Source="$($work.Replace('\\','\\\\'))\\logo-icon-dark.png" />
+      <File Id="LogoFullPng" Source="$($work.Replace('\\','\\\\'))\\logo-full-blue.png" />
     </Component>
 
     <Component Id="ProtocolRegistry" Directory="INSTALLFOLDER" Guid="*">
@@ -74,12 +180,22 @@ try {
         <RegistryValue Type="string" Value="&quot;[#AgentExeFile]&quot; open-link &quot;%1&quot;" />
       </RegistryKey>
     </Component>
+
+    <Component Id="StartMenuShortcut" Directory="ProgramMenuDir" Guid="*">
+      <Shortcut Id="StartMenuAgentShortcut"
+                Name="EndoriumFort Agent"
+                Target="[#AgentExeFile]"
+                WorkingDirectory="INSTALLFOLDER"
+                Description="EndoriumFort local agent" />
+      <RemoveFolder Id="ProgramMenuDirCleanup" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\\EndoriumFort\\Agent" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
   </Package>
 </Wix>
 "@ | Set-Content -Path $wxsPath -Encoding UTF8
 
   $msiOut = Join-Path $OutputDir "EndoriumFortAgent-$Version-windows-amd64.msi"
-  & wix build $wxsPath -o $msiOut
+  & wix build $wxsPath -o $msiOut @wixBuildExtArgs
   Write-Host "MSI created: $msiOut"
 }
 finally {

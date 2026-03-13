@@ -156,14 +156,23 @@ jobs:
           DIGEST: ${{ steps.build_push.outputs.digest }}
           HAS_DOCKERHUB: ${{ steps.dockerhub.outputs.enabled }}
         run: |
+          verify_signature() {
+            local image_ref="$1"
+            for i in {1..8}; do
+              if cosign verify --certificate-identity-regexp ".*" \
+                --certificate-oidc-issuer-regexp ".*" \
+                "$image_ref" >/dev/null; then
+                return 0
+              fi
+              sleep 5
+            done
+            return 1
+          }
+
           if [[ "$HAS_DOCKERHUB" == "true" ]]; then
-            cosign verify --certificate-identity-regexp ".*" \
-              --certificate-oidc-issuer-regexp ".*" \
-              "${{ env.DOCKERHUB_REPO }}@${DIGEST}" >/dev/null
+            verify_signature "${{ env.DOCKERHUB_REPO }}@${DIGEST}"
           fi
-          cosign verify --certificate-identity-regexp ".*" \
-            --certificate-oidc-issuer-regexp ".*" \
-            "${{ env.GHCR_REPO }}@${DIGEST}" >/dev/null
+          verify_signature "${{ env.GHCR_REPO }}@${DIGEST}"
 
       - name: Verify container image attestations
         env:
