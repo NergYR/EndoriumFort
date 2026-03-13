@@ -188,7 +188,8 @@ ${UiBlockContent}
 
     <Feature Id="MainFeature" Title="EndoriumFort Agent" Level="1">
       <ComponentRef Id="AgentExe" />
-      <ComponentRef Id="BrandAssets" />
+      <ComponentRef Id="BrandLogoIcon" />
+      <ComponentRef Id="BrandLogoFull" />
       <ComponentRef Id="ProtocolRegistry" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
@@ -197,8 +198,11 @@ ${UiBlockContent}
       <File Id="AgentExeFile" Source="$($work.Replace('\','\\'))\\endoriumfort-agent.exe" KeyPath="yes" />
     </Component>
 
-    <Component Id="BrandAssets" Directory="INSTALLFOLDER" Guid="*">
+    <Component Id="BrandLogoIcon" Directory="INSTALLFOLDER" Guid="*">
       <File Id="LogoIconPng" Source="$($work.Replace('\\','\\\\'))\\logo-icon-dark.png" />
+    </Component>
+
+    <Component Id="BrandLogoFull" Directory="INSTALLFOLDER" Guid="*">
       <File Id="LogoFullPng" Source="$($work.Replace('\\','\\\\'))\\logo-full-blue.png" />
     </Component>
 
