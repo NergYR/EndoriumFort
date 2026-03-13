@@ -49,6 +49,21 @@ if (-not $wix) {
   throw "WiX CLI not found. Install with: dotnet tool install --global wix"
 }
 
+function Ensure-WixUiExtension {
+  $listOutput = (& wix extension list 2>$null | Out-String)
+  if ($LASTEXITCODE -eq 0 -and $listOutput -match "WixToolset.UI.wixext") {
+    return $true
+  }
+
+  & wix extension add WixToolset.UI.wixext 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    & wix extension add -g WixToolset.UI.wixext 2>$null
+  }
+
+  $listOutput = (& wix extension list 2>$null | Out-String)
+  return ($LASTEXITCODE -eq 0 -and $listOutput -match "WixToolset.UI.wixext")
+}
+
 $work = Join-Path $env:TEMP ("endoriumfort-msi-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 
@@ -123,12 +138,17 @@ try {
     Convert-ImageToBmp -SourcePath $BannerPath -DestinationPath $bannerBmp -Width 493 -Height 58
     Convert-ImageToBmp -SourcePath $BannerPath -DestinationPath $dialogBmp -Width 493 -Height 312
 
-    $uiBlock = @"
+    if (Ensure-WixUiExtension) {
+      $uiBlock = @"
     <ui:WixUI Id="WixUI_Minimal" />
     <WixVariable Id="WixUIBannerBmp" Value="$($bannerBmp.Replace('\\','\\\\'))" />
     <WixVariable Id="WixUIDialogBmp" Value="$($dialogBmp.Replace('\\','\\\\'))" />
 "@
-    $wixBuildExtArgs = @("-ext", "WixToolset.UI.wixext")
+      $wixBuildExtArgs = @("-ext", "WixToolset.UI.wixext")
+    }
+    else {
+      Write-Warning "WixToolset.UI.wixext not available; installer UI branding is skipped for this build."
+    }
   }
 
   $wxsPath = Join-Path $work "EndoriumFortAgent.wxs"
@@ -195,7 +215,16 @@ ${uiBlock}
 "@ | Set-Content -Path $wxsPath -Encoding UTF8
 
   $msiOut = Join-Path $OutputDir "EndoriumFortAgent-$Version-windows-amd64.msi"
+  if (Test-Path $msiOut) {
+    Remove-Item -Path $msiOut -Force
+  }
   & wix build $wxsPath -o $msiOut @wixBuildExtArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "wix build failed with exit code $LASTEXITCODE"
+  }
+  if (-not (Test-Path $msiOut)) {
+    throw "wix build completed without generating MSI: $msiOut"
+  }
   Write-Host "MSI created: $msiOut"
 }
 finally {
