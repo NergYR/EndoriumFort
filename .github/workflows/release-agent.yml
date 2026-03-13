@@ -1,4 +1,4 @@
-name: Release Agent Binaries
+name: Release Agent
 
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -162,3 +162,180 @@ jobs:
             release/repository-sbom.cdx.json
             release/repository-sbom.cdx.json.bundle.json
           generate_release_notes: true
+
+  linux-installers:
+    runs-on: ubuntu-latest
+    needs: [build-and-release]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache-dependency-path: agent/go.sum
+
+      - name: Setup Ruby (for fpm)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          gem install --no-document fpm
+
+      - name: Build Linux agent binaries
+        working-directory: agent
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          LDFLAGS="-X main.version=${VERSION} -s -w"
+          mkdir -p ../release
+          GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o ../release/endoriumfort-agent-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o ../release/endoriumfort-agent-linux-arm64 .
+
+      - name: Build DEB and RPM packages
+        run: |
+          chmod +x agent/packaging/linux/build-packages.sh
+          VERSION="${GITHUB_REF_NAME#v}" bash agent/packaging/linux/build-packages.sh
+
+      - name: Generate Linux installer checksums
+        working-directory: release/packages/linux
+        run: sha256sum *.deb *.rpm > checksums-sha256.txt
+
+      - name: Upload Linux installers to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/packages/linux/*.deb
+            release/packages/linux/*.rpm
+            release/packages/linux/checksums-sha256.txt
+
+  macos-installers:
+    runs-on: macos-latest
+    needs: [build-and-release]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache-dependency-path: agent/go.sum
+
+      - name: Build macOS agent binaries
+        working-directory: agent
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          LDFLAGS="-X main.version=${VERSION} -s -w"
+          mkdir -p ../release
+          GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o ../release/endoriumfort-agent-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o ../release/endoriumfort-agent-darwin-arm64 .
+
+      - name: Build PKG installers
+        run: |
+          chmod +x agent/packaging/macos/build-pkg.sh
+          VERSION="${GITHUB_REF_NAME#v}" BINARY="$GITHUB_WORKSPACE/release/endoriumfort-agent-darwin-amd64" ARCH="amd64" bash agent/packaging/macos/build-pkg.sh
+          VERSION="${GITHUB_REF_NAME#v}" BINARY="$GITHUB_WORKSPACE/release/endoriumfort-agent-darwin-arm64" ARCH="arm64" bash agent/packaging/macos/build-pkg.sh
+
+      - name: Notarize macOS PKG installers (optional)
+        if: ${{ secrets.APPLE_NOTARY_APPLE_ID != '' && secrets.APPLE_NOTARY_TEAM_ID != '' && secrets.APPLE_NOTARY_PASSWORD != '' }}
+        env:
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+        run: |
+          for pkg in release/packages/macos/*.pkg; do
+            xcrun notarytool submit "$pkg" \
+              --apple-id "$APPLE_NOTARY_APPLE_ID" \
+              --team-id "$APPLE_NOTARY_TEAM_ID" \
+              --password "$APPLE_NOTARY_PASSWORD" \
+              --wait
+            xcrun stapler staple "$pkg"
+          done
+
+      - name: Generate macOS installer checksums
+        working-directory: release/packages/macos
+        run: shasum -a 256 *.pkg > checksums-sha256.txt
+
+      - name: Upload macOS installers to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/packages/macos/*.pkg
+            release/packages/macos/checksums-sha256.txt
+
+  windows-installers:
+    runs-on: windows-latest
+    needs: [build-and-release]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache-dependency-path: agent/go.sum
+
+      - name: Build Windows agent binary
+        working-directory: agent
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart('v')
+          $ldflags = "-X main.version=$version -s -w"
+          New-Item -ItemType Directory -Path ..\release -Force | Out-Null
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          go build -ldflags $ldflags -o ..\release\endoriumfort-agent-windows-amd64.exe .
+
+      - name: Install WiX CLI
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix
+          "$env:USERPROFILE\\.dotnet\\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          $version = "${env:GITHUB_REF_NAME}".TrimStart('v')
+          .\agent\packaging\windows\build-msi.ps1 -Version $version -BinaryPath .\release\endoriumfort-agent-windows-amd64.exe -OutputDir .\release\packages\windows
+
+      - name: Code sign MSI installers (optional)
+        if: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 != '' && secrets.WINDOWS_SIGN_PFX_PASSWORD != '' }}
+        shell: pwsh
+        env:
+          WINDOWS_SIGN_PFX_BASE64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
+          WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_SIGN_PFX_BASE64))
+          Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password (ConvertTo-SecureString -String $env:WINDOWS_SIGN_PFX_PASSWORD -Force -AsPlainText) | Out-Null
+
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { throw "signtool.exe not found" }
+
+          Get-ChildItem -Path "release/packages/windows" -Filter *.msi | ForEach-Object {
+            & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $pfxPath /p $env:WINDOWS_SIGN_PFX_PASSWORD $_.FullName
+          }
+
+      - name: Generate Windows installer checksums
+        shell: pwsh
+        run: |
+          $path = "release/packages/windows"
+          Get-ChildItem -Path $path -Filter *.msi | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -Path $_.FullName).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Set-Content -Path "$path/checksums-sha256.txt" -Encoding utf8
+
+      - name: Upload Windows installer to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/packages/windows/*.msi
+            release/packages/windows/checksums-sha256.txt

@@ -18,8 +18,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,6 +60,19 @@ type TunnelSpec struct {
 type TunnelBinding struct {
 	Resource  Resource
 	LocalPort int
+}
+
+type DeepLinkConfig struct {
+	ServerURL   string
+	Token       string
+	ResourceID  int
+	LocalPort   int
+	RedirectURL string
+	InsecureTLS bool
+	AllowHTTP   bool
+	Manage      bool
+	TUI         bool
+	JSONLogs    bool
 }
 
 type tunnelRuntime struct {
@@ -132,6 +147,10 @@ func (t *tunnelFlag) Set(value string) error {
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
+	if len(os.Args) >= 2 && isDeepLinkArg(os.Args[1]) {
+		cmdOpenLink([]string{os.Args[1]})
+		return
+	}
 
 	// No args or "start" → interactive mode
 	if len(os.Args) < 2 || os.Args[1] == "start" {
@@ -146,6 +165,8 @@ func main() {
 		cmdList(os.Args[2:])
 	case "connect":
 		cmdConnect(os.Args[2:])
+	case "open-link":
+		cmdOpenLink(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("EndoriumFortAgent v%s\n", version)
 	case "help", "--help", "-h":
@@ -169,6 +190,7 @@ Commandes:
   login     S'authentifier et obtenir un token
   list      Lister les ressources disponibles
   connect   Ouvrir un tunnel vers une ressource
+	open-link Ouvrir un lien protocole endoriumfort://
   version   Afficher la version
   help      Afficher cette aide
 
@@ -179,6 +201,7 @@ Exemples CLI:
 	endoriumfort-agent connect --server http://bastion:8080 --token eft_xxxx --tunnel 3:8888 --tunnel 7:8890
 	endoriumfort-agent connect --server http://bastion:8080 --token eft_xxxx --tunnel 3:8888 --manage
 	endoriumfort-agent connect --server http://bastion:8080 --token eft_xxxx --tunnel 3:8888 --tui --log-json
+	endoriumfort-agent open-link "endoriumfort://connect?server=https%3A%2F%2Fbastion&resource=3&local-port=8888"
 
 Options TLS:
 	--insecure   Ignore la validation TLS (certificat auto-signé, lab uniquement)
@@ -191,6 +214,10 @@ Options multi-tunnel (commande connect):
 	--manage                              Mode gestion à chaud (add/remove/list/quit)
 	--tui                                 Tableau live state/TX/RX
 	--log-json                            Logs structurés JSON`)
+}
+
+func isDeepLinkArg(arg string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(arg)), "endoriumfort://")
 }
 
 // ─── INTERACTIVE MODE ───────────────────────────────────────────────────
@@ -857,6 +884,199 @@ func parseTunnelSpecs(rawSpecs []string) ([]TunnelSpec, error) {
 	return specs, nil
 }
 
+func parseBoolString(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func queryFirst(query url.Values, keys ...string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(query.Get(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func queryFirstInt(query url.Values, keys ...string) (int, error) {
+	v := queryFirst(query, keys...)
+	if v == "" {
+		return 0, nil
+	}
+	out, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("valeur numérique invalide '%s'", v)
+	}
+	return out, nil
+}
+
+func allocateEphemeralPort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer listener.Close()
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0, fmt.Errorf("type d'adresse inattendu")
+	}
+	return addr.Port, nil
+}
+
+func parseDeepLink(rawURL string) (DeepLinkConfig, error) {
+	var cfg DeepLinkConfig
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return cfg, fmt.Errorf("URL deep-link invalide: %v", err)
+	}
+	if strings.ToLower(strings.TrimSpace(u.Scheme)) != "endoriumfort" {
+		return cfg, fmt.Errorf("schéma deep-link invalide: %s", u.Scheme)
+	}
+
+	action := strings.ToLower(strings.TrimSpace(u.Host))
+	if action == "" {
+		action = strings.ToLower(strings.Trim(strings.TrimSpace(u.Path), "/"))
+	}
+	if action != "connect" {
+		return cfg, fmt.Errorf("action deep-link non supportée: %s (attendu: connect)", action)
+	}
+
+	query := u.Query()
+	cfg.ServerURL = strings.TrimRight(queryFirst(query, "server", "backend", "server_url"), "/")
+	cfg.Token = strings.TrimSpace(queryFirst(query, "token"))
+	cfg.RedirectURL = strings.TrimSpace(queryFirst(query, "redirect", "redirect_url", "redirect-url", "open", "open_url"))
+
+	cfg.ResourceID, err = queryFirstInt(query, "resource", "resource_id", "resourceId")
+	if err != nil {
+		return cfg, err
+	}
+	cfg.LocalPort, err = queryFirstInt(query, "local-port", "local_port", "localPort", "port")
+	if err != nil {
+		return cfg, err
+	}
+	cfg.InsecureTLS = parseBoolString(queryFirst(query, "insecure", "insecure_tls"))
+	cfg.AllowHTTP = parseBoolString(queryFirst(query, "allow-http", "allow_http"))
+	cfg.Manage = parseBoolString(queryFirst(query, "manage"))
+	cfg.TUI = parseBoolString(queryFirst(query, "tui"))
+	cfg.JSONLogs = parseBoolString(queryFirst(query, "log-json", "log_json"))
+
+	if cfg.ServerURL == "" {
+		return cfg, fmt.Errorf("paramètre requis manquant: server")
+	}
+	if cfg.ResourceID <= 0 {
+		return cfg, fmt.Errorf("paramètre requis manquant ou invalide: resource")
+	}
+	if cfg.LocalPort <= 0 {
+		port, allocErr := allocateEphemeralPort()
+		if allocErr != nil {
+			return cfg, fmt.Errorf("impossible d'allouer un port local: %v", allocErr)
+		}
+		cfg.LocalPort = port
+	}
+	if cfg.LocalPort > 65535 {
+		return cfg, fmt.Errorf("local-port invalide: %d", cfg.LocalPort)
+	}
+
+	return cfg, nil
+}
+
+func waitTunnelReady(localPort int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	addr := fmt.Sprintf("127.0.0.1:%d", localPort)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 350*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false
+}
+
+func buildRedirectURL(cfg DeepLinkConfig) string {
+	redirect := strings.TrimSpace(cfg.RedirectURL)
+	if redirect == "" {
+		return fmt.Sprintf("http://127.0.0.1:%d", cfg.LocalPort)
+	}
+	redirect = strings.ReplaceAll(redirect, "{{LOCAL_PORT}}", strconv.Itoa(cfg.LocalPort))
+	redirect = strings.ReplaceAll(redirect, "{{RESOURCE_ID}}", strconv.Itoa(cfg.ResourceID))
+	redirect = strings.ReplaceAll(redirect, "{{SERVER_URL}}", strings.TrimRight(cfg.ServerURL, "/"))
+	return redirect
+}
+
+func openInDefaultBrowser(targetURL string) error {
+	if strings.TrimSpace(targetURL) == "" {
+		return nil
+	}
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL)
+	case "darwin":
+		cmd = exec.Command("open", targetURL)
+	default:
+		if _, err := exec.LookPath("xdg-open"); err == nil {
+			cmd = exec.Command("xdg-open", targetURL)
+		} else if _, err := exec.LookPath("gio"); err == nil {
+			cmd = exec.Command("gio", "open", targetURL)
+		} else {
+			return fmt.Errorf("aucun opener trouvé (xdg-open/gio)")
+		}
+	}
+	return cmd.Start()
+}
+
+func runDeepLink(cfg DeepLinkConfig) {
+	token := strings.TrimSpace(cfg.Token)
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("EF_TOKEN"))
+	}
+	if token == "" {
+		if saved, err := loadTokenFromFile(); err == nil {
+			token = strings.TrimSpace(saved)
+		}
+	}
+	if token == "" {
+		log.Fatal("deep-link invalide: token absent (query token, EF_TOKEN ou ~/.endoriumfort_token)")
+	}
+
+	allowInsecureHTTP := cfg.AllowHTTP || envBool("EF_ALLOW_INSECURE_HTTP")
+	if err := enforceTransportSecurity(strings.TrimRight(cfg.ServerURL, "/"), cfg.InsecureTLS, allowInsecureHTTP); err != nil {
+		log.Fatalf("Échec politique transport: %v", err)
+	}
+
+	if cfg.InsecureTLS {
+		warnTLSBypass()
+	}
+	useJSONLogs = cfg.JSONLogs
+
+	binding := TunnelBinding{
+		Resource: Resource{ID: cfg.ResourceID, Name: fmt.Sprintf("resource-%d", cfg.ResourceID)},
+		LocalPort: cfg.LocalPort,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		startTunnels(strings.TrimRight(cfg.ServerURL, "/"), token, []TunnelBinding{binding}, cfg.InsecureTLS, cfg.Manage, cfg.TUI)
+		close(done)
+	}()
+
+	if waitTunnelReady(cfg.LocalPort, 10*time.Second) {
+		targetURL := buildRedirectURL(cfg)
+		if err := openInDefaultBrowser(targetURL); err != nil {
+			logEvent("warn", "deeplink.browser.open.failed", map[string]interface{}{"url": targetURL, "error": err.Error()})
+		} else {
+			logEvent("info", "deeplink.browser.opened", map[string]interface{}{"url": targetURL, "localPort": cfg.LocalPort, "resourceId": cfg.ResourceID})
+		}
+	} else {
+		logEvent("warn", "deeplink.tunnel.not_ready", map[string]interface{}{"localPort": cfg.LocalPort, "resourceId": cfg.ResourceID})
+	}
+
+	<-done
+}
+
 // ─── CLI commands (kept for scripting / automation) ─────────────────────
 
 func cmdLogin(args []string) {
@@ -1030,6 +1250,23 @@ func cmdConnect(args []string) {
 	}
 	useJSONLogs = *jsonLogs
 	startTunnels(strings.TrimRight(*server, "/"), *token, bindings, *insecure, *manage, *tui)
+}
+
+func cmdOpenLink(args []string) {
+	if len(args) == 0 {
+		log.Fatal("usage: endoriumfort-agent open-link \"endoriumfort://connect?...\"")
+	}
+
+	rawURL := strings.TrimSpace(args[0])
+	if !isDeepLinkArg(rawURL) {
+		log.Fatalf("URL deep-link invalide: %s", rawURL)
+	}
+
+	cfg, err := parseDeepLink(rawURL)
+	if err != nil {
+		log.Fatalf("Erreur deep-link: %v", err)
+	}
+	runDeepLink(cfg)
 }
 
 // ─── Connection handler ─────────────────────────────────────────────────

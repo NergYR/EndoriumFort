@@ -418,6 +418,8 @@ export default function App() {
   const shadowSocketRef = useRef(null);
   // Agent launch modal
   const [agentModal, setAgentModal] = useState(null); // { resource, port, command, copied }
+  const agentLaunchTimeoutRef = useRef(null);
+  const agentLaunchCleanupRef = useRef(null);
   // Dark mode
   const [darkMode, setDarkMode] = useState(() => {
     try { return localStorage.getItem('endoriumfort_darkmode') === 'true'; } catch (_) { return false; }
@@ -1847,6 +1849,95 @@ export default function App() {
     setCustomSnippets((prev) => prev.filter((item) => item.id !== snippetId));
   };
 
+  const clearAgentLaunchWatcher = () => {
+    if (agentLaunchTimeoutRef.current) {
+      window.clearTimeout(agentLaunchTimeoutRef.current);
+      agentLaunchTimeoutRef.current = null;
+    }
+    if (typeof agentLaunchCleanupRef.current === 'function') {
+      agentLaunchCleanupRef.current();
+      agentLaunchCleanupRef.current = null;
+    }
+  };
+
+  const resolveAgentInstallGuide = () => {
+    const ua = String(navigator.userAgent || '').toLowerCase();
+    if (ua.includes('windows')) {
+      return {
+        platform: 'Windows',
+        command: '.\\agent\\installers\\windows\\install-protocol.ps1 -AgentPath .\\agent\\endoriumfort-agent.exe'
+      };
+    }
+    if (ua.includes('mac os') || ua.includes('macintosh') || ua.includes('darwin')) {
+      return {
+        platform: 'macOS',
+        command: './agent/installers/macos/install-protocol.sh ./agent/endoriumfort-agent-darwin-arm64'
+      };
+    }
+    return {
+      platform: 'Linux',
+      command: './agent/installers/linux/install-protocol.sh ./agent/endoriumfort-agent'
+    };
+  };
+
+  const buildAgentLaunchPayload = (resource, localPort) => {
+    const normalizedOrigin = String(window.location.origin || '').replace(/\/$/, '');
+    const localUrl = `http://127.0.0.1:${localPort}`;
+    const params = new URLSearchParams();
+    params.set('server', normalizedOrigin);
+    params.set('resource', String(resource.id));
+    params.set('local-port', String(localPort));
+    params.set('redirect-url', localUrl);
+    if (auth.token) {
+      params.set('token', auth.token);
+    }
+
+    return {
+      localUrl,
+      installGuide: resolveAgentInstallGuide(),
+      command: `endoriumfort-agent connect --server ${normalizedOrigin} --token ${auth.token} --resource ${resource.id} --local-port ${localPort}`,
+      deepLink: `endoriumfort://connect?${params.toString()}`
+    };
+  };
+
+  const launchAgentDeepLink = (deepLink) => {
+    if (!deepLink) return;
+    clearAgentLaunchWatcher();
+    setAgentModal((prev) => (prev ? { ...prev, launchState: 'opening' } : prev));
+
+    const onHidden = () => {
+      if (document.visibilityState === 'hidden') {
+        clearAgentLaunchWatcher();
+        setAgentModal((prev) => (prev ? { ...prev, launchState: 'opened' } : prev));
+      }
+    };
+
+    const onPageHide = () => {
+      clearAgentLaunchWatcher();
+      setAgentModal((prev) => (prev ? { ...prev, launchState: 'opened' } : prev));
+    };
+
+    document.addEventListener('visibilitychange', onHidden);
+    window.addEventListener('pagehide', onPageHide, { once: true });
+    agentLaunchCleanupRef.current = () => {
+      document.removeEventListener('visibilitychange', onHidden);
+      window.removeEventListener('pagehide', onPageHide);
+    };
+
+    agentLaunchTimeoutRef.current = window.setTimeout(() => {
+      clearAgentLaunchWatcher();
+      setAgentModal((prev) => (prev ? { ...prev, launchState: 'fallback' } : prev));
+    }, 1600);
+
+    window.location.href = deepLink;
+  };
+
+  useEffect(() => {
+    return () => {
+      clearAgentLaunchWatcher();
+    };
+  }, []);
+
   const connectToResource = async (resource, accessMeta = {}) => {
     if (!auth.token) {
       setSessionError('Sign in to start a session.');
@@ -1863,9 +1954,9 @@ export default function App() {
     // Handle agent resources — open agent launch modal with random port
     if (resource.protocol === 'agent') {
       const randomPort = 10000 + Math.floor(Math.random() * 50000);
-      const serverUrl = window.location.origin;
-      const cmd = `endoriumfort-agent connect --server ${serverUrl} --token ${auth.token} --resource ${resource.id} --local-port ${randomPort}`;
-      setAgentModal({ resource, port: randomPort, command: cmd, copied: false });
+      const launchPayload = buildAgentLaunchPayload(resource, randomPort);
+      setAgentModal({ resource, port: randomPort, copied: 'idle', linkCopied: 'idle', installCopied: 'idle', launchState: 'opening', ...launchPayload });
+      launchAgentDeepLink(launchPayload.deepLink);
       return true;
     }
 
@@ -5107,7 +5198,10 @@ export default function App() {
 
       {/* Agent launch modal */}
       {agentModal && (
-        <div className="modal-overlay" onClick={() => setAgentModal(null)}>
+        <div className="modal-overlay" onClick={() => {
+          clearAgentLaunchWatcher();
+          setAgentModal(null);
+        }}>
           <div className="modal-content agent-modal" onClick={(e) => e.stopPropagation()}>
             <div className="agent-modal-header">
               <span className="agent-icon">🚀</span>
@@ -5131,39 +5225,104 @@ export default function App() {
               </div>
             </div>
             <div className="agent-command-block">
-              <label className="agent-label">Commande à exécuter dans un terminal :</label>
+              <label className="agent-label">Commande de secours (si le protocole n'est pas enregistré) :</label>
               <div className="agent-command-row">
                 <code className="agent-command">{agentModal.command}</code>
                 <button
                   type="button"
                   className="secondary"
-                  onClick={() => {
-                    navigator.clipboard.writeText(agentModal.command);
-                    setAgentModal((prev) => ({ ...prev, copied: true }));
-                    setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, copied: false }) : null), 2000);
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(agentModal.command);
+                      setAgentModal((prev) => (prev ? { ...prev, copied: 'ok' } : prev));
+                    } catch (_) {
+                      setAgentModal((prev) => (prev ? { ...prev, copied: 'fail' } : prev));
+                    }
+                    setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, copied: 'idle' }) : null), 2000);
                   }}
                 >
-                  {agentModal.copied ? '✓ Copié' : '📋 Copier'}
+                  {agentModal.copied === 'ok' ? '✓ Copié' : agentModal.copied === 'fail' ? '❌ Échec' : '📋 Copier'}
+                </button>
+              </div>
+            </div>
+            <div className="agent-command-block">
+              <label className="agent-label">Lien deep-link :</label>
+              <div className="agent-command-row">
+                <code className="agent-command">{agentModal.deepLink}</code>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(agentModal.deepLink);
+                      setAgentModal((prev) => (prev ? { ...prev, linkCopied: 'ok' } : prev));
+                    } catch (_) {
+                      setAgentModal((prev) => (prev ? { ...prev, linkCopied: 'fail' } : prev));
+                    }
+                    setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, linkCopied: 'idle' }) : null), 2000);
+                  }}
+                >
+                  {agentModal.linkCopied === 'ok' ? '✓ Copié' : agentModal.linkCopied === 'fail' ? '❌ Échec' : '📋 Copier lien'}
                 </button>
               </div>
             </div>
             <div className="agent-modal-tip">
-              <p>💡 Une fois le tunnel actif, ouvrez <a href={`http://127.0.0.1:${agentModal.port}`} target="_blank" rel="noreferrer">http://127.0.0.1:{agentModal.port}</a> dans votre navigateur.</p>
+              <p>💡 Une fois le tunnel actif, l'agent redirige automatiquement vers <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
+              {agentModal.launchState === 'opening' && (
+                <p className="muted">Ouverture de l'application agent en cours...</p>
+              )}
+              {agentModal.launchState === 'fallback' && (
+                <>
+                  <p className="error" style={{ marginBottom: '0.45rem' }}>
+                    L'application agent ne semble pas enregistrée comme handler du protocole.
+                  </p>
+                  <p className="muted" style={{ marginBottom: '0.45rem' }}>
+                    Installation rapide ({agentModal.installGuide?.platform || 'OS'}) :
+                  </p>
+                  <div className="agent-command-row">
+                    <code className="agent-command">{agentModal.installGuide?.command}</code>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(agentModal.installGuide?.command || '');
+                          setAgentModal((prev) => (prev ? { ...prev, installCopied: 'ok' } : prev));
+                        } catch (_) {
+                          setAgentModal((prev) => (prev ? { ...prev, installCopied: 'fail' } : prev));
+                        }
+                        setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, installCopied: 'idle' }) : null), 2000);
+                      }}
+                    >
+                      {agentModal.installCopied === 'ok' ? '✓ Copié' : agentModal.installCopied === 'fail' ? '❌ Échec' : '📋 Copier install'}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
             <div className="agent-modal-actions">
               <button
                 type="button"
+                className="secondary"
+                onClick={() => launchAgentDeepLink(agentModal.deepLink)}
+              >
+                🚀 Ouvrir avec l'agent
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   const randomPort = 10000 + Math.floor(Math.random() * 50000);
-                  const serverUrl = window.location.origin;
-                  const cmd = `endoriumfort-agent connect --server ${serverUrl} --token ${auth.token} --resource ${agentModal.resource.id} --local-port ${randomPort}`;
-                  setAgentModal((prev) => ({ ...prev, port: randomPort, command: cmd, copied: false }));
+                  const launchPayload = buildAgentLaunchPayload(agentModal.resource, randomPort);
+                  setAgentModal((prev) => ({ ...prev, port: randomPort, copied: 'idle', linkCopied: 'idle', installCopied: 'idle', launchState: 'idle', ...launchPayload }));
                 }}
                 className="ghost"
               >
                 🔄 Nouveau port
               </button>
-              <button type="button" className="ghost" onClick={() => setAgentModal(null)}>Fermer</button>
+              <button type="button" className="ghost" onClick={() => {
+                clearAgentLaunchWatcher();
+                setAgentModal(null);
+              }}>Fermer</button>
             </div>
           </div>
         </div>

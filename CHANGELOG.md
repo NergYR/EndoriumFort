@@ -1,6 +1,18 @@
 # Changelog
 
 ## v1.1.0-dev - 2026-03-11
+### Agent Distribution & Packaging
+- Added native packaging scripts for the agent:
+  - Linux `.deb` / `.rpm` (`agent/packaging/linux/build-packages.sh`)
+  - macOS `.pkg` (`agent/packaging/macos/build-pkg.sh`)
+  - Windows `.msi` (`agent/packaging/windows/build-msi.ps1`)
+- Added cross-platform packaging helper script `agent/packaging/build-installers.sh`.
+- Extended GitHub release workflow `.github/workflows/release-agent.yml` to publish installer artifacts on tag pushes (`v*`) in the same pipeline as agent binaries.
+- Added optional installer signing hooks in release workflow:
+  - macOS notarization/stapling when Apple Notary secrets are provided
+  - Windows Authenticode signing when PFX secrets are provided
+- Added dedicated CI workflow `.github/workflows/agent-installers-ci.yml` to build installers on each push/PR (`dev`, `master`) and publish them as workflow artifacts.
+
 ### Distributed Bastion Foundations
 - Added **Relay Control Plane (v1)** backend routes for secure relay-node lifecycle and resource routing decisions.
 - Added relay enrollment endpoint `POST /api/relays/enroll` guarded by `X-EndoriumFort-Relay-Secret`.

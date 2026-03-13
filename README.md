@@ -338,7 +338,115 @@ Security note (agent tunnel hardening):
 - Token file loading now enforces strict permissions (mode `600`) for better local secret hygiene.
 - Optional `--log-json` enables structured logs for easier SIEM/observability pipelines.
 
-Or simply **click a resource tile** with the agent protocol - the frontend generates the command automatically with a random port.
+Or simply **click a resource tile** with the agent protocol:
+
+- the frontend generates an `endoriumfort://connect?...` deep-link (random local port)
+- your browser proposes opening EndoriumFort Agent
+- the agent starts the tunnel and redirects to the local URL automatically
+- the modal still provides a fallback CLI command if protocol handler is not installed
+
+### Agent Deep-Link Protocol (`endoriumfort://`)
+
+The agent now supports browser deep-links to provide a one-click flow:
+
+1. User clicks an `endoriumfort://connect?...` link in browser
+2. OS opens `EndoriumFortAgent`
+3. Agent starts the local tunnel
+4. Agent opens/redirects browser to the target URL (typically local tunnel URL)
+
+Deep-link format:
+
+```text
+endoriumfort://connect?server=https%3A%2F%2Fendorium.space&resource=2&local-port=35739&token=eft_xxx&redirect-url=http%3A%2F%2F127.0.0.1%3A%7B%7BLOCAL_PORT%7D%7D%2F
+```
+
+Supported query parameters:
+
+- `server` (required)
+- `resource` (required)
+- `local-port` (optional, auto-allocated if omitted)
+- `token` (optional if already available in `EF_TOKEN` or `~/.endoriumfort_token`)
+- `redirect-url` (optional, defaults to `http://127.0.0.1:<local-port>`)
+- `insecure=1` / `allow-http=1` for lab usage only
+
+Template placeholders in `redirect-url`:
+
+- `{{LOCAL_PORT}}`
+- `{{RESOURCE_ID}}`
+- `{{SERVER_URL}}`
+
+Example fallback CLI invocation:
+
+```bash
+./agent/endoriumfort-agent open-link "endoriumfort://connect?server=https%3A%2F%2Fendorium.space&resource=2&local-port=35739"
+```
+
+#### Register protocol handler per OS
+
+Linux:
+
+```bash
+chmod +x agent/installers/linux/install-protocol.sh
+./agent/installers/linux/install-protocol.sh ./agent/endoriumfort-agent
+```
+
+macOS:
+
+```bash
+chmod +x agent/installers/macos/install-protocol.sh
+./agent/installers/macos/install-protocol.sh ./agent/endoriumfort-agent-darwin-arm64
+```
+
+Windows (PowerShell):
+
+```powershell
+./agent/installers/windows/install-protocol.ps1 -AgentPath .\agent\endoriumfort-agent.exe
+```
+
+Uninstall scripts are available in the same folders (`uninstall-protocol.*`).
+
+#### Build native installer packages
+
+The repository now includes packaging scripts for native installers:
+
+- Linux (`.deb` / `.rpm`): `agent/packaging/linux/build-packages.sh`
+- macOS (`.pkg`): `agent/packaging/macos/build-pkg.sh`
+- Windows (`.msi`): `agent/packaging/windows/build-msi.ps1`
+
+Linux local build (requires `fpm`, `rpm`, and prebuilt Linux binaries in `release/`):
+
+```bash
+VERSION=1.1.0 bash agent/packaging/linux/build-packages.sh
+```
+
+macOS local build (requires `pkgbuild` and a Darwin binary):
+
+```bash
+VERSION=1.1.0 \
+BINARY="$PWD/release/endoriumfort-agent-darwin-arm64" \
+ARCH=arm64 \
+bash agent/packaging/macos/build-pkg.sh
+```
+
+Windows local build (requires WiX CLI):
+
+```powershell
+dotnet tool install --global wix
+.\agent\packaging\windows\build-msi.ps1 -Version 1.1.0 -BinaryPath .\release\endoriumfort-agent-windows-amd64.exe
+```
+
+Automated release packaging is handled by GitHub Actions workflow:
+
+- `.github/workflows/release-agent.yml` (triggered on tag `v*`)
+- uploads `.deb`, `.rpm`, `.pkg`, and `.msi` to the GitHub release
+- supports optional signing when secrets are configured:
+  - macOS notarization: `APPLE_NOTARY_APPLE_ID`, `APPLE_NOTARY_TEAM_ID`, `APPLE_NOTARY_PASSWORD`
+  - Windows Authenticode: `WINDOWS_SIGN_PFX_BASE64`, `WINDOWS_SIGN_PFX_PASSWORD`
+
+Continuous installer builds (for visibility on every change) are handled by:
+
+- `.github/workflows/agent-installers-ci.yml` (push/PR on `dev` and `master`)
+- publishes installer artifacts in the workflow run (`agent-installers-linux`, `agent-installers-macos`, `agent-installers-windows`)
 
 ---
 
@@ -486,8 +594,41 @@ cd EndoriumFort
 docker compose up -d
 
 # Customize port and timezone
-EF_PORT=8443 TZ=America/New_York docker compose up -d
+EF_HTTP_PORT=8080 EF_HTTPS_PORT=8443 TZ=America/New_York docker compose up -d
 ```
+
+### Docker Compose (Production)
+
+```bash
+# 1) Prepare production environment file
+cp .env.prod.example .env.prod
+
+# 2) Adjust .env.prod (domain, email, immutable tag, ports)
+
+# 3) Start production stack
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+
+# Follow logs
+docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f
+```
+
+Alternative with helper script:
+
+```bash
+# first run auto-creates .env.prod from .env.prod.example if missing
+./run-prod.sh start
+
+# common operations
+./run-prod.sh status
+./run-prod.sh logs
+./run-prod.sh update
+./run-prod.sh stop
+```
+
+Production notes:
+- Use immutable `DOCKER_TAG` values (avoid `latest`).
+- Enable ACME only when DNS and ports 80/443 are correctly exposed.
+- Keep volumes (`ef-data`, `ef-recordings`, `ef-letsencrypt`) persistent and backed up.
 
 ### Build from Source
 
@@ -502,8 +643,12 @@ docker compose up -d
 |----------|---------|-------------|
 | `DOCKER_IMAGE` | `nergyr/endoriumfort` | Docker Hub image name |
 | `DOCKER_TAG` | `latest` | Image tag |
-| `EF_PORT` | `80` | Host port mapping |
+| `EF_HTTP_PORT` | `80` | Host HTTP port mapping |
+| `EF_HTTPS_PORT` | `443` | Host HTTPS port mapping |
 | `TZ` | `Europe/Paris` | Container timezone |
+| `ACME_ENABLED` | `0` | Enable Let's Encrypt provisioning (`1` to enable) |
+| `ACME_DOMAIN` | _(empty)_ | Public DNS name for certificate issuance |
+| `ACME_EMAIL` | _(empty)_ | Contact email used by Let's Encrypt |
 
 ### Persistent Volumes
 
