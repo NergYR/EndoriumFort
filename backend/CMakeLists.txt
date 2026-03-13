@@ -51,6 +51,7 @@ add_executable(endoriumfort_backend
   src/app_context.cc
   src/http_proxy.cc
   src/routes.cc
+  src/relay.cc
   src/ssh.cc
   src/tunnel.cc
   src/session_recording.cc

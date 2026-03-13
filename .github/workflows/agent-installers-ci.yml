@@ -1,0 +1,135 @@
+name: Agent Installers CI
+
+on:
+  push:
+    branches:
+      - dev
+      - master
+  pull_request:
+    branches:
+      - dev
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-installers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache-dependency-path: agent/go.sum
+
+      - name: Setup Ruby (for fpm)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          gem install --no-document fpm
+
+      - name: Build Linux agent binaries
+        working-directory: agent
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          LDFLAGS="-X main.version=${VERSION} -s -w"
+          mkdir -p ../release
+          GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o ../release/endoriumfort-agent-linux-amd64 .
+          GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o ../release/endoriumfort-agent-linux-arm64 .
+
+      - name: Build DEB and RPM packages
+        run: |
+          chmod +x agent/packaging/linux/build-packages.sh
+          VERSION="$(tr -d '[:space:]' < agent/VERSION)" bash agent/packaging/linux/build-packages.sh
+
+      - name: Upload Linux installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-installers-linux
+          path: |
+            release/packages/linux/*.deb
+            release/packages/linux/*.rpm
+
+  macos-installers:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache-dependency-path: agent/go.sum
+
+      - name: Build macOS agent binaries
+        working-directory: agent
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          LDFLAGS="-X main.version=${VERSION} -s -w"
+          mkdir -p ../release
+          GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o ../release/endoriumfort-agent-darwin-amd64 .
+          GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o ../release/endoriumfort-agent-darwin-arm64 .
+
+      - name: Build PKG installers
+        run: |
+          chmod +x agent/packaging/macos/build-pkg.sh
+          VERSION="$(tr -d '[:space:]' < agent/VERSION)" BINARY="$GITHUB_WORKSPACE/release/endoriumfort-agent-darwin-amd64" ARCH="amd64" bash agent/packaging/macos/build-pkg.sh
+          VERSION="$(tr -d '[:space:]' < agent/VERSION)" BINARY="$GITHUB_WORKSPACE/release/endoriumfort-agent-darwin-arm64" ARCH="arm64" bash agent/packaging/macos/build-pkg.sh
+
+      - name: Upload macOS installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-installers-macos
+          path: release/packages/macos/*.pkg
+
+  windows-installers:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache-dependency-path: agent/go.sum
+
+      - name: Build Windows agent binary
+        working-directory: agent
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $ldflags = "-X main.version=$version -s -w"
+          New-Item -ItemType Directory -Path ..\release -Force | Out-Null
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          go build -ldflags $ldflags -o ..\release\endoriumfort-agent-windows-amd64.exe .
+
+      - name: Install WiX CLI
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          $version = (Get-Content .\agent\VERSION -Raw).Trim()
+          .\agent\packaging\windows\build-msi.ps1 -Version $version -BinaryPath .\release\endoriumfort-agent-windows-amd64.exe -OutputDir .\release\packages\windows
+
+      - name: Upload Windows installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-installers-windows
+          path: release/packages/windows/*.msi

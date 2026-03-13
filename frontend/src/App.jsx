@@ -46,7 +46,14 @@ import {
   createAccessRequest,
   approveAccessRequest,
   denyAccessRequest,
-  setContainmentMode
+  setContainmentMode,
+  fetchRelays,
+  fetchRelayConfig,
+  createRelayEnrollmentToken,
+  createRelayCertificate,
+  assignRelayToResource,
+  clearRelayForResource,
+  fetchRelayResolution
 } from './api.js';
 
 const ROLE_BLUEPRINTS = [
@@ -321,6 +328,30 @@ export default function App() {
   const [accessRequests, setAccessRequests] = useState([]);
   const [loadingAccessRequests, setLoadingAccessRequests] = useState(false);
   const [accessRequestError, setAccessRequestError] = useState('');
+  const [relays, setRelays] = useState([]);
+  const [loadingRelays, setLoadingRelays] = useState(false);
+  const [relayError, setRelayError] = useState('');
+  const [relayConfig, setRelayConfig] = useState({
+    enrollmentEnabled: false,
+    certificateRequired: true,
+    certificateTtlSeconds: 2592000,
+    enrollmentTokenTtlSeconds: 600,
+    tokenTtlSeconds: 86400,
+    heartbeatStaleSeconds: 90
+  });
+  const [relayCertificate, setRelayCertificate] = useState('');
+  const [relayCertificateId, setRelayCertificateId] = useState('');
+  const [relayCertificateExpiresAt, setRelayCertificateExpiresAt] = useState('');
+  const [issuingRelayCertificate, setIssuingRelayCertificate] = useState(false);
+  const [relayCertificateCopyStatus, setRelayCertificateCopyStatus] = useState('');
+  const [relayEnrollmentToken, setRelayEnrollmentToken] = useState('');
+  const [relayEnrollmentTokenExpiresAt, setRelayEnrollmentTokenExpiresAt] = useState('');
+  const [issuingRelayEnrollmentToken, setIssuingRelayEnrollmentToken] = useState(false);
+  const [relayEnrollmentCopyStatus, setRelayEnrollmentCopyStatus] = useState('');
+  const [relayBindings, setRelayBindings] = useState({});
+  const [sessionRelayHints, setSessionRelayHints] = useState({});
+  const [relayAssignBusyResourceId, setRelayAssignBusyResourceId] = useState(0);
+  const [relayAssignOnlineOnly, setRelayAssignOnlineOnly] = useState(true);
   // 2FA state
   const [twoFARequired, setTwoFARequired] = useState(false);
   const [totpCode, setTotpCode] = useState('');
@@ -387,6 +418,8 @@ export default function App() {
   const shadowSocketRef = useRef(null);
   // Agent launch modal
   const [agentModal, setAgentModal] = useState(null); // { resource, port, command, copied }
+  const agentLaunchTimeoutRef = useRef(null);
+  const agentLaunchCleanupRef = useRef(null);
   // Dark mode
   const [darkMode, setDarkMode] = useState(() => {
     try { return localStorage.getItem('endoriumfort_darkmode') === 'true'; } catch (_) { return false; }
@@ -528,6 +561,17 @@ export default function App() {
       })
       .slice(0, 6);
   }, [accessRequests]);
+
+  const relayInventorySummary = useMemo(() => {
+    const online = relays.filter((item) => String(item.status).toLowerCase() === 'online').length;
+    return {
+      total: relays.length,
+      online,
+      offline: Math.max(0, relays.length - online)
+    };
+  }, [relays]);
+
+  const isRelayOnline = (relay) => String(relay?.status || '').toLowerCase() === 'online';
 
   const navigate = (path) => {
     if (window.location.pathname !== path) {
@@ -730,6 +774,48 @@ export default function App() {
       });
     return () => {
       active = false;
+    };
+  }, [auth.token, canManagePlatform]);
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform) {
+      setRelays([]);
+      setRelayError('');
+      setLoadingRelays(false);
+      return;
+    }
+    let active = true;
+    const load = async () => {
+      setLoadingRelays(true);
+      try {
+        const [fleetData, configData] = await Promise.all([
+          fetchRelays(),
+          fetchRelayConfig()
+        ]);
+        if (!active) return;
+        const items = Array.isArray(fleetData?.items) ? fleetData.items : [];
+        setRelays(items);
+        setRelayConfig({
+          enrollmentEnabled: !!configData?.enrollmentEnabled,
+          certificateRequired: configData?.certificateRequired !== false,
+          certificateTtlSeconds: Number(configData?.certificateTtlSeconds) || 2592000,
+          enrollmentTokenTtlSeconds: Number(configData?.enrollmentTokenTtlSeconds) || 600,
+          tokenTtlSeconds: Number(configData?.tokenTtlSeconds) || 86400,
+          heartbeatStaleSeconds: Number(configData?.heartbeatStaleSeconds) || 90
+        });
+        setRelayError('');
+      } catch (error) {
+        if (!active) return;
+        setRelayError(error.message || 'Unable to load relay fabric');
+      } finally {
+        if (active) setLoadingRelays(false);
+      }
+    };
+    load();
+    const interval = window.setInterval(load, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
     };
   }, [auth.token, canManagePlatform]);
 
@@ -1283,6 +1369,8 @@ export default function App() {
       const requests = [fetchSessions(), fetchResources(), fetchStats()];
       if (canManagePlatform) {
         requests.push(fetchUsers());
+        requests.push(fetchRelays());
+        requests.push(fetchRelayConfig());
       }
       if (canViewAudit) {
         requests.push(fetchAudit());
@@ -1290,16 +1378,35 @@ export default function App() {
         requests.push(fetchActiveSecurityIncident());
       }
       const results = await Promise.all(requests);
-      const [sessionData, resourceData, statsData, maybeUsersOrAudit, maybeAudit, maybeContainment, maybeIncident] = results;
+      const [
+        sessionData,
+        resourceData,
+        statsData,
+        maybeUsers,
+        maybeRelays,
+        maybeRelayConfig,
+        maybeAudit,
+        maybeContainment,
+        maybeIncident
+      ] = results;
 
       setSessions(Array.isArray(sessionData?.items) ? sessionData.items : []);
       setResources(Array.isArray(resourceData?.items) ? resourceData.items : []);
       setStats(statsData || null);
       if (canManagePlatform) {
-        setUsers(Array.isArray(maybeUsersOrAudit?.items) ? maybeUsersOrAudit.items : []);
+        setUsers(Array.isArray(maybeUsers?.items) ? maybeUsers.items : []);
+        setRelays(Array.isArray(maybeRelays?.items) ? maybeRelays.items : []);
+        setRelayConfig({
+          enrollmentEnabled: !!maybeRelayConfig?.enrollmentEnabled,
+          certificateRequired: maybeRelayConfig?.certificateRequired !== false,
+          certificateTtlSeconds: Number(maybeRelayConfig?.certificateTtlSeconds) || 2592000,
+          enrollmentTokenTtlSeconds: Number(maybeRelayConfig?.enrollmentTokenTtlSeconds) || 600,
+          tokenTtlSeconds: Number(maybeRelayConfig?.tokenTtlSeconds) || 86400,
+          heartbeatStaleSeconds: Number(maybeRelayConfig?.heartbeatStaleSeconds) || 90
+        });
       }
       if (canViewAudit) {
-        const auditData = canManagePlatform ? maybeAudit : maybeUsersOrAudit;
+        const auditData = canManagePlatform ? maybeAudit : maybeUsers;
         const items = Array.isArray(auditData?.items) ? auditData.items : [];
         setSecurityAuditItems(items);
         const containmentData = canManagePlatform ? maybeContainment : maybeAudit;
@@ -1481,6 +1588,70 @@ export default function App() {
       );
     }) || null;
   };
+
+  useEffect(() => {
+    if (!auth.token || !sessions.length) {
+      setSessionRelayHints({});
+      return;
+    }
+
+    const resourceIds = Array.from(
+      new Set(
+        sessions
+          .map((session) => Number(resolveSessionResource(session)?.id) || 0)
+          .filter((id) => id > 0)
+      )
+    );
+
+    if (!resourceIds.length) {
+      setSessionRelayHints({});
+      return;
+    }
+
+    let active = true;
+    Promise.all(
+      resourceIds.map(async (resourceId) => {
+        try {
+          const data = await fetchRelayResolution(resourceId);
+          return [resourceId, data];
+        } catch (_) {
+          return [resourceId, null];
+        }
+      })
+    )
+      .then((entries) => {
+        if (!active) return;
+        const resolutionByResourceId = {};
+        entries.forEach(([resourceId, data]) => {
+          resolutionByResourceId[resourceId] = data;
+        });
+
+        const hints = {};
+        sessions.forEach((session) => {
+          const resourceId = Number(resolveSessionResource(session)?.id) || 0;
+          if (!resourceId) return;
+          const resolution = resolutionByResourceId[resourceId];
+          const route = String(resolution?.route || 'direct').toLowerCase() === 'relay' ? 'relay' : 'direct';
+          const relayLabel = resolution?.relay?.label || resolution?.relay?.relayId || '';
+          const relayStatus = String(resolution?.relay?.status || '').toLowerCase() || 'offline';
+          hints[session.id] = {
+            route,
+            relayLabel,
+            relayStatus,
+            relayAssigned: !!resolution?.relayAssigned
+          };
+        });
+        setSessionRelayHints(hints);
+      })
+      .catch(() => {
+        if (!active) return;
+        setSessionRelayHints({});
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [auth.token, sessions, resources]);
 
   const openTerminal = async (session) => {
     setActiveTerminalSession(session);
@@ -1678,6 +1849,95 @@ export default function App() {
     setCustomSnippets((prev) => prev.filter((item) => item.id !== snippetId));
   };
 
+  const clearAgentLaunchWatcher = () => {
+    if (agentLaunchTimeoutRef.current) {
+      window.clearTimeout(agentLaunchTimeoutRef.current);
+      agentLaunchTimeoutRef.current = null;
+    }
+    if (typeof agentLaunchCleanupRef.current === 'function') {
+      agentLaunchCleanupRef.current();
+      agentLaunchCleanupRef.current = null;
+    }
+  };
+
+  const resolveAgentInstallGuide = () => {
+    const ua = String(navigator.userAgent || '').toLowerCase();
+    if (ua.includes('windows')) {
+      return {
+        platform: 'Windows',
+        command: '.\\agent\\installers\\windows\\install-protocol.ps1 -AgentPath .\\agent\\endoriumfort-agent.exe'
+      };
+    }
+    if (ua.includes('mac os') || ua.includes('macintosh') || ua.includes('darwin')) {
+      return {
+        platform: 'macOS',
+        command: './agent/installers/macos/install-protocol.sh ./agent/endoriumfort-agent-darwin-arm64'
+      };
+    }
+    return {
+      platform: 'Linux',
+      command: './agent/installers/linux/install-protocol.sh ./agent/endoriumfort-agent'
+    };
+  };
+
+  const buildAgentLaunchPayload = (resource, localPort) => {
+    const normalizedOrigin = String(window.location.origin || '').replace(/\/$/, '');
+    const localUrl = `http://127.0.0.1:${localPort}`;
+    const params = new URLSearchParams();
+    params.set('server', normalizedOrigin);
+    params.set('resource', String(resource.id));
+    params.set('local-port', String(localPort));
+    params.set('redirect-url', localUrl);
+    if (auth.token) {
+      params.set('token', auth.token);
+    }
+
+    return {
+      localUrl,
+      installGuide: resolveAgentInstallGuide(),
+      command: `endoriumfort-agent connect --server ${normalizedOrigin} --token ${auth.token} --resource ${resource.id} --local-port ${localPort}`,
+      deepLink: `endoriumfort://connect?${params.toString()}`
+    };
+  };
+
+  const launchAgentDeepLink = (deepLink) => {
+    if (!deepLink) return;
+    clearAgentLaunchWatcher();
+    setAgentModal((prev) => (prev ? { ...prev, launchState: 'opening' } : prev));
+
+    const onHidden = () => {
+      if (document.visibilityState === 'hidden') {
+        clearAgentLaunchWatcher();
+        setAgentModal((prev) => (prev ? { ...prev, launchState: 'opened' } : prev));
+      }
+    };
+
+    const onPageHide = () => {
+      clearAgentLaunchWatcher();
+      setAgentModal((prev) => (prev ? { ...prev, launchState: 'opened' } : prev));
+    };
+
+    document.addEventListener('visibilitychange', onHidden);
+    window.addEventListener('pagehide', onPageHide, { once: true });
+    agentLaunchCleanupRef.current = () => {
+      document.removeEventListener('visibilitychange', onHidden);
+      window.removeEventListener('pagehide', onPageHide);
+    };
+
+    agentLaunchTimeoutRef.current = window.setTimeout(() => {
+      clearAgentLaunchWatcher();
+      setAgentModal((prev) => (prev ? { ...prev, launchState: 'fallback' } : prev));
+    }, 1600);
+
+    window.location.href = deepLink;
+  };
+
+  useEffect(() => {
+    return () => {
+      clearAgentLaunchWatcher();
+    };
+  }, []);
+
   const connectToResource = async (resource, accessMeta = {}) => {
     if (!auth.token) {
       setSessionError('Sign in to start a session.');
@@ -1694,9 +1954,9 @@ export default function App() {
     // Handle agent resources — open agent launch modal with random port
     if (resource.protocol === 'agent') {
       const randomPort = 10000 + Math.floor(Math.random() * 50000);
-      const serverUrl = window.location.origin;
-      const cmd = `endoriumfort-agent connect --server ${serverUrl} --token ${auth.token} --resource ${resource.id} --local-port ${randomPort}`;
-      setAgentModal({ resource, port: randomPort, command: cmd, copied: false });
+      const launchPayload = buildAgentLaunchPayload(resource, randomPort);
+      setAgentModal({ resource, port: randomPort, copied: 'idle', linkCopied: 'idle', installCopied: 'idle', launchState: 'opening', ...launchPayload });
+      launchAgentDeepLink(launchPayload.deepLink);
       return true;
     }
 
@@ -2159,6 +2419,100 @@ export default function App() {
     }
   };
 
+  const refreshRelayBindings = async () => {
+    const resourceList = Array.isArray(resources) ? resources : [];
+    const next = {};
+    await Promise.all(
+      resourceList.map(async (resource) => {
+        try {
+          const data = await fetchRelayResolution(resource.id);
+          next[resource.id] = data?.relay?.relayId || '';
+        } catch (_) {}
+      })
+    );
+    setRelayBindings(next);
+  };
+
+  const onAssignRelay = async (resourceId, relayId) => {
+    const normalizedResourceId = Number(resourceId) || 0;
+    if (!normalizedResourceId || relayAssignBusyResourceId) return;
+    setRelayAssignBusyResourceId(normalizedResourceId);
+    try {
+      const selectedRelayId = String(relayId || '').trim();
+      if (selectedRelayId) {
+        await assignRelayToResource(normalizedResourceId, selectedRelayId);
+      } else {
+        await clearRelayForResource(normalizedResourceId);
+      }
+      setRelayBindings((prev) => ({
+        ...prev,
+        [normalizedResourceId]: selectedRelayId
+      }));
+      setRelayError('');
+    } catch (error) {
+      setRelayError(error.message || 'Unable to update relay assignment');
+    } finally {
+      setRelayAssignBusyResourceId(0);
+    }
+  };
+
+  const onIssueRelayEnrollmentToken = async () => {
+    if (issuingRelayEnrollmentToken) return;
+    setIssuingRelayEnrollmentToken(true);
+    setRelayEnrollmentCopyStatus('');
+    try {
+      const data = await createRelayEnrollmentToken({
+        ttlSeconds: relayConfig.enrollmentTokenTtlSeconds
+      });
+      setRelayEnrollmentToken(String(data?.enrollmentToken || ''));
+      setRelayEnrollmentTokenExpiresAt(String(data?.expiresAt || ''));
+      setRelayError('');
+    } catch (error) {
+      setRelayError(error.message || 'Unable to issue relay enrollment token');
+    } finally {
+      setIssuingRelayEnrollmentToken(false);
+    }
+  };
+
+  const onIssueRelayCertificate = async () => {
+    if (issuingRelayCertificate) return;
+    setIssuingRelayCertificate(true);
+    setRelayCertificateCopyStatus('');
+    try {
+      const data = await createRelayCertificate({
+        ttlSeconds: relayConfig.certificateTtlSeconds
+      });
+      setRelayCertificate(String(data?.certificate || ''));
+      setRelayCertificateId(String(data?.certificateId || ''));
+      setRelayCertificateExpiresAt(String(data?.expiresAt || ''));
+      setRelayError('');
+    } catch (error) {
+      setRelayError(error.message || 'Unable to issue relay certificate');
+    } finally {
+      setIssuingRelayCertificate(false);
+    }
+  };
+
+  const onCopyRelayCertificate = async () => {
+    if (!relayCertificate) return;
+    try {
+      await navigator.clipboard.writeText(relayCertificate);
+      setRelayCertificateCopyStatus('Certificate copied');
+    } catch (_) {
+      setRelayCertificateCopyStatus('Copy failed');
+    }
+  };
+
+  const onCopyRelayEnrollmentToken = async () => {
+    if (!relayEnrollmentToken) return;
+    try {
+      await navigator.clipboard.writeText(relayEnrollmentToken);
+      setRelayEnrollmentCopyStatus('Token copied');
+    } catch (_) {
+      setRelayEnrollmentCopyStatus('Copy failed');
+    }
+  };
+
   const onChangeGranularPermissionOverride = async (permission, override) => {
     if (!selectedUserForPermissions) return;
     const key = `${selectedUserForPermissions.id}:${permission}`;
@@ -2222,6 +2576,16 @@ export default function App() {
   useEffect(() => {
     if (auth.token) onLoad2FAStatus();
   }, [auth.token]);
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform || !resources.length) {
+      setRelayBindings({});
+      return;
+    }
+    refreshRelayBindings().catch(() => {
+      setRelayError('Unable to resolve current relay bindings');
+    });
+  }, [auth.token, canManagePlatform, resources]);
 
   useEffect(() => {
     if (!auth.token) return;
@@ -3107,6 +3471,177 @@ export default function App() {
                 ))
               ) : (
                 <p className="muted">No resources created yet.</p>
+              )}
+            </div>
+          </div>
+
+          <div className="panel reveal relay-panel">
+            <div className="panel-header">
+              <div>
+                <h3>Relay Fabric</h3>
+                <p>Distributed bastion control-plane: fleet health and per-resource routing.</p>
+              </div>
+              {loadingRelays && <span className="pill loading">syncing</span>}
+            </div>
+
+            <div className="relay-kpi-grid">
+              <article className="relay-kpi-card">
+                <span>Total relays</span>
+                <strong>{relayInventorySummary.total}</strong>
+              </article>
+              <article className="relay-kpi-card ok">
+                <span>Online</span>
+                <strong>{relayInventorySummary.online}</strong>
+              </article>
+              <article className="relay-kpi-card warning">
+                <span>Offline</span>
+                <strong>{relayInventorySummary.offline}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Enrollment</span>
+                <strong>{relayConfig.enrollmentEnabled ? 'Enabled' : 'Disabled'}</strong>
+              </article>
+            </div>
+
+            <p className="muted">
+              Cert required: {relayConfig.certificateRequired ? 'yes' : 'no'} • Cert TTL: {relayConfig.certificateTtlSeconds}s • Token TTL: {relayConfig.tokenTtlSeconds}s • Offline threshold: {relayConfig.heartbeatStaleSeconds}s
+            </p>
+
+            <div className="relay-enroll-panel">
+              <div>
+                <h4>Direct Relay Enroll</h4>
+                <p className="muted">
+                  Generate a relay certificate and a short-lived enrollment token from the admin UI, then use both on the relay bootstrap request.
+                </p>
+              </div>
+              <div className="resource-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={onIssueRelayCertificate}
+                  disabled={issuingRelayCertificate}
+                >
+                  {issuingRelayCertificate ? 'Generating certificate...' : 'Generate relay certificate'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={onCopyRelayCertificate}
+                  disabled={!relayCertificate}
+                >
+                  Copy certificate
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={onIssueRelayEnrollmentToken}
+                  disabled={issuingRelayEnrollmentToken || !relayConfig.enrollmentEnabled}
+                >
+                  {issuingRelayEnrollmentToken ? 'Generating token...' : 'Generate enrollment token'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={onCopyRelayEnrollmentToken}
+                  disabled={!relayEnrollmentToken}
+                >
+                  Copy token
+                </button>
+              </div>
+              {relayCertificate && (
+                <div className="relay-enroll-token-box">
+                  <p><strong>Certificate ID</strong>: <code>{relayCertificateId || 'n/a'}</code></p>
+                  <p><strong>Certificate</strong>: <code>{relayCertificate}</code></p>
+                  <p className="muted">Expires at: {relayCertificateExpiresAt || 'n/a'}</p>
+                  {relayCertificateCopyStatus && <p className="muted">{relayCertificateCopyStatus}</p>}
+                </div>
+              )}
+              {!relayConfig.enrollmentEnabled && (
+                <p className="muted">
+                  Enrollment secret is not configured on backend. Set `ENDORIUMFORT_RELAY_ENROLL_SECRET` first.
+                </p>
+              )}
+              {relayEnrollmentToken && (
+                <div className="relay-enroll-token-box">
+                  <p><strong>Token</strong>: <code>{relayEnrollmentToken}</code></p>
+                  <p className="muted">Expires at: {relayEnrollmentTokenExpiresAt || 'n/a'}</p>
+                  <code className="relay-enroll-command">
+                    curl -X POST https://localhost:8080/api/relays/enroll -H "Content-Type: application/json" -H "X-EndoriumFort-Relay-Enrollment-Token: {relayEnrollmentToken}" -H "X-EndoriumFort-Relay-Certificate: &lt;relay-certificate&gt;" -d '{{"relayId":"relay-edge-01","label":"Edge Relay 01","version":"1.0.0","capabilities":["ssh","rdp","vnc"]}}'
+                  </code>
+                  {relayEnrollmentCopyStatus && <p className="muted">{relayEnrollmentCopyStatus}</p>}
+                </div>
+              )}
+            </div>
+
+            {relayError && <p className="error">{relayError}</p>}
+
+            <div className="resource-list relay-fleet-list">
+              {relays.length ? (
+                relays.map((relay) => (
+                  <article className="resource-row relay-row" key={relay.relayId}>
+                    <div>
+                      <h4>{relay.label || relay.relayId}</h4>
+                      <p className="muted">ID: {relay.relayId}</p>
+                      <p className="muted">{relay.sourceIp || 'n/a'} • {relay.version || 'unknown version'}</p>
+                      <p className="muted">Managed resources: {Number(relay.managedResourceCount) || 0}</p>
+                    </div>
+                    <span className={`pill ${String(relay.status).toLowerCase() === 'online' ? 'ok' : 'offline'}`}>
+                      {String(relay.status || 'offline').toLowerCase()}
+                    </span>
+                  </article>
+                ))
+              ) : (
+                <p className="muted">No relay enrolled yet. Configure `ENDORIUMFORT_RELAY_ENROLL_SECRET` and enroll a relay node.</p>
+              )}
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.9rem' }}>
+              <div>
+                <h3>Resource Routing Assignments</h3>
+                <p>Bind each resource to one relay, or keep direct routing fallback.</p>
+              </div>
+              <label className="relay-filter-toggle">
+                <input
+                  type="checkbox"
+                  checked={relayAssignOnlineOnly}
+                  onChange={(event) => setRelayAssignOnlineOnly(event.target.checked)}
+                />
+                Online relays only
+              </label>
+            </div>
+            <div className="resource-list relay-assignment-list">
+              {resources.length ? (
+                resources.map((resource) => {
+                  const selected = relayBindings[resource.id] || '';
+                  const busy = relayAssignBusyResourceId === resource.id;
+                  const relayOptions = relayAssignOnlineOnly
+                    ? relays.filter((relay) => isRelayOnline(relay) || relay.relayId === selected)
+                    : relays;
+                  return (
+                    <article className="resource-row relay-assign-row" key={`assign-${resource.id}`}>
+                      <div>
+                        <h4>{resource.name}</h4>
+                        <p className="muted">{resource.protocol} {resource.target}:{resource.port}</p>
+                      </div>
+                      <div className="resource-actions">
+                        <select
+                          value={selected}
+                          disabled={busy || loadingRelays}
+                          onChange={(event) => onAssignRelay(resource.id, event.target.value)}
+                        >
+                          <option value="">direct (no relay)</option>
+                          {relayOptions.map((relay) => (
+                            <option key={`relay-opt-${resource.id}-${relay.relayId}`} value={relay.relayId}>
+                              {relay.label || relay.relayId} ({String(relay.status || 'offline').toLowerCase()})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </article>
+                  );
+                })
+              ) : (
+                <p className="muted">Create resources before assigning relay routes.</p>
               )}
             </div>
           </div>
@@ -4060,6 +4595,16 @@ export default function App() {
                   <span className="arrow">to</span>
                   <strong>{session.target}</strong>
                 </p>
+                <div className="session-route-hints">
+                  <span className={`pill ${sessionRelayHints[session.id]?.route === 'relay' ? 'loading' : 'ready'}`}>
+                    {sessionRelayHints[session.id]?.route === 'relay' ? 'via relay' : 'direct route'}
+                  </span>
+                  {sessionRelayHints[session.id]?.route === 'relay' && sessionRelayHints[session.id]?.relayLabel && (
+                    <span className="muted session-relay-label">
+                      {sessionRelayHints[session.id].relayLabel} ({sessionRelayHints[session.id].relayStatus || 'offline'})
+                    </span>
+                  )}
+                </div>
                 <div className="session-meta">
                   <span>Opened: {session.createdAt}</span>
                   {session.terminatedAt && (
@@ -4653,7 +5198,10 @@ export default function App() {
 
       {/* Agent launch modal */}
       {agentModal && (
-        <div className="modal-overlay" onClick={() => setAgentModal(null)}>
+        <div className="modal-overlay" onClick={() => {
+          clearAgentLaunchWatcher();
+          setAgentModal(null);
+        }}>
           <div className="modal-content agent-modal" onClick={(e) => e.stopPropagation()}>
             <div className="agent-modal-header">
               <span className="agent-icon">🚀</span>
@@ -4677,39 +5225,104 @@ export default function App() {
               </div>
             </div>
             <div className="agent-command-block">
-              <label className="agent-label">Commande à exécuter dans un terminal :</label>
+              <label className="agent-label">Commande de secours (si le protocole n'est pas enregistré) :</label>
               <div className="agent-command-row">
                 <code className="agent-command">{agentModal.command}</code>
                 <button
                   type="button"
                   className="secondary"
-                  onClick={() => {
-                    navigator.clipboard.writeText(agentModal.command);
-                    setAgentModal((prev) => ({ ...prev, copied: true }));
-                    setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, copied: false }) : null), 2000);
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(agentModal.command);
+                      setAgentModal((prev) => (prev ? { ...prev, copied: 'ok' } : prev));
+                    } catch (_) {
+                      setAgentModal((prev) => (prev ? { ...prev, copied: 'fail' } : prev));
+                    }
+                    setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, copied: 'idle' }) : null), 2000);
                   }}
                 >
-                  {agentModal.copied ? '✓ Copié' : '📋 Copier'}
+                  {agentModal.copied === 'ok' ? '✓ Copié' : agentModal.copied === 'fail' ? '❌ Échec' : '📋 Copier'}
+                </button>
+              </div>
+            </div>
+            <div className="agent-command-block">
+              <label className="agent-label">Lien deep-link :</label>
+              <div className="agent-command-row">
+                <code className="agent-command">{agentModal.deepLink}</code>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(agentModal.deepLink);
+                      setAgentModal((prev) => (prev ? { ...prev, linkCopied: 'ok' } : prev));
+                    } catch (_) {
+                      setAgentModal((prev) => (prev ? { ...prev, linkCopied: 'fail' } : prev));
+                    }
+                    setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, linkCopied: 'idle' }) : null), 2000);
+                  }}
+                >
+                  {agentModal.linkCopied === 'ok' ? '✓ Copié' : agentModal.linkCopied === 'fail' ? '❌ Échec' : '📋 Copier lien'}
                 </button>
               </div>
             </div>
             <div className="agent-modal-tip">
-              <p>💡 Une fois le tunnel actif, ouvrez <a href={`http://127.0.0.1:${agentModal.port}`} target="_blank" rel="noreferrer">http://127.0.0.1:{agentModal.port}</a> dans votre navigateur.</p>
+              <p>💡 Une fois le tunnel actif, l'agent redirige automatiquement vers <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
+              {agentModal.launchState === 'opening' && (
+                <p className="muted">Ouverture de l'application agent en cours...</p>
+              )}
+              {agentModal.launchState === 'fallback' && (
+                <>
+                  <p className="error" style={{ marginBottom: '0.45rem' }}>
+                    L'application agent ne semble pas enregistrée comme handler du protocole.
+                  </p>
+                  <p className="muted" style={{ marginBottom: '0.45rem' }}>
+                    Installation rapide ({agentModal.installGuide?.platform || 'OS'}) :
+                  </p>
+                  <div className="agent-command-row">
+                    <code className="agent-command">{agentModal.installGuide?.command}</code>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(agentModal.installGuide?.command || '');
+                          setAgentModal((prev) => (prev ? { ...prev, installCopied: 'ok' } : prev));
+                        } catch (_) {
+                          setAgentModal((prev) => (prev ? { ...prev, installCopied: 'fail' } : prev));
+                        }
+                        setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, installCopied: 'idle' }) : null), 2000);
+                      }}
+                    >
+                      {agentModal.installCopied === 'ok' ? '✓ Copié' : agentModal.installCopied === 'fail' ? '❌ Échec' : '📋 Copier install'}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
             <div className="agent-modal-actions">
               <button
                 type="button"
+                className="secondary"
+                onClick={() => launchAgentDeepLink(agentModal.deepLink)}
+              >
+                🚀 Ouvrir avec l'agent
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   const randomPort = 10000 + Math.floor(Math.random() * 50000);
-                  const serverUrl = window.location.origin;
-                  const cmd = `endoriumfort-agent connect --server ${serverUrl} --token ${auth.token} --resource ${agentModal.resource.id} --local-port ${randomPort}`;
-                  setAgentModal((prev) => ({ ...prev, port: randomPort, command: cmd, copied: false }));
+                  const launchPayload = buildAgentLaunchPayload(agentModal.resource, randomPort);
+                  setAgentModal((prev) => ({ ...prev, port: randomPort, copied: 'idle', linkCopied: 'idle', installCopied: 'idle', launchState: 'idle', ...launchPayload }));
                 }}
                 className="ghost"
               >
                 🔄 Nouveau port
               </button>
-              <button type="button" className="ghost" onClick={() => setAgentModal(null)}>Fermer</button>
+              <button type="button" className="ghost" onClick={() => {
+                clearAgentLaunchWatcher();
+                setAgentModal(null);
+              }}>Fermer</button>
             </div>
           </div>
         </div>

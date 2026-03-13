@@ -38,6 +38,26 @@ struct TunnelTicket {
   std::string expiresAt;
 };
 
+struct RelayEnrollmentToken {
+  std::string token;
+  std::string createdAt;
+  std::string expiresAt;
+  std::string createdBy;
+  int64_t expiresAtEpoch = 0;
+  bool used = false;
+};
+
+struct RelayCertificate {
+  std::string certificateId;
+  std::string certificate;
+  std::string createdAt;
+  std::string expiresAt;
+  std::string createdBy;
+  std::string boundRelayId;
+  int64_t expiresAtEpoch = 0;
+  bool revoked = false;
+};
+
 struct AppContext {
   // ── Session state ──
   std::mutex session_mutex;
@@ -166,6 +186,19 @@ struct AppContext {
   std::unordered_map<int, RateLimitEntry> tunnel_ticket_issue_by_user;
   int tunnel_ticket_issue_max_attempts = 20;
   std::chrono::seconds tunnel_ticket_issue_window{60};
+
+  // ── Relay control-plane state ──
+  std::mutex relay_mutex;
+  std::unordered_map<std::string, RelayNode> relays;
+  std::unordered_map<int, std::string> resource_relay_bindings;
+  std::unordered_map<std::string, RelayEnrollmentToken> relay_enrollment_tokens;
+  std::unordered_map<std::string, RelayCertificate> relay_certificates;
+  std::string relay_enroll_secret;
+  bool relay_certificate_required = true;
+  int relay_certificate_ttl_seconds = 2592000;  // 30d
+  int relay_enrollment_token_ttl_seconds = 600;  // 10min
+  int relay_token_ttl_seconds = 86400;  // 24h
+  int relay_heartbeat_stale_seconds = 90;
 
 #ifdef ENDORIUMFORT_SSH_ENABLED
 #ifndef _WIN32

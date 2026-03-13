@@ -167,3 +167,19 @@ struct TunnelState {
   std::atomic<bool> active{false};
   std::thread reader_thread;
 };
+
+struct RelayNode {
+  std::string relayId;
+  std::string label;
+  std::string token;
+  std::string certificateId;
+  std::string sourceIp;
+  std::string version;
+  std::string capabilitiesCsv;
+  std::string status = "offline";
+  std::string enrolledAt;
+  std::string certificateBoundAt;
+  std::string lastSeenAt;
+  std::string tokenExpiresAt;
+  int managedResourceCount = 0;
+};

@@ -1,6 +1,6 @@
 {
   "name": "endoriumfort-frontend",
-  "version": "1.0.1",
+  "version": "1.0.4",
   "private": true,
   "type": "module",
   "scripts": {
