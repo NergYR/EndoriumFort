@@ -216,6 +216,10 @@ jobs:
   macos-installers:
     runs-on: macos-latest
     needs: [build-and-release]
+    env:
+      APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+      APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+      APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -242,11 +246,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}" BINARY="$GITHUB_WORKSPACE/release/endoriumfort-agent-darwin-arm64" ARCH="arm64" bash agent/packaging/macos/build-pkg.sh
 
       - name: Notarize macOS PKG installers (optional)
-        if: ${{ secrets.APPLE_NOTARY_APPLE_ID != '' && secrets.APPLE_NOTARY_TEAM_ID != '' && secrets.APPLE_NOTARY_PASSWORD != '' }}
-        env:
-          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
-          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
-          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+        if: ${{ env.APPLE_NOTARY_APPLE_ID != '' && env.APPLE_NOTARY_TEAM_ID != '' && env.APPLE_NOTARY_PASSWORD != '' }}
         run: |
           for pkg in release/packages/macos/*.pkg; do
             xcrun notarytool submit "$pkg" \
@@ -271,6 +271,9 @@ jobs:
   windows-installers:
     runs-on: windows-latest
     needs: [build-and-release]
+    env:
+      WINDOWS_SIGN_PFX_BASE64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
+      WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -305,11 +308,8 @@ jobs:
           .\agent\packaging\windows\build-msi.ps1 -Version $version -BinaryPath .\release\endoriumfort-agent-windows-amd64.exe -OutputDir .\release\packages\windows
 
       - name: Code sign MSI installers (optional)
-        if: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 != '' && secrets.WINDOWS_SIGN_PFX_PASSWORD != '' }}
+        if: ${{ env.WINDOWS_SIGN_PFX_BASE64 != '' && env.WINDOWS_SIGN_PFX_PASSWORD != '' }}
         shell: pwsh
-        env:
-          WINDOWS_SIGN_PFX_BASE64: ${{ secrets.WINDOWS_SIGN_PFX_BASE64 }}
-          WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_PFX_PASSWORD }}
         run: |
           $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_SIGN_PFX_BASE64))
