@@ -1,0 +1,34 @@
+Package: endoriumfort-agent
+Version: 1.0.16
+Architecture: amd64
+Maintainer: EndoriumFort
+Installed-Size: 6297
+Filename: release/apt-repo/dists/stable/main/binary-amd64/endoriumfort-agent_1.0.16_amd64.deb
+Size: 2709254
+MD5sum: c4339d5aff7c99da7d1f8eab5b6db5ab
+SHA1: 7b80775dec196f0ca3d42a5320a365d9f5839e5a
+SHA256: 732e357fdf01b80324799faa4c7fdc6bc45fd607cf953b5036a542f1693a4e9e
+Section: default
+Priority: optional
+Homepage: https://github.com/NergYR/EndoriumFort
+Description: EndoriumFort Agent deep-link client
+License: MIT
+Vendor: none
+
+Package: endoriumfort-relay
+Version: 1.0.16
+Architecture: amd64
+Maintainer: EndoriumFort
+Installed-Size: 5960
+Filename: release/apt-repo/dists/stable/main/binary-amd64/endoriumfort-relay_1.0.16_amd64.deb
+Size: 2559970
+MD5sum: 87e3436ac1978a029d482d5d24948d25
+SHA1: 654eef57ddefd1651689e0a4bc9b4ca71b9ad305
+SHA256: 7f851023523cd8cd4f729d883114dbddd1007070da0c29b5fb64efc148c64e59
+Section: default
+Priority: optional
+Homepage: https://github.com/NergYR/EndoriumFort
+Description: EndoriumFort Relay daemon for distributed bastion control plane
+License: MIT
+Vendor: none
+
