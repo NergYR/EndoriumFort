@@ -263,13 +263,13 @@ jobs:
             -o APT::FTPArchive::Release::Architectures="amd64" \
             release "$APT_ROOT/dists/stable" > "$APT_ROOT/dists/stable/Release"
 
-          cat > "$APT_ROOT/index.html" <<EOF
-<html><body>
-<h1>EndoriumFort APT Repository</h1>
-<p>Repository URL:</p>
-<pre>deb [signed-by=/etc/apt/keyrings/endoriumfort-archive-keyring.asc] https://${REPO_OWNER}.github.io/${REPO_NAME}/apt stable main</pre>
-</body></html>
-EOF
+          printf '%s\n' \
+            '<html><body>' \
+            '<h1>EndoriumFort APT Repository</h1>' \
+            '<p>Repository URL:</p>' \
+            "<pre>deb [signed-by=/etc/apt/keyrings/endoriumfort-archive-keyring.asc] https://${REPO_OWNER}.github.io/${REPO_NAME}/apt stable main</pre>" \
+            '</body></html>' \
+            > "$APT_ROOT/index.html"
 
       - name: Sign APT repository metadata (optional)
         if: ${{ env.APT_GPG_PRIVATE_KEY_BASE64 != '' }}
