@@ -46,7 +46,14 @@ import {
   createAccessRequest,
   approveAccessRequest,
   denyAccessRequest,
-  setContainmentMode
+  setContainmentMode,
+  fetchRelays,
+  fetchRelayConfig,
+  createRelayEnrollmentToken,
+  createRelayCertificate,
+  assignRelayToResource,
+  clearRelayForResource,
+  fetchRelayResolution
 } from './api.js';
 
 const ROLE_BLUEPRINTS = [
@@ -186,6 +193,16 @@ const extractSessionIdFromAuditItem = (item) => {
   }
 };
 
+const DEFAULT_SSH_SNIPPETS = [
+  { id: 'health', label: 'Health Snapshot', command: 'whoami && hostname && uptime' },
+  { id: 'net', label: 'Network Quick Check', command: 'ip a && ss -tulpen | head -n 30' },
+  { id: 'disk', label: 'Disk Pressure', command: 'df -h && du -sh /var/log 2>/dev/null' },
+  { id: 'proc', label: 'Top Processes', command: 'ps aux --sort=-%cpu | head -n 15' }
+];
+
+const ACCESS_PLAYBOOK_STORAGE_KEY = 'endoriumfort_access_playbooks';
+const SESSION_WATCHLIST_STORAGE_KEY = 'endoriumfort_session_watchlist';
+
 export default function App() {
   const [status, setStatus] = useState('loading');
   const [detail, setDetail] = useState('');
@@ -217,6 +234,17 @@ export default function App() {
   const [terminalError, setTerminalError] = useState('');
   const [terminalInfo, setTerminalInfo] = useState('');
   const [sshPassword, setSshPassword] = useState('');
+  const [snippetLabel, setSnippetLabel] = useState('');
+  const [snippetCommand, setSnippetCommand] = useState('');
+  const [customSnippets, setCustomSnippets] = useState(() => {
+    try {
+      const raw = localStorage.getItem('endoriumfort_custom_ssh_snippets');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  });
   const [terminalReady, setTerminalReady] = useState(false);
   const [autoConnectSessionId, setAutoConnectSessionId] = useState(null);
   const [auditOpen, setAuditOpen] = useState(false);
@@ -272,6 +300,25 @@ export default function App() {
   const [accessPromptPurpose, setAccessPromptPurpose] = useState('');
   const [accessPromptPurposeEvidence, setAccessPromptPurposeEvidence] = useState('');
   const [accessPromptMode, setAccessPromptMode] = useState('connect');
+  const [accessPlaybooks, setAccessPlaybooks] = useState(() => {
+    try {
+      const raw = localStorage.getItem(ACCESS_PLAYBOOK_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  });
+  const [watchedSessionIds, setWatchedSessionIds] = useState(() => {
+    try {
+      const raw = localStorage.getItem(SESSION_WATCHLIST_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.map((item) => Number(item)).filter((id) => id > 0) : [];
+    } catch (_) {
+      return [];
+    }
+  });
+  const [watchlistAlerts, setWatchlistAlerts] = useState([]);
   const [riskPreview, setRiskPreview] = useState(null);
   const [riskPreviewLoading, setRiskPreviewLoading] = useState(false);
   const [riskPreviewError, setRiskPreviewError] = useState('');
@@ -281,6 +328,30 @@ export default function App() {
   const [accessRequests, setAccessRequests] = useState([]);
   const [loadingAccessRequests, setLoadingAccessRequests] = useState(false);
   const [accessRequestError, setAccessRequestError] = useState('');
+  const [relays, setRelays] = useState([]);
+  const [loadingRelays, setLoadingRelays] = useState(false);
+  const [relayError, setRelayError] = useState('');
+  const [relayConfig, setRelayConfig] = useState({
+    enrollmentEnabled: false,
+    certificateRequired: true,
+    certificateTtlSeconds: 2592000,
+    enrollmentTokenTtlSeconds: 600,
+    tokenTtlSeconds: 86400,
+    heartbeatStaleSeconds: 90
+  });
+  const [relayCertificate, setRelayCertificate] = useState('');
+  const [relayCertificateId, setRelayCertificateId] = useState('');
+  const [relayCertificateExpiresAt, setRelayCertificateExpiresAt] = useState('');
+  const [issuingRelayCertificate, setIssuingRelayCertificate] = useState(false);
+  const [relayCertificateCopyStatus, setRelayCertificateCopyStatus] = useState('');
+  const [relayEnrollmentToken, setRelayEnrollmentToken] = useState('');
+  const [relayEnrollmentTokenExpiresAt, setRelayEnrollmentTokenExpiresAt] = useState('');
+  const [issuingRelayEnrollmentToken, setIssuingRelayEnrollmentToken] = useState(false);
+  const [relayEnrollmentCopyStatus, setRelayEnrollmentCopyStatus] = useState('');
+  const [relayBindings, setRelayBindings] = useState({});
+  const [sessionRelayHints, setSessionRelayHints] = useState({});
+  const [relayAssignBusyResourceId, setRelayAssignBusyResourceId] = useState(0);
+  const [relayAssignOnlineOnly, setRelayAssignOnlineOnly] = useState(true);
   // 2FA state
   const [twoFARequired, setTwoFARequired] = useState(false);
   const [totpCode, setTotpCode] = useState('');
@@ -347,6 +418,8 @@ export default function App() {
   const shadowSocketRef = useRef(null);
   // Agent launch modal
   const [agentModal, setAgentModal] = useState(null); // { resource, port, command, copied }
+  const agentLaunchTimeoutRef = useRef(null);
+  const agentLaunchCleanupRef = useRef(null);
   // Dark mode
   const [darkMode, setDarkMode] = useState(() => {
     try { return localStorage.getItem('endoriumfort_darkmode') === 'true'; } catch (_) { return false; }
@@ -370,6 +443,7 @@ export default function App() {
   const liveAlertCooldownByTypeRef = useRef({});
   const liveIncidentCriticalTimestampsRef = useRef([]);
   const liveIncidentCooldownUntilRef = useRef(0);
+  const watchlistStatusRef = useRef({});
 
   const canManagePlatform = hasCapability(auth.role, auth.permissions, 'manageResources');
   const canViewAudit = hasCapability(auth.role, auth.permissions, 'viewAudit');
@@ -384,6 +458,44 @@ export default function App() {
       localStorage.setItem('endoriumfort_live_alert_profile', liveAlertProfile);
     } catch (_) {}
   }, [liveAlertProfile]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('endoriumfort_custom_ssh_snippets', JSON.stringify(customSnippets));
+    } catch (_) {}
+  }, [customSnippets]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACCESS_PLAYBOOK_STORAGE_KEY, JSON.stringify(accessPlaybooks));
+    } catch (_) {}
+  }, [accessPlaybooks]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SESSION_WATCHLIST_STORAGE_KEY, JSON.stringify(watchedSessionIds));
+    } catch (_) {}
+  }, [watchedSessionIds]);
+
+  const currentAccessPlaybook = useMemo(() => {
+    const resourceId = Number(accessPromptResource?.id) || 0;
+    if (!resourceId) return null;
+    return (
+      accessPlaybooks.find((item) => Number(item.resourceId) === resourceId) || null
+    );
+  }, [accessPlaybooks, accessPromptResource]);
+
+  const sshSnippetLibrary = useMemo(() => {
+    const normalizedCustom = customSnippets
+      .map((item) => ({
+        id: String(item.id || ''),
+        label: String(item.label || '').trim(),
+        command: String(item.command || '').trim()
+      }))
+      .filter((item) => item.id && item.label && item.command)
+      .map((item) => ({ ...item, custom: true }));
+    return [...DEFAULT_SSH_SNIPPETS.map((item) => ({ ...item, custom: false })), ...normalizedCustom];
+  }, [customSnippets]);
   const tabGuide = useMemo(() => {
     const base = {
       overview: {
@@ -449,6 +561,17 @@ export default function App() {
       })
       .slice(0, 6);
   }, [accessRequests]);
+
+  const relayInventorySummary = useMemo(() => {
+    const online = relays.filter((item) => String(item.status).toLowerCase() === 'online').length;
+    return {
+      total: relays.length,
+      online,
+      offline: Math.max(0, relays.length - online)
+    };
+  }, [relays]);
+
+  const isRelayOnline = (relay) => String(relay?.status || '').toLowerCase() === 'online';
 
   const navigate = (path) => {
     if (window.location.pathname !== path) {
@@ -651,6 +774,48 @@ export default function App() {
       });
     return () => {
       active = false;
+    };
+  }, [auth.token, canManagePlatform]);
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform) {
+      setRelays([]);
+      setRelayError('');
+      setLoadingRelays(false);
+      return;
+    }
+    let active = true;
+    const load = async () => {
+      setLoadingRelays(true);
+      try {
+        const [fleetData, configData] = await Promise.all([
+          fetchRelays(),
+          fetchRelayConfig()
+        ]);
+        if (!active) return;
+        const items = Array.isArray(fleetData?.items) ? fleetData.items : [];
+        setRelays(items);
+        setRelayConfig({
+          enrollmentEnabled: !!configData?.enrollmentEnabled,
+          certificateRequired: configData?.certificateRequired !== false,
+          certificateTtlSeconds: Number(configData?.certificateTtlSeconds) || 2592000,
+          enrollmentTokenTtlSeconds: Number(configData?.enrollmentTokenTtlSeconds) || 600,
+          tokenTtlSeconds: Number(configData?.tokenTtlSeconds) || 86400,
+          heartbeatStaleSeconds: Number(configData?.heartbeatStaleSeconds) || 90
+        });
+        setRelayError('');
+      } catch (error) {
+        if (!active) return;
+        setRelayError(error.message || 'Unable to load relay fabric');
+      } finally {
+        if (active) setLoadingRelays(false);
+      }
+    };
+    load();
+    const interval = window.setInterval(load, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
     };
   }, [auth.token, canManagePlatform]);
 
@@ -1204,6 +1369,8 @@ export default function App() {
       const requests = [fetchSessions(), fetchResources(), fetchStats()];
       if (canManagePlatform) {
         requests.push(fetchUsers());
+        requests.push(fetchRelays());
+        requests.push(fetchRelayConfig());
       }
       if (canViewAudit) {
         requests.push(fetchAudit());
@@ -1211,16 +1378,35 @@ export default function App() {
         requests.push(fetchActiveSecurityIncident());
       }
       const results = await Promise.all(requests);
-      const [sessionData, resourceData, statsData, maybeUsersOrAudit, maybeAudit, maybeContainment, maybeIncident] = results;
+      const [
+        sessionData,
+        resourceData,
+        statsData,
+        maybeUsers,
+        maybeRelays,
+        maybeRelayConfig,
+        maybeAudit,
+        maybeContainment,
+        maybeIncident
+      ] = results;
 
       setSessions(Array.isArray(sessionData?.items) ? sessionData.items : []);
       setResources(Array.isArray(resourceData?.items) ? resourceData.items : []);
       setStats(statsData || null);
       if (canManagePlatform) {
-        setUsers(Array.isArray(maybeUsersOrAudit?.items) ? maybeUsersOrAudit.items : []);
+        setUsers(Array.isArray(maybeUsers?.items) ? maybeUsers.items : []);
+        setRelays(Array.isArray(maybeRelays?.items) ? maybeRelays.items : []);
+        setRelayConfig({
+          enrollmentEnabled: !!maybeRelayConfig?.enrollmentEnabled,
+          certificateRequired: maybeRelayConfig?.certificateRequired !== false,
+          certificateTtlSeconds: Number(maybeRelayConfig?.certificateTtlSeconds) || 2592000,
+          enrollmentTokenTtlSeconds: Number(maybeRelayConfig?.enrollmentTokenTtlSeconds) || 600,
+          tokenTtlSeconds: Number(maybeRelayConfig?.tokenTtlSeconds) || 86400,
+          heartbeatStaleSeconds: Number(maybeRelayConfig?.heartbeatStaleSeconds) || 90
+        });
       }
       if (canViewAudit) {
-        const auditData = canManagePlatform ? maybeAudit : maybeUsersOrAudit;
+        const auditData = canManagePlatform ? maybeAudit : maybeUsers;
         const items = Array.isArray(auditData?.items) ? auditData.items : [];
         setSecurityAuditItems(items);
         const containmentData = canManagePlatform ? maybeContainment : maybeAudit;
@@ -1259,6 +1445,20 @@ export default function App() {
     } catch (error) {
       setSessionError(error.message || 'Unable to terminate session');
     }
+  };
+
+  const toggleWatchSession = (sessionId) => {
+    const normalized = Number(sessionId) || 0;
+    if (!normalized) return;
+    setWatchedSessionIds((prev) =>
+      prev.includes(normalized)
+        ? prev.filter((id) => id !== normalized)
+        : [...prev, normalized]
+    );
+  };
+
+  const dismissWatchAlert = (alertKey) => {
+    setWatchlistAlerts((prev) => prev.filter((item) => item.key !== alertKey));
   };
 
   const loadAudit = async () => {
@@ -1388,6 +1588,70 @@ export default function App() {
       );
     }) || null;
   };
+
+  useEffect(() => {
+    if (!auth.token || !sessions.length) {
+      setSessionRelayHints({});
+      return;
+    }
+
+    const resourceIds = Array.from(
+      new Set(
+        sessions
+          .map((session) => Number(resolveSessionResource(session)?.id) || 0)
+          .filter((id) => id > 0)
+      )
+    );
+
+    if (!resourceIds.length) {
+      setSessionRelayHints({});
+      return;
+    }
+
+    let active = true;
+    Promise.all(
+      resourceIds.map(async (resourceId) => {
+        try {
+          const data = await fetchRelayResolution(resourceId);
+          return [resourceId, data];
+        } catch (_) {
+          return [resourceId, null];
+        }
+      })
+    )
+      .then((entries) => {
+        if (!active) return;
+        const resolutionByResourceId = {};
+        entries.forEach(([resourceId, data]) => {
+          resolutionByResourceId[resourceId] = data;
+        });
+
+        const hints = {};
+        sessions.forEach((session) => {
+          const resourceId = Number(resolveSessionResource(session)?.id) || 0;
+          if (!resourceId) return;
+          const resolution = resolutionByResourceId[resourceId];
+          const route = String(resolution?.route || 'direct').toLowerCase() === 'relay' ? 'relay' : 'direct';
+          const relayLabel = resolution?.relay?.label || resolution?.relay?.relayId || '';
+          const relayStatus = String(resolution?.relay?.status || '').toLowerCase() || 'offline';
+          hints[session.id] = {
+            route,
+            relayLabel,
+            relayStatus,
+            relayAssigned: !!resolution?.relayAssigned
+          };
+        });
+        setSessionRelayHints(hints);
+      })
+      .catch(() => {
+        if (!active) return;
+        setSessionRelayHints({});
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [auth.token, sessions, resources]);
 
   const openTerminal = async (session) => {
     setActiveTerminalSession(session);
@@ -1550,6 +1814,130 @@ export default function App() {
     });
   };
 
+  const sendSnippetToTerminal = (snippet, execute = false) => {
+    if (!snippet?.command) return;
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setTerminalError('Connect the SSH terminal before sending snippets.');
+      return;
+    }
+    const payload = execute ? `${snippet.command}\n` : snippet.command;
+    socket.send(JSON.stringify({ type: 'input', data: payload }));
+    setTerminalInfo(
+      execute
+        ? `Snippet executed: ${snippet.label}`
+        : `Snippet injected (press Enter to run): ${snippet.label}`
+    );
+  };
+
+  const addCustomSnippet = () => {
+    const label = snippetLabel.trim();
+    const command = snippetCommand.trim();
+    if (!label || !command) {
+      setTerminalError('Snippet label and command are required.');
+      return;
+    }
+    const id = `custom-${Date.now()}`;
+    setCustomSnippets((prev) => [...prev, { id, label, command }]);
+    setSnippetLabel('');
+    setSnippetCommand('');
+    setTerminalError('');
+    setTerminalInfo(`Snippet saved: ${label}`);
+  };
+
+  const removeCustomSnippet = (snippetId) => {
+    setCustomSnippets((prev) => prev.filter((item) => item.id !== snippetId));
+  };
+
+  const clearAgentLaunchWatcher = () => {
+    if (agentLaunchTimeoutRef.current) {
+      window.clearTimeout(agentLaunchTimeoutRef.current);
+      agentLaunchTimeoutRef.current = null;
+    }
+    if (typeof agentLaunchCleanupRef.current === 'function') {
+      agentLaunchCleanupRef.current();
+      agentLaunchCleanupRef.current = null;
+    }
+  };
+
+  const resolveAgentInstallGuide = () => {
+    const ua = String(navigator.userAgent || '').toLowerCase();
+    if (ua.includes('windows')) {
+      return {
+        platform: 'Windows',
+        command: '.\\agent\\installers\\windows\\install-protocol.ps1 -AgentPath .\\agent\\endoriumfort-agent.exe'
+      };
+    }
+    if (ua.includes('mac os') || ua.includes('macintosh') || ua.includes('darwin')) {
+      return {
+        platform: 'macOS',
+        command: './agent/installers/macos/install-protocol.sh ./agent/endoriumfort-agent-darwin-arm64'
+      };
+    }
+    return {
+      platform: 'Linux',
+      command: './agent/installers/linux/install-protocol.sh ./agent/endoriumfort-agent'
+    };
+  };
+
+  const buildAgentLaunchPayload = (resource, localPort) => {
+    const normalizedOrigin = String(window.location.origin || '').replace(/\/$/, '');
+    const localUrl = `http://127.0.0.1:${localPort}`;
+    const params = new URLSearchParams();
+    params.set('server', normalizedOrigin);
+    params.set('resource', String(resource.id));
+    params.set('local-port', String(localPort));
+    params.set('redirect-url', localUrl);
+    if (auth.token) {
+      params.set('token', auth.token);
+    }
+
+    return {
+      localUrl,
+      installGuide: resolveAgentInstallGuide(),
+      command: `endoriumfort-agent connect --server ${normalizedOrigin} --token ${auth.token} --resource ${resource.id} --local-port ${localPort}`,
+      deepLink: `endoriumfort://connect?${params.toString()}`
+    };
+  };
+
+  const launchAgentDeepLink = (deepLink) => {
+    if (!deepLink) return;
+    clearAgentLaunchWatcher();
+    setAgentModal((prev) => (prev ? { ...prev, launchState: 'opening' } : prev));
+
+    const onHidden = () => {
+      if (document.visibilityState === 'hidden') {
+        clearAgentLaunchWatcher();
+        setAgentModal((prev) => (prev ? { ...prev, launchState: 'opened' } : prev));
+      }
+    };
+
+    const onPageHide = () => {
+      clearAgentLaunchWatcher();
+      setAgentModal((prev) => (prev ? { ...prev, launchState: 'opened' } : prev));
+    };
+
+    document.addEventListener('visibilitychange', onHidden);
+    window.addEventListener('pagehide', onPageHide, { once: true });
+    agentLaunchCleanupRef.current = () => {
+      document.removeEventListener('visibilitychange', onHidden);
+      window.removeEventListener('pagehide', onPageHide);
+    };
+
+    agentLaunchTimeoutRef.current = window.setTimeout(() => {
+      clearAgentLaunchWatcher();
+      setAgentModal((prev) => (prev ? { ...prev, launchState: 'fallback' } : prev));
+    }, 1600);
+
+    window.location.href = deepLink;
+  };
+
+  useEffect(() => {
+    return () => {
+      clearAgentLaunchWatcher();
+    };
+  }, []);
+
   const connectToResource = async (resource, accessMeta = {}) => {
     if (!auth.token) {
       setSessionError('Sign in to start a session.');
@@ -1566,9 +1954,9 @@ export default function App() {
     // Handle agent resources — open agent launch modal with random port
     if (resource.protocol === 'agent') {
       const randomPort = 10000 + Math.floor(Math.random() * 50000);
-      const serverUrl = window.location.origin;
-      const cmd = `endoriumfort-agent connect --server ${serverUrl} --token ${auth.token} --resource ${resource.id} --local-port ${randomPort}`;
-      setAgentModal({ resource, port: randomPort, command: cmd, copied: false });
+      const launchPayload = buildAgentLaunchPayload(resource, randomPort);
+      setAgentModal({ resource, port: randomPort, copied: 'idle', linkCopied: 'idle', installCopied: 'idle', launchState: 'opening', ...launchPayload });
+      launchAgentDeepLink(launchPayload.deepLink);
       return true;
     }
 
@@ -1639,6 +2027,8 @@ export default function App() {
     const sessionBackedProtocol = protocol !== 'http' && protocol !== 'https' && protocol !== 'agent';
 
     if (resource.requireDualApproval && !canManagePlatform) {
+      const existingPlaybook =
+        accessPlaybooks.find((item) => Number(item.resourceId) === Number(resource.id)) || null;
       const approved = accessRequests.find(
         (item) =>
           item.resourceId === resource.id &&
@@ -1655,27 +2045,71 @@ export default function App() {
       }
       setAccessPromptMode('request');
       setAccessPromptResource(resource);
-      setAccessPromptReason('');
-      setAccessPromptTicketId('');
-      setAccessPromptPurpose('');
-      setAccessPromptPurposeEvidence('');
+      setAccessPromptReason(existingPlaybook?.justification || '');
+      setAccessPromptTicketId(existingPlaybook?.ticketId || '');
+      setAccessPromptPurpose(existingPlaybook?.purpose || '');
+      setAccessPromptPurposeEvidence(existingPlaybook?.purposeEvidence || '');
       setRiskPreview(null);
       setRiskPreviewError('');
       return;
     }
 
     if (resource.requireAccessJustification || (containmentEnabled && sessionBackedProtocol)) {
+      const existingPlaybook =
+        accessPlaybooks.find((item) => Number(item.resourceId) === Number(resource.id)) || null;
       setAccessPromptMode('connect');
       setAccessPromptResource(resource);
-      setAccessPromptReason('');
-      setAccessPromptTicketId('');
-      setAccessPromptPurpose('');
-      setAccessPromptPurposeEvidence('');
+      setAccessPromptReason(existingPlaybook?.justification || '');
+      setAccessPromptTicketId(existingPlaybook?.ticketId || '');
+      setAccessPromptPurpose(existingPlaybook?.purpose || '');
+      setAccessPromptPurposeEvidence(existingPlaybook?.purposeEvidence || '');
       setRiskPreview(null);
       setRiskPreviewError('');
       return;
     }
     await connectToResource(resource);
+  };
+
+  const applyCurrentAccessPlaybook = () => {
+    if (!currentAccessPlaybook) {
+      setSessionError('No saved playbook for this resource.');
+      return;
+    }
+    setAccessPromptReason(currentAccessPlaybook.justification || '');
+    setAccessPromptTicketId(currentAccessPlaybook.ticketId || '');
+    setAccessPromptPurpose(currentAccessPlaybook.purpose || '');
+    setAccessPromptPurposeEvidence(currentAccessPlaybook.purposeEvidence || '');
+    setSessionError('');
+  };
+
+  const saveCurrentAccessPlaybook = () => {
+    const resourceId = Number(accessPromptResource?.id) || 0;
+    if (!resourceId) return;
+    const playbook = {
+      resourceId,
+      justification: accessPromptReason.trim(),
+      ticketId: accessPromptTicketId.trim(),
+      purpose: accessPromptPurpose.trim(),
+      purposeEvidence: accessPromptPurposeEvidence.trim(),
+      updatedAt: new Date().toISOString()
+    };
+    if (!playbook.justification && !playbook.ticketId && !playbook.purpose && !playbook.purposeEvidence) {
+      setSessionError('Playbook cannot be empty. Fill at least one field before saving.');
+      return;
+    }
+    setAccessPlaybooks((prev) => {
+      const next = prev.filter((item) => Number(item.resourceId) !== resourceId);
+      return [...next, playbook];
+    });
+    setSessionError('');
+    setTerminalInfo(`Access playbook saved for ${accessPromptResource?.name || 'resource'}.`);
+  };
+
+  const deleteCurrentAccessPlaybook = () => {
+    const resourceId = Number(accessPromptResource?.id) || 0;
+    if (!resourceId) return;
+    setAccessPlaybooks((prev) => prev.filter((item) => Number(item.resourceId) !== resourceId));
+    setSessionError('');
   };
 
   const onSubmitAccessPrompt = async (event) => {
@@ -1985,6 +2419,100 @@ export default function App() {
     }
   };
 
+  const refreshRelayBindings = async () => {
+    const resourceList = Array.isArray(resources) ? resources : [];
+    const next = {};
+    await Promise.all(
+      resourceList.map(async (resource) => {
+        try {
+          const data = await fetchRelayResolution(resource.id);
+          next[resource.id] = data?.relay?.relayId || '';
+        } catch (_) {}
+      })
+    );
+    setRelayBindings(next);
+  };
+
+  const onAssignRelay = async (resourceId, relayId) => {
+    const normalizedResourceId = Number(resourceId) || 0;
+    if (!normalizedResourceId || relayAssignBusyResourceId) return;
+    setRelayAssignBusyResourceId(normalizedResourceId);
+    try {
+      const selectedRelayId = String(relayId || '').trim();
+      if (selectedRelayId) {
+        await assignRelayToResource(normalizedResourceId, selectedRelayId);
+      } else {
+        await clearRelayForResource(normalizedResourceId);
+      }
+      setRelayBindings((prev) => ({
+        ...prev,
+        [normalizedResourceId]: selectedRelayId
+      }));
+      setRelayError('');
+    } catch (error) {
+      setRelayError(error.message || 'Unable to update relay assignment');
+    } finally {
+      setRelayAssignBusyResourceId(0);
+    }
+  };
+
+  const onIssueRelayEnrollmentToken = async () => {
+    if (issuingRelayEnrollmentToken) return;
+    setIssuingRelayEnrollmentToken(true);
+    setRelayEnrollmentCopyStatus('');
+    try {
+      const data = await createRelayEnrollmentToken({
+        ttlSeconds: relayConfig.enrollmentTokenTtlSeconds
+      });
+      setRelayEnrollmentToken(String(data?.enrollmentToken || ''));
+      setRelayEnrollmentTokenExpiresAt(String(data?.expiresAt || ''));
+      setRelayError('');
+    } catch (error) {
+      setRelayError(error.message || 'Unable to issue relay enrollment token');
+    } finally {
+      setIssuingRelayEnrollmentToken(false);
+    }
+  };
+
+  const onIssueRelayCertificate = async () => {
+    if (issuingRelayCertificate) return;
+    setIssuingRelayCertificate(true);
+    setRelayCertificateCopyStatus('');
+    try {
+      const data = await createRelayCertificate({
+        ttlSeconds: relayConfig.certificateTtlSeconds
+      });
+      setRelayCertificate(String(data?.certificate || ''));
+      setRelayCertificateId(String(data?.certificateId || ''));
+      setRelayCertificateExpiresAt(String(data?.expiresAt || ''));
+      setRelayError('');
+    } catch (error) {
+      setRelayError(error.message || 'Unable to issue relay certificate');
+    } finally {
+      setIssuingRelayCertificate(false);
+    }
+  };
+
+  const onCopyRelayCertificate = async () => {
+    if (!relayCertificate) return;
+    try {
+      await navigator.clipboard.writeText(relayCertificate);
+      setRelayCertificateCopyStatus('Certificate copied');
+    } catch (_) {
+      setRelayCertificateCopyStatus('Copy failed');
+    }
+  };
+
+  const onCopyRelayEnrollmentToken = async () => {
+    if (!relayEnrollmentToken) return;
+    try {
+      await navigator.clipboard.writeText(relayEnrollmentToken);
+      setRelayEnrollmentCopyStatus('Token copied');
+    } catch (_) {
+      setRelayEnrollmentCopyStatus('Copy failed');
+    }
+  };
+
   const onChangeGranularPermissionOverride = async (permission, override) => {
     if (!selectedUserForPermissions) return;
     const key = `${selectedUserForPermissions.id}:${permission}`;
@@ -2048,6 +2576,16 @@ export default function App() {
   useEffect(() => {
     if (auth.token) onLoad2FAStatus();
   }, [auth.token]);
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform || !resources.length) {
+      setRelayBindings({});
+      return;
+    }
+    refreshRelayBindings().catch(() => {
+      setRelayError('Unable to resolve current relay bindings');
+    });
+  }, [auth.token, canManagePlatform, resources]);
 
   useEffect(() => {
     if (!auth.token) return;
@@ -2289,6 +2827,78 @@ export default function App() {
     [sortedSessions]
   );
 
+  const watchedSessions = useMemo(() => {
+    const watched = sortedSessions.filter((session) =>
+      watchedSessionIds.includes(Number(session.id))
+    );
+    return watched.slice(0, 8);
+  }, [sortedSessions, watchedSessionIds]);
+
+  const sessionSlo = useMemo(() => {
+    const total = sessions.length;
+    const active = sessions.filter((item) => item.status === 'active').length;
+    const terminated = sessions.filter((item) => item.status === 'terminated').length;
+    const completionRate = total > 0 ? Math.round((terminated / total) * 100) : 0;
+
+    const closedDurationsMin = sessions
+      .map((item) => {
+        const opened = Date.parse(item.createdAt || '') || 0;
+        const closed = Date.parse(item.terminatedAt || '') || 0;
+        if (!opened || !closed || closed <= opened) return null;
+        return (closed - opened) / 60000;
+      })
+      .filter((value) => Number.isFinite(value));
+
+    const avgDurationMin = closedDurationsMin.length
+      ? Math.round(closedDurationsMin.reduce((sum, value) => sum + value, 0) / closedDurationsMin.length)
+      : 0;
+
+    const staleActive = sessions.filter((item) => {
+      if (item.status !== 'active') return false;
+      const opened = Date.parse(item.createdAt || '') || 0;
+      if (!opened) return false;
+      return opened < Date.now() - 4 * 60 * 60 * 1000;
+    }).length;
+
+    return {
+      total,
+      active,
+      terminated,
+      completionRate,
+      avgDurationMin,
+      staleActive
+    };
+  }, [sessions]);
+
+  useEffect(() => {
+    if (!watchedSessionIds.length) {
+      watchlistStatusRef.current = {};
+      return;
+    }
+    const nextStatus = {};
+    const nextAlerts = [];
+    watchedSessionIds.forEach((sessionId) => {
+      const found = sessions.find((item) => Number(item.id) === Number(sessionId));
+      if (!found) return;
+      const normalizedStatus = String(found.status || 'unknown').toLowerCase();
+      nextStatus[String(sessionId)] = normalizedStatus;
+      const previous = watchlistStatusRef.current[String(sessionId)];
+      if (previous && previous !== normalizedStatus) {
+        nextAlerts.push({
+          key: `watch:${sessionId}:${Date.now()}`,
+          sessionId,
+          status: normalizedStatus,
+          message: `Session #${sessionId} status changed: ${previous} -> ${normalizedStatus}`,
+          createdAt: new Date().toISOString()
+        });
+      }
+    });
+    watchlistStatusRef.current = nextStatus;
+    if (nextAlerts.length) {
+      setWatchlistAlerts((prev) => [...nextAlerts, ...prev].slice(0, 6));
+    }
+  }, [sessions, watchedSessionIds]);
+
   const securityAlerts = useMemo(() => {
     const now = Date.now();
     const audits = securityAuditItems;
@@ -2389,6 +2999,42 @@ export default function App() {
       }
     }
     return item.payloadRaw || '';
+  };
+
+  const toCsvCell = (value) => {
+    const raw = String(value ?? '');
+    const escaped = raw.replace(/"/g, '""');
+    return `"${escaped}"`;
+  };
+
+  const exportFilteredAuditCsv = () => {
+    if (!filteredAuditItems.length) {
+      setAuditError('No audit rows to export with current filters.');
+      return;
+    }
+
+    const header = ['id', 'type', 'actor', 'createdAt', 'detail'];
+    const rows = filteredAuditItems.map((item) => [
+      item.id,
+      item.type,
+      item.actor,
+      item.createdAt,
+      renderAuditDetail(item) || ''
+    ]);
+    const csvLines = [header, ...rows].map((row) => row.map(toCsvCell).join(','));
+    const csvPayload = `\uFEFF${csvLines.join('\n')}`;
+
+    const blob = new Blob([csvPayload], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `audit-export-${stamp}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setAuditError('');
   };
 
   const formatRelativeDate = (value) => {
@@ -2825,6 +3471,177 @@ export default function App() {
                 ))
               ) : (
                 <p className="muted">No resources created yet.</p>
+              )}
+            </div>
+          </div>
+
+          <div className="panel reveal relay-panel">
+            <div className="panel-header">
+              <div>
+                <h3>Relay Fabric</h3>
+                <p>Distributed bastion control-plane: fleet health and per-resource routing.</p>
+              </div>
+              {loadingRelays && <span className="pill loading">syncing</span>}
+            </div>
+
+            <div className="relay-kpi-grid">
+              <article className="relay-kpi-card">
+                <span>Total relays</span>
+                <strong>{relayInventorySummary.total}</strong>
+              </article>
+              <article className="relay-kpi-card ok">
+                <span>Online</span>
+                <strong>{relayInventorySummary.online}</strong>
+              </article>
+              <article className="relay-kpi-card warning">
+                <span>Offline</span>
+                <strong>{relayInventorySummary.offline}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Enrollment</span>
+                <strong>{relayConfig.enrollmentEnabled ? 'Enabled' : 'Disabled'}</strong>
+              </article>
+            </div>
+
+            <p className="muted">
+              Cert required: {relayConfig.certificateRequired ? 'yes' : 'no'} • Cert TTL: {relayConfig.certificateTtlSeconds}s • Token TTL: {relayConfig.tokenTtlSeconds}s • Offline threshold: {relayConfig.heartbeatStaleSeconds}s
+            </p>
+
+            <div className="relay-enroll-panel">
+              <div>
+                <h4>Direct Relay Enroll</h4>
+                <p className="muted">
+                  Generate a relay certificate and a short-lived enrollment token from the admin UI, then use both on the relay bootstrap request.
+                </p>
+              </div>
+              <div className="resource-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={onIssueRelayCertificate}
+                  disabled={issuingRelayCertificate}
+                >
+                  {issuingRelayCertificate ? 'Generating certificate...' : 'Generate relay certificate'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={onCopyRelayCertificate}
+                  disabled={!relayCertificate}
+                >
+                  Copy certificate
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={onIssueRelayEnrollmentToken}
+                  disabled={issuingRelayEnrollmentToken || !relayConfig.enrollmentEnabled}
+                >
+                  {issuingRelayEnrollmentToken ? 'Generating token...' : 'Generate enrollment token'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={onCopyRelayEnrollmentToken}
+                  disabled={!relayEnrollmentToken}
+                >
+                  Copy token
+                </button>
+              </div>
+              {relayCertificate && (
+                <div className="relay-enroll-token-box">
+                  <p><strong>Certificate ID</strong>: <code>{relayCertificateId || 'n/a'}</code></p>
+                  <p><strong>Certificate</strong>: <code>{relayCertificate}</code></p>
+                  <p className="muted">Expires at: {relayCertificateExpiresAt || 'n/a'}</p>
+                  {relayCertificateCopyStatus && <p className="muted">{relayCertificateCopyStatus}</p>}
+                </div>
+              )}
+              {!relayConfig.enrollmentEnabled && (
+                <p className="muted">
+                  Enrollment secret is not configured on backend. Set `ENDORIUMFORT_RELAY_ENROLL_SECRET` first.
+                </p>
+              )}
+              {relayEnrollmentToken && (
+                <div className="relay-enroll-token-box">
+                  <p><strong>Token</strong>: <code>{relayEnrollmentToken}</code></p>
+                  <p className="muted">Expires at: {relayEnrollmentTokenExpiresAt || 'n/a'}</p>
+                  <code className="relay-enroll-command">
+                    curl -X POST https://localhost:8080/api/relays/enroll -H "Content-Type: application/json" -H "X-EndoriumFort-Relay-Enrollment-Token: {relayEnrollmentToken}" -H "X-EndoriumFort-Relay-Certificate: &lt;relay-certificate&gt;" -d '{{"relayId":"relay-edge-01","label":"Edge Relay 01","version":"1.0.0","capabilities":["ssh","rdp","vnc"]}}'
+                  </code>
+                  {relayEnrollmentCopyStatus && <p className="muted">{relayEnrollmentCopyStatus}</p>}
+                </div>
+              )}
+            </div>
+
+            {relayError && <p className="error">{relayError}</p>}
+
+            <div className="resource-list relay-fleet-list">
+              {relays.length ? (
+                relays.map((relay) => (
+                  <article className="resource-row relay-row" key={relay.relayId}>
+                    <div>
+                      <h4>{relay.label || relay.relayId}</h4>
+                      <p className="muted">ID: {relay.relayId}</p>
+                      <p className="muted">{relay.sourceIp || 'n/a'} • {relay.version || 'unknown version'}</p>
+                      <p className="muted">Managed resources: {Number(relay.managedResourceCount) || 0}</p>
+                    </div>
+                    <span className={`pill ${String(relay.status).toLowerCase() === 'online' ? 'ok' : 'offline'}`}>
+                      {String(relay.status || 'offline').toLowerCase()}
+                    </span>
+                  </article>
+                ))
+              ) : (
+                <p className="muted">No relay enrolled yet. Configure `ENDORIUMFORT_RELAY_ENROLL_SECRET` and enroll a relay node.</p>
+              )}
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.9rem' }}>
+              <div>
+                <h3>Resource Routing Assignments</h3>
+                <p>Bind each resource to one relay, or keep direct routing fallback.</p>
+              </div>
+              <label className="relay-filter-toggle">
+                <input
+                  type="checkbox"
+                  checked={relayAssignOnlineOnly}
+                  onChange={(event) => setRelayAssignOnlineOnly(event.target.checked)}
+                />
+                Online relays only
+              </label>
+            </div>
+            <div className="resource-list relay-assignment-list">
+              {resources.length ? (
+                resources.map((resource) => {
+                  const selected = relayBindings[resource.id] || '';
+                  const busy = relayAssignBusyResourceId === resource.id;
+                  const relayOptions = relayAssignOnlineOnly
+                    ? relays.filter((relay) => isRelayOnline(relay) || relay.relayId === selected)
+                    : relays;
+                  return (
+                    <article className="resource-row relay-assign-row" key={`assign-${resource.id}`}>
+                      <div>
+                        <h4>{resource.name}</h4>
+                        <p className="muted">{resource.protocol} {resource.target}:{resource.port}</p>
+                      </div>
+                      <div className="resource-actions">
+                        <select
+                          value={selected}
+                          disabled={busy || loadingRelays}
+                          onChange={(event) => onAssignRelay(resource.id, event.target.value)}
+                        >
+                          <option value="">direct (no relay)</option>
+                          {relayOptions.map((relay) => (
+                            <option key={`relay-opt-${resource.id}-${relay.relayId}`} value={relay.relayId}>
+                              {relay.label || relay.relayId} ({String(relay.status || 'offline').toLowerCase()})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </article>
+                  );
+                })
+              ) : (
+                <p className="muted">Create resources before assigning relay routes.</p>
               )}
             </div>
           </div>
@@ -3696,6 +4513,60 @@ export default function App() {
             </div>
           )}
 
+          <div className="watchlist-panel">
+            <div className="slo-grid">
+              <article className="slo-card">
+                <span>Completion rate</span>
+                <strong>{sessionSlo.completionRate}%</strong>
+                <p className="muted">Terminated sessions / total sessions</p>
+              </article>
+              <article className="slo-card">
+                <span>Average duration</span>
+                <strong>{sessionSlo.avgDurationMin} min</strong>
+                <p className="muted">Based on closed session history</p>
+              </article>
+              <article className="slo-card">
+                <span>Stale active sessions</span>
+                <strong>{sessionSlo.staleActive}</strong>
+                <p className="muted">Active over 4 hours</p>
+              </article>
+            </div>
+            <div className="panel-header" style={{ marginBottom: '0.35rem' }}>
+              <div>
+                <h3 style={{ fontSize: '1rem' }}>Critical Session Watchlist</h3>
+                <p>Pin sessions to monitor status changes faster.</p>
+              </div>
+              <span className={`pill ${watchedSessions.length ? 'loading' : 'ok'}`}>
+                {watchedSessions.length} watched
+              </span>
+            </div>
+            {watchlistAlerts.length > 0 && (
+              <div className="watch-alert-list">
+                {watchlistAlerts.map((alert) => (
+                  <article key={alert.key} className="watch-alert-item">
+                    <p>{alert.message}</p>
+                    <button type="button" className="ghost" onClick={() => dismissWatchAlert(alert.key)}>
+                      Dismiss
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+            {watchedSessions.length ? (
+              <div className="watchlist-grid">
+                {watchedSessions.map((session) => (
+                  <article key={`watch-${session.id}`} className="watchlist-item">
+                    <strong>#{session.id} {session.user} -&gt; {session.target}</strong>
+                    <span className={`pill ${session.status}`}>{session.status}</span>
+                    <p className="muted">Opened {formatRelativeDate(session.createdAt)}</p>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">No watched sessions yet. Use Pin on any session card.</p>
+            )}
+          </div>
+
           <div className="session-grid">
             {sessions.map((session) => (
               <article className="session-card" key={session.id}>
@@ -3706,15 +4577,34 @@ export default function App() {
                       {session.protocol} : {session.port}
                     </span>
                   </div>
-                  <span className={`pill ${session.status}`}>
-                    {session.status}
-                  </span>
+                  <div className="session-card-tools">
+                    <button
+                      type="button"
+                      className={watchedSessionIds.includes(Number(session.id)) ? 'secondary' : 'ghost'}
+                      onClick={() => toggleWatchSession(session.id)}
+                    >
+                      {watchedSessionIds.includes(Number(session.id)) ? 'Pinned' : 'Pin'}
+                    </button>
+                    <span className={`pill ${session.status}`}>
+                      {session.status}
+                    </span>
+                  </div>
                 </header>
                 <p className="session-route">
                   <strong>{session.user}</strong>
                   <span className="arrow">to</span>
                   <strong>{session.target}</strong>
                 </p>
+                <div className="session-route-hints">
+                  <span className={`pill ${sessionRelayHints[session.id]?.route === 'relay' ? 'loading' : 'ready'}`}>
+                    {sessionRelayHints[session.id]?.route === 'relay' ? 'via relay' : 'direct route'}
+                  </span>
+                  {sessionRelayHints[session.id]?.route === 'relay' && sessionRelayHints[session.id]?.relayLabel && (
+                    <span className="muted session-relay-label">
+                      {sessionRelayHints[session.id].relayLabel} ({sessionRelayHints[session.id].relayStatus || 'offline'})
+                    </span>
+                  )}
+                </div>
                 <div className="session-meta">
                   <span>Opened: {session.createdAt}</span>
                   {session.terminatedAt && (
@@ -3803,6 +4693,14 @@ export default function App() {
                 disabled={loadingAudit}
               >
                 Refresh
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={exportFilteredAuditCsv}
+                disabled={!filteredAuditItems.length}
+              >
+                Export CSV
               </button>
               {auditFilter && (
                 <button
@@ -4004,6 +4902,60 @@ export default function App() {
             Connect
           </button>
         </div>
+        <div className="snippet-studio">
+          <div className="snippet-studio-head">
+            <h4>SSH Snippets Studio</h4>
+            <p>Inject or execute repeatable operational commands without retyping.</p>
+          </div>
+          <div className="snippet-grid">
+            {sshSnippetLibrary.map((snippet) => (
+              <article key={snippet.id} className="snippet-card">
+                <strong>{snippet.label}</strong>
+                <code>{snippet.command}</code>
+                <div className="snippet-actions">
+                  <button type="button" className="ghost" onClick={() => sendSnippetToTerminal(snippet, false)}>
+                    Inject
+                  </button>
+                  <button type="button" onClick={() => sendSnippetToTerminal(snippet, true)}>
+                    Run
+                  </button>
+                  {snippet.custom && (
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => removeCustomSnippet(snippet.id)}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="snippet-builder">
+            <label>
+              Snippet label
+              <input
+                type="text"
+                value={snippetLabel}
+                onChange={(event) => setSnippetLabel(event.target.value)}
+                placeholder="Example: App logs"
+              />
+            </label>
+            <label>
+              Command
+              <input
+                type="text"
+                value={snippetCommand}
+                onChange={(event) => setSnippetCommand(event.target.value)}
+                placeholder="tail -n 80 /var/log/app.log"
+              />
+            </label>
+            <button type="button" className="secondary" onClick={addCustomSnippet}>
+              Save snippet
+            </button>
+          </div>
+        </div>
         {terminalError && <p className="error">{terminalError}</p>}
         {terminalInfo && <p className="muted">{terminalInfo}</p>}
         <div className="terminal-shell" ref={terminalRef} />
@@ -4103,6 +5055,29 @@ export default function App() {
                     </p>
                   </>
                 )}
+              </div>
+              <div className="playbook-strip">
+                <div>
+                  <strong>Access Playbook</strong>
+                  <p className="muted">
+                    {currentAccessPlaybook
+                      ? `Saved for this resource (${new Date(currentAccessPlaybook.updatedAt || Date.now()).toLocaleString()}).`
+                      : 'No playbook yet for this resource.'}
+                  </p>
+                </div>
+                <div className="playbook-actions">
+                  <button type="button" className="ghost" onClick={applyCurrentAccessPlaybook}>
+                    Apply
+                  </button>
+                  <button type="button" className="secondary" onClick={saveCurrentAccessPlaybook}>
+                    Save
+                  </button>
+                  {currentAccessPlaybook && (
+                    <button type="button" className="danger" onClick={deleteCurrentAccessPlaybook}>
+                      Delete
+                    </button>
+                  )}
+                </div>
               </div>
               <label>
                 Access reason
@@ -4223,7 +5198,10 @@ export default function App() {
 
       {/* Agent launch modal */}
       {agentModal && (
-        <div className="modal-overlay" onClick={() => setAgentModal(null)}>
+        <div className="modal-overlay" onClick={() => {
+          clearAgentLaunchWatcher();
+          setAgentModal(null);
+        }}>
           <div className="modal-content agent-modal" onClick={(e) => e.stopPropagation()}>
             <div className="agent-modal-header">
               <span className="agent-icon">🚀</span>
@@ -4247,39 +5225,104 @@ export default function App() {
               </div>
             </div>
             <div className="agent-command-block">
-              <label className="agent-label">Commande à exécuter dans un terminal :</label>
+              <label className="agent-label">Commande de secours (si le protocole n'est pas enregistré) :</label>
               <div className="agent-command-row">
                 <code className="agent-command">{agentModal.command}</code>
                 <button
                   type="button"
                   className="secondary"
-                  onClick={() => {
-                    navigator.clipboard.writeText(agentModal.command);
-                    setAgentModal((prev) => ({ ...prev, copied: true }));
-                    setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, copied: false }) : null), 2000);
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(agentModal.command);
+                      setAgentModal((prev) => (prev ? { ...prev, copied: 'ok' } : prev));
+                    } catch (_) {
+                      setAgentModal((prev) => (prev ? { ...prev, copied: 'fail' } : prev));
+                    }
+                    setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, copied: 'idle' }) : null), 2000);
                   }}
                 >
-                  {agentModal.copied ? '✓ Copié' : '📋 Copier'}
+                  {agentModal.copied === 'ok' ? '✓ Copié' : agentModal.copied === 'fail' ? '❌ Échec' : '📋 Copier'}
+                </button>
+              </div>
+            </div>
+            <div className="agent-command-block">
+              <label className="agent-label">Lien deep-link :</label>
+              <div className="agent-command-row">
+                <code className="agent-command">{agentModal.deepLink}</code>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(agentModal.deepLink);
+                      setAgentModal((prev) => (prev ? { ...prev, linkCopied: 'ok' } : prev));
+                    } catch (_) {
+                      setAgentModal((prev) => (prev ? { ...prev, linkCopied: 'fail' } : prev));
+                    }
+                    setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, linkCopied: 'idle' }) : null), 2000);
+                  }}
+                >
+                  {agentModal.linkCopied === 'ok' ? '✓ Copié' : agentModal.linkCopied === 'fail' ? '❌ Échec' : '📋 Copier lien'}
                 </button>
               </div>
             </div>
             <div className="agent-modal-tip">
-              <p>💡 Une fois le tunnel actif, ouvrez <a href={`http://127.0.0.1:${agentModal.port}`} target="_blank" rel="noreferrer">http://127.0.0.1:{agentModal.port}</a> dans votre navigateur.</p>
+              <p>💡 Une fois le tunnel actif, l'agent redirige automatiquement vers <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
+              {agentModal.launchState === 'opening' && (
+                <p className="muted">Ouverture de l'application agent en cours...</p>
+              )}
+              {agentModal.launchState === 'fallback' && (
+                <>
+                  <p className="error" style={{ marginBottom: '0.45rem' }}>
+                    L'application agent ne semble pas enregistrée comme handler du protocole.
+                  </p>
+                  <p className="muted" style={{ marginBottom: '0.45rem' }}>
+                    Installation rapide ({agentModal.installGuide?.platform || 'OS'}) :
+                  </p>
+                  <div className="agent-command-row">
+                    <code className="agent-command">{agentModal.installGuide?.command}</code>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(agentModal.installGuide?.command || '');
+                          setAgentModal((prev) => (prev ? { ...prev, installCopied: 'ok' } : prev));
+                        } catch (_) {
+                          setAgentModal((prev) => (prev ? { ...prev, installCopied: 'fail' } : prev));
+                        }
+                        setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, installCopied: 'idle' }) : null), 2000);
+                      }}
+                    >
+                      {agentModal.installCopied === 'ok' ? '✓ Copié' : agentModal.installCopied === 'fail' ? '❌ Échec' : '📋 Copier install'}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
             <div className="agent-modal-actions">
               <button
                 type="button"
+                className="secondary"
+                onClick={() => launchAgentDeepLink(agentModal.deepLink)}
+              >
+                🚀 Ouvrir avec l'agent
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   const randomPort = 10000 + Math.floor(Math.random() * 50000);
-                  const serverUrl = window.location.origin;
-                  const cmd = `endoriumfort-agent connect --server ${serverUrl} --token ${auth.token} --resource ${agentModal.resource.id} --local-port ${randomPort}`;
-                  setAgentModal((prev) => ({ ...prev, port: randomPort, command: cmd, copied: false }));
+                  const launchPayload = buildAgentLaunchPayload(agentModal.resource, randomPort);
+                  setAgentModal((prev) => ({ ...prev, port: randomPort, copied: 'idle', linkCopied: 'idle', installCopied: 'idle', launchState: 'idle', ...launchPayload }));
                 }}
                 className="ghost"
               >
                 🔄 Nouveau port
               </button>
-              <button type="button" className="ghost" onClick={() => setAgentModal(null)}>Fermer</button>
+              <button type="button" className="ghost" onClick={() => {
+                clearAgentLaunchWatcher();
+                setAgentModal(null);
+              }}>Fermer</button>
             </div>
           </div>
         </div>

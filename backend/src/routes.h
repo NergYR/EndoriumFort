@@ -16,3 +16,4 @@ void register_session_routes(CrowApp &app, AppContext &ctx);
 void register_audit_routes(CrowApp &app, AppContext &ctx);
 void register_recording_routes(CrowApp &app, AppContext &ctx);
 void register_stats_routes(CrowApp &app, AppContext &ctx);
+void register_relay_routes(CrowApp &app, AppContext &ctx);

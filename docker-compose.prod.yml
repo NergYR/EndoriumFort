@@ -1,0 +1,66 @@
+# ─── EndoriumFort — Docker Compose (Production) ───────────────────────────
+# Deterministic and hardened deployment profile for production usage.
+#
+# Usage:
+#   cp .env.prod.example .env.prod
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml down
+
+services:
+  endoriumfort:
+    image: ${DOCKER_IMAGE:-nergyr/endoriumfort}:${DOCKER_TAG:-1.0.3}
+    container_name: endoriumfort
+    restart: unless-stopped
+
+    ports:
+      - "${EF_HTTP_PORT:-80}:80"
+      - "${EF_HTTPS_PORT:-443}:443"
+
+    volumes:
+      - ef-data:/app/data
+      - ef-recordings:/app/recordings
+      - ef-letsencrypt:/etc/letsencrypt
+      - ef-certbot-www:/var/www/certbot
+
+    environment:
+      - TZ=${TZ:-Europe/Paris}
+      - ACME_ENABLED=${ACME_ENABLED:-0}
+      - ACME_DOMAIN=${ACME_DOMAIN:-}
+      - ACME_EMAIL=${ACME_EMAIL:-}
+
+    security_opt:
+      - no-new-privileges:true
+
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.50
+    stop_grace_period: 30s
+
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+volumes:
+  ef-data:
+    driver: local
+  ef-recordings:
+    driver: local
+  ef-letsencrypt:
+    driver: local
+  ef-certbot-www:
+    driver: local

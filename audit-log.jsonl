@@ -134,3 +134,4 @@
 {"id":57,"type":"session.close","actor":"system","role":"system","createdAt":"2026-03-10T16:13:40Z","payload":{"sessionId":14,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-03-10T16:13:08Z","terminatedAt":"2026-03-10T16:13:39Z"}}
 {"id":58,"type":"recording.watermark","actor":"system","role":"system","createdAt":"2026-03-10T16:13:40Z","payload":{"sessionId":14,"recordingId":3,"watermark":"wm-14-29993-1130"}}
 {"id":59,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-10T16:13:43Z","payload":{"userId":1,"username":"admin"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-11T10:22:43Z","payload":{"userId":1,"username":"admin"}}
