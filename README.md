@@ -202,7 +202,8 @@ Opens:
     - live relay fleet inventory with online/offline status
     - per-resource relay assignment from the admin console
     - online-only assignment toggle to prevent accidental routing toward stale relays
-    - direct relay bootstrap from UI with relay certificate + short-lived one-time enrollment token generation
+    - agent-first relay bootstrap guidance in UI (manual API bootstrap kept as advanced fallback)
+    - direct relay bootstrap from UI with relay certificate + short-lived one-time enrollment token generation (advanced mode)
     - runtime relay policy visibility (certificate policy, enrollment enabled, token TTL, stale threshold)
 9. **Granular permissions**:
   - role gives a default permission baseline
@@ -269,6 +270,46 @@ Set relay control-plane hardening values in backend runtime:
 - `ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS`: relay stale threshold for online/offline decision (default `90`)
 
 If `ENDORIUMFORT_RELAY_ENROLL_SECRET` is not set, enrollment stays fail-closed (disabled).
+
+### Linux Relay Daemon (real binary)
+
+EndoriumFort ships a dedicated Linux relay daemon binary:
+
+```bash
+# Build relay daemon (from repository root)
+cd agent
+VERSION="$(tr -d '[:space:]' < VERSION)"
+go build -ldflags "-X main.version=${VERSION} -s -w" \
+  -o endoriumfort-relay-linux-amd64 ./cmd/endoriumfort-relay
+```
+
+Run the relay daemon:
+
+```bash
+./agent/endoriumfort-relay-linux-amd64 \
+  --server https://bastion.example.com \
+  --relay-id relay-paris-01 \
+  --label "Relay Paris #1" \
+  --listen :18080 \
+  --enroll-secret "<ENDORIUMFORT_RELAY_ENROLL_SECRET>" \
+  --certificate "<relay_certificate_if_required>"
+```
+
+Behavior:
+- enrolls once via `POST /api/relays/enroll`
+- keeps online state fresh via periodic `POST /api/relays/heartbeat`
+- runs a real TCP relay service using `HTTP CONNECT` on `--listen`
+
+You can alternatively bootstrap with one-time enrollment token:
+
+```bash
+./agent/endoriumfort-relay-linux-amd64 \
+  --server https://bastion.example.com \
+  --relay-id relay-paris-02 \
+  --listen :18080 \
+  --enrollment-token "<one_time_token>" \
+  --certificate "<relay_certificate_if_required>"
+```
 
 ### Agent Tunnel
 
@@ -419,6 +460,12 @@ Linux local build (requires `fpm`, `rpm`, and prebuilt Linux binaries in `releas
 VERSION=1.1.0 bash agent/packaging/linux/build-packages.sh
 ```
 
+Linux APT packages for relay + web bastion:
+
+```bash
+VERSION=1.1.0 bash agent/packaging/linux/build-apt-packages.sh
+```
+
 macOS local build (requires `pkgbuild` and a Darwin binary):
 
 ```bash
@@ -439,9 +486,62 @@ Automated release packaging is handled by GitHub Actions workflow:
 
 - `.github/workflows/release-agent.yml` (triggered on tag `v*`)
 - uploads `.deb`, `.rpm`, `.pkg`, and `.msi` to the GitHub release
+- uploads APT-ready `.deb` packages for:
+  - `endoriumfort-relay`
+  - `endoriumfort-web-bastion`
+- publishes APT metadata for both `amd64` and `all` package architectures
+- publishes an APT repository to GitHub Pages under `/apt`
 - supports optional signing when secrets are configured:
   - macOS notarization: `APPLE_NOTARY_APPLE_ID`, `APPLE_NOTARY_TEAM_ID`, `APPLE_NOTARY_PASSWORD`
   - Windows Authenticode: `WINDOWS_SIGN_PFX_BASE64`, `WINDOWS_SIGN_PFX_PASSWORD`
+  - APT repository signing: `APT_GPG_PRIVATE_KEY_BASE64`, `APT_GPG_PASSPHRASE` (optional), `APT_GPG_KEY_ID` (optional)
+
+Generate APT signing secrets (one command):
+
+```bash
+chmod +x scripts/generate-apt-gpg-secrets.sh
+GITHUB_REPO="NergYR/EndoriumFort" \
+KEY_NAME="EndoriumFort APT Signing" \
+KEY_EMAIL="security@endoriumfort.local" \
+APT_GPG_PASSPHRASE="change-me" \
+./scripts/generate-apt-gpg-secrets.sh
+```
+
+If `gh` CLI is configured and `GITHUB_REPO` is provided, the script can push secrets automatically.
+
+Install from APT repository:
+
+```bash
+REPO_OWNER="NergYR"
+REPO_NAME="EndoriumFort"
+
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL "https://${REPO_OWNER}.github.io/${REPO_NAME}/apt/public.key" | \
+  sudo tee /etc/apt/keyrings/endoriumfort-archive-keyring.asc >/dev/null
+
+echo "deb [signed-by=/etc/apt/keyrings/endoriumfort-archive-keyring.asc] https://${REPO_OWNER}.github.io/${REPO_NAME}/apt stable main" | \
+  sudo tee /etc/apt/sources.list.d/endoriumfort.list
+
+sudo apt update
+sudo apt install endoriumfort-relay endoriumfort-web-bastion
+```
+
+Unsigned fallback (only if APT GPG signing is not configured in CI):
+
+```bash
+echo "deb [trusted=yes] https://${REPO_OWNER}.github.io/${REPO_NAME}/apt stable main" | \
+  sudo tee /etc/apt/sources.list.d/endoriumfort.list
+```
+
+After installing `endoriumfort-web-bastion`:
+
+```bash
+sudo cp -n /etc/endoriumfort/.env.prod.example /etc/endoriumfort/.env.prod
+sudo nano /etc/endoriumfort/.env.prod
+
+# Start stack via wrapper
+sudo endoriumfort-web-bastion up -d
+```
 
 Continuous installer builds (for visibility on every change) are handled by:
 

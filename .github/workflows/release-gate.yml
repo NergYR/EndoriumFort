@@ -49,8 +49,8 @@ jobs:
           CHANGED="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
 
           if echo "$CHANGED" | grep -Eq '^(backend/src/database|backend/src/routes|docker-compose.yml|Dockerfile|frontend/package.json|agent/main.go)'; then
-            if ! echo "$PR_BODY" | grep -Eiq '(migration|breaking change|upgrade)'; then
-              echo "ERROR: PR body must include migration/upgrade notes for potentially breaking operational changes." >&2
+            if ! echo "$PR_BODY" | grep -Eiq '(migration|breaking changes?|upgrade|no migration (required|needed)|no breaking changes?|backward compatible|backwards compatible|\bn/?a\b|not applicable)'; then
+              echo "ERROR: PR body must include migration/upgrade notes, or explicitly state no migration/no breaking changes, for potentially breaking operational changes." >&2
               exit 1
             fi
           fi
@@ -279,14 +279,30 @@ jobs:
 
       - name: Wait for backend health
         run: |
+          set -euo pipefail
+          CONTAINER_ID="$(docker compose ps -q endoriumfort)"
+          if [[ -z "$CONTAINER_ID" ]]; then
+            echo "ERROR: endoriumfort container not found" >&2
+            docker compose ps || true
+            docker compose logs || true
+            exit 1
+          fi
+
+          HTTP_PORT="${EF_HTTP_PORT:-80}"
+
           for i in {1..90}; do
-            if curl -sf http://127.0.0.1:8080/api/health >/dev/null; then
+            HEALTH_STATUS="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CONTAINER_ID" 2>/dev/null || true)"
+
+            if [[ "$HEALTH_STATUS" == "healthy" ]] && curl -sf "http://127.0.0.1:${HTTP_PORT}/api/health" >/dev/null; then
               echo "Backend healthy"
               exit 0
             fi
+
             sleep 2
           done
+
           echo "Health endpoint did not become ready in time" >&2
+          docker compose ps || true
           docker compose logs || true
           exit 1
 

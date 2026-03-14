@@ -147,6 +147,10 @@ else
     echo "  Agent binary (Linux amd64): $ROOT_DIR/agent/endoriumfort-agent-linux-amd64"
   fi
 
+  # Relay daemon (Linux amd64)
+  GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o endoriumfort-relay-linux-amd64 ./cmd/endoriumfort-relay
+  echo "  Relay binary (Linux amd64): $ROOT_DIR/agent/endoriumfort-relay-linux-amd64"
+
   # Cross-compile: Windows .exe
   GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o endoriumfort-agent.exe .
   echo "  Agent binary (Windows amd64): $ROOT_DIR/agent/endoriumfort-agent.exe"
