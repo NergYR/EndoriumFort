@@ -9,6 +9,7 @@
 - Added cross-platform packaging helper script `agent/packaging/build-installers.sh`.
 - Extended GitHub release workflow `.github/workflows/release-agent.yml` to publish installer artifacts on tag pushes (`v*`) in the same pipeline as agent binaries.
 - Fixed APT repository publishing to index both `amd64` and `all` package architectures, ensuring `endoriumfort-web-bastion` is installable via `apt`.
+- Fixed APT package index `Filename` entries to use repository-relative paths (no `release/apt-repo/` prefix), preventing `404 Not Found` during `apt install`.
 - Added optional installer signing hooks in release workflow:
   - macOS notarization/stapling when Apple Notary secrets are provided
   - Windows Authenticode signing when PFX secrets are provided

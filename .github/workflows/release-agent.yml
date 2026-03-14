@@ -255,12 +255,18 @@ jobs:
           fi
 
           if compgen -G "$DIST_DIR_AMD64/*.deb" > /dev/null; then
-            dpkg-scanpackages "$DIST_DIR_AMD64" /dev/null > "$DIST_DIR_AMD64/Packages"
+            (
+              cd "$APT_ROOT"
+              dpkg-scanpackages "dists/stable/main/binary-amd64" /dev/null > "dists/stable/main/binary-amd64/Packages"
+            )
             gzip -9 -f -k "$DIST_DIR_AMD64/Packages"
           fi
 
           if compgen -G "$DIST_DIR_ALL/*.deb" > /dev/null; then
-            dpkg-scanpackages "$DIST_DIR_ALL" /dev/null > "$DIST_DIR_ALL/Packages"
+            (
+              cd "$APT_ROOT"
+              dpkg-scanpackages "dists/stable/main/binary-all" /dev/null > "dists/stable/main/binary-all/Packages"
+            )
             gzip -9 -f -k "$DIST_DIR_ALL/Packages"
           fi
 

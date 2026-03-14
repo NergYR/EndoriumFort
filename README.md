@@ -526,6 +526,18 @@ sudo apt update
 sudo apt install endoriumfort-relay endoriumfort-web-bastion
 ```
 
+If your environment gets `curl: (52) Empty reply from server` when fetching `public.key` (typically due custom-domain redirection issues on GitHub Pages), use this temporary fallback:
+
+```bash
+echo "deb [trusted=yes] https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/gh-pages/apt stable main" | \
+  sudo tee /etc/apt/sources.list.d/endoriumfort.list
+
+sudo apt update
+sudo apt install endoriumfort-agent endoriumfort-relay endoriumfort-web-bastion
+```
+
+This bypasses GPG verification and should be treated as a temporary workaround only.
+
 Unsigned fallback (only if APT GPG signing is not configured in CI):
 
 ```bash
