@@ -242,25 +242,33 @@ jobs:
         run: |
           set -euo pipefail
           APT_ROOT="release/apt-repo"
-          DIST_DIR="$APT_ROOT/dists/stable/main/binary-amd64"
-          mkdir -p "$DIST_DIR"
+          DIST_DIR_AMD64="$APT_ROOT/dists/stable/main/binary-amd64"
+          DIST_DIR_ALL="$APT_ROOT/dists/stable/main/binary-all"
+          mkdir -p "$DIST_DIR_AMD64" "$DIST_DIR_ALL"
 
-          cp release/packages/linux/*_amd64.deb "$DIST_DIR" || true
-          if compgen -G "$DIST_DIR/*.deb" > /dev/null; then
-            :
-          else
-            echo "No amd64 DEB packages found for APT repository" >&2
+          cp release/packages/linux/*_amd64.deb "$DIST_DIR_AMD64" || true
+          cp release/packages/linux/*_all.deb "$DIST_DIR_ALL" || true
+
+          if ! compgen -G "$DIST_DIR_AMD64/*.deb" > /dev/null && ! compgen -G "$DIST_DIR_ALL/*.deb" > /dev/null; then
+            echo "No DEB packages found for APT repository" >&2
             exit 1
           fi
 
-          dpkg-scanpackages "$DIST_DIR" /dev/null > "$DIST_DIR/Packages"
-          gzip -9 -f -k "$DIST_DIR/Packages"
+          if compgen -G "$DIST_DIR_AMD64/*.deb" > /dev/null; then
+            dpkg-scanpackages "$DIST_DIR_AMD64" /dev/null > "$DIST_DIR_AMD64/Packages"
+            gzip -9 -f -k "$DIST_DIR_AMD64/Packages"
+          fi
+
+          if compgen -G "$DIST_DIR_ALL/*.deb" > /dev/null; then
+            dpkg-scanpackages "$DIST_DIR_ALL" /dev/null > "$DIST_DIR_ALL/Packages"
+            gzip -9 -f -k "$DIST_DIR_ALL/Packages"
+          fi
 
           apt-ftparchive \
             -o APT::FTPArchive::Release::Suite="stable" \
             -o APT::FTPArchive::Release::Codename="stable" \
             -o APT::FTPArchive::Release::Components="main" \
-            -o APT::FTPArchive::Release::Architectures="amd64" \
+            -o APT::FTPArchive::Release::Architectures="amd64 all" \
             release "$APT_ROOT/dists/stable" > "$APT_ROOT/dists/stable/Release"
 
           printf '%s\n' \

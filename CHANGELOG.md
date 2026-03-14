@@ -8,6 +8,7 @@
   - Windows `.msi` (`agent/packaging/windows/build-msi.ps1`)
 - Added cross-platform packaging helper script `agent/packaging/build-installers.sh`.
 - Extended GitHub release workflow `.github/workflows/release-agent.yml` to publish installer artifacts on tag pushes (`v*`) in the same pipeline as agent binaries.
+- Fixed APT repository publishing to index both `amd64` and `all` package architectures, ensuring `endoriumfort-web-bastion` is installable via `apt`.
 - Added optional installer signing hooks in release workflow:
   - macOS notarization/stapling when Apple Notary secrets are provided
   - Windows Authenticode signing when PFX secrets are provided
@@ -40,6 +41,7 @@
   - relay fleet visibility (status, metadata, managed resource count)
   - per-resource relay assignment controls with direct fallback option
   - online-only relay assignment toggle to reduce accidental selection of stale/offline relays
+  - agent-first relay bootstrap section, with manual curl enrollment collapsed behind an advanced toggle
   - relay certificate generation and copy workflow for secure relay bootstrap
   - direct relay enrollment token generation with copy-ready bootstrap command
   - runtime relay configuration visibility (certificate policy, enrollment enabled, TTL, stale threshold)

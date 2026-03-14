@@ -348,6 +348,7 @@ export default function App() {
   const [relayEnrollmentTokenExpiresAt, setRelayEnrollmentTokenExpiresAt] = useState('');
   const [issuingRelayEnrollmentToken, setIssuingRelayEnrollmentToken] = useState(false);
   const [relayEnrollmentCopyStatus, setRelayEnrollmentCopyStatus] = useState('');
+  const [showRelayManualBootstrap, setShowRelayManualBootstrap] = useState(false);
   const [relayBindings, setRelayBindings] = useState({});
   const [sessionRelayHints, setSessionRelayHints] = useState({});
   const [relayAssignBusyResourceId, setRelayAssignBusyResourceId] = useState(0);
@@ -3509,67 +3510,96 @@ export default function App() {
 
             <div className="relay-enroll-panel">
               <div>
-                <h4>Direct Relay Enroll</h4>
+                <h4>Relay Agent Bootstrap (recommended)</h4>
                 <p className="muted">
-                  Generate a relay certificate and a short-lived enrollment token from the admin UI, then use both on the relay bootstrap request.
+                  Use the EndoriumFort agent path first. Manual API bootstrap is available as advanced fallback.
+                </p>
+              </div>
+              <div className="relay-enroll-token-box">
+                <p>
+                  <strong>Install helper ({resolveAgentInstallGuide().platform})</strong>
+                </p>
+                <code className="relay-enroll-command">{resolveAgentInstallGuide().command}</code>
+                <p className="muted">
+                  After install, use the built-in agent launch flow from the resource access workflow.
                 </p>
               </div>
               <div className="resource-actions">
                 <button
                   type="button"
-                  className="secondary"
-                  onClick={onIssueRelayCertificate}
-                  disabled={issuingRelayCertificate}
-                >
-                  {issuingRelayCertificate ? 'Generating certificate...' : 'Generate relay certificate'}
-                </button>
-                <button
-                  type="button"
                   className="ghost"
-                  onClick={onCopyRelayCertificate}
-                  disabled={!relayCertificate}
+                  onClick={() => setShowRelayManualBootstrap((prev) => !prev)}
                 >
-                  Copy certificate
-                </button>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={onIssueRelayEnrollmentToken}
-                  disabled={issuingRelayEnrollmentToken || !relayConfig.enrollmentEnabled}
-                >
-                  {issuingRelayEnrollmentToken ? 'Generating token...' : 'Generate enrollment token'}
-                </button>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={onCopyRelayEnrollmentToken}
-                  disabled={!relayEnrollmentToken}
-                >
-                  Copy token
+                  {showRelayManualBootstrap ? 'Hide advanced bootstrap' : 'Show advanced bootstrap'}
                 </button>
               </div>
-              {relayCertificate && (
-                <div className="relay-enroll-token-box">
-                  <p><strong>Certificate ID</strong>: <code>{relayCertificateId || 'n/a'}</code></p>
-                  <p><strong>Certificate</strong>: <code>{relayCertificate}</code></p>
-                  <p className="muted">Expires at: {relayCertificateExpiresAt || 'n/a'}</p>
-                  {relayCertificateCopyStatus && <p className="muted">{relayCertificateCopyStatus}</p>}
-                </div>
-              )}
-              {!relayConfig.enrollmentEnabled && (
-                <p className="muted">
-                  Enrollment secret is not configured on backend. Set `ENDORIUMFORT_RELAY_ENROLL_SECRET` first.
-                </p>
-              )}
-              {relayEnrollmentToken && (
-                <div className="relay-enroll-token-box">
-                  <p><strong>Token</strong>: <code>{relayEnrollmentToken}</code></p>
-                  <p className="muted">Expires at: {relayEnrollmentTokenExpiresAt || 'n/a'}</p>
-                  <code className="relay-enroll-command">
-                    curl -X POST https://localhost:8080/api/relays/enroll -H "Content-Type: application/json" -H "X-EndoriumFort-Relay-Enrollment-Token: {relayEnrollmentToken}" -H "X-EndoriumFort-Relay-Certificate: &lt;relay-certificate&gt;" -d '{{"relayId":"relay-edge-01","label":"Edge Relay 01","version":"1.0.0","capabilities":["ssh","rdp","vnc"]}}'
-                  </code>
-                  {relayEnrollmentCopyStatus && <p className="muted">{relayEnrollmentCopyStatus}</p>}
-                </div>
+
+              {showRelayManualBootstrap && (
+                <>
+                  <div>
+                    <h4>Manual bootstrap (optional)</h4>
+                    <p className="muted">
+                      Generate certificate + short-lived token, then enroll relay manually through API.
+                    </p>
+                  </div>
+                  <div className="resource-actions">
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={onIssueRelayCertificate}
+                      disabled={issuingRelayCertificate}
+                    >
+                      {issuingRelayCertificate ? 'Generating certificate...' : 'Generate relay certificate'}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={onCopyRelayCertificate}
+                      disabled={!relayCertificate}
+                    >
+                      Copy certificate
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={onIssueRelayEnrollmentToken}
+                      disabled={issuingRelayEnrollmentToken || !relayConfig.enrollmentEnabled}
+                    >
+                      {issuingRelayEnrollmentToken ? 'Generating token...' : 'Generate enrollment token'}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={onCopyRelayEnrollmentToken}
+                      disabled={!relayEnrollmentToken}
+                    >
+                      Copy token
+                    </button>
+                  </div>
+                  {relayCertificate && (
+                    <div className="relay-enroll-token-box">
+                      <p><strong>Certificate ID</strong>: <code>{relayCertificateId || 'n/a'}</code></p>
+                      <p><strong>Certificate</strong>: <code>{relayCertificate}</code></p>
+                      <p className="muted">Expires at: {relayCertificateExpiresAt || 'n/a'}</p>
+                      {relayCertificateCopyStatus && <p className="muted">{relayCertificateCopyStatus}</p>}
+                    </div>
+                  )}
+                  {!relayConfig.enrollmentEnabled && (
+                    <p className="muted">
+                      Enrollment secret is not configured on backend. Set `ENDORIUMFORT_RELAY_ENROLL_SECRET` first.
+                    </p>
+                  )}
+                  {relayEnrollmentToken && (
+                    <div className="relay-enroll-token-box">
+                      <p><strong>Token</strong>: <code>{relayEnrollmentToken}</code></p>
+                      <p className="muted">Expires at: {relayEnrollmentTokenExpiresAt || 'n/a'}</p>
+                      <code className="relay-enroll-command">
+                        {`curl -X POST https://localhost:8080/api/relays/enroll -H "Content-Type: application/json" -H "X-EndoriumFort-Relay-Enrollment-Token: ${relayEnrollmentToken}" -H "X-EndoriumFort-Relay-Certificate: <relay-certificate>" -d '{"relayId":"relay-edge-01","label":"Edge Relay 01","version":"1.0.0","capabilities":["ssh","rdp","vnc"]}'`}
+                      </code>
+                      {relayEnrollmentCopyStatus && <p className="muted">{relayEnrollmentCopyStatus}</p>}
+                    </div>
+                  )}
+                </>
               )}
             </div>
 

@@ -202,7 +202,8 @@ Opens:
     - live relay fleet inventory with online/offline status
     - per-resource relay assignment from the admin console
     - online-only assignment toggle to prevent accidental routing toward stale relays
-    - direct relay bootstrap from UI with relay certificate + short-lived one-time enrollment token generation
+    - agent-first relay bootstrap guidance in UI (manual API bootstrap kept as advanced fallback)
+    - direct relay bootstrap from UI with relay certificate + short-lived one-time enrollment token generation (advanced mode)
     - runtime relay policy visibility (certificate policy, enrollment enabled, token TTL, stale threshold)
 9. **Granular permissions**:
   - role gives a default permission baseline
@@ -488,6 +489,7 @@ Automated release packaging is handled by GitHub Actions workflow:
 - uploads APT-ready `.deb` packages for:
   - `endoriumfort-relay`
   - `endoriumfort-web-bastion`
+- publishes APT metadata for both `amd64` and `all` package architectures
 - publishes an APT repository to GitHub Pages under `/apt`
 - supports optional signing when secrets are configured:
   - macOS notarization: `APPLE_NOTARY_APPLE_ID`, `APPLE_NOTARY_TEAM_ID`, `APPLE_NOTARY_PASSWORD`
