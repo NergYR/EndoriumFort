@@ -1,0 +1,18 @@
+Package: endoriumfort-web-bastion
+Version: 1.0.18
+Architecture: all
+Maintainer: EndoriumFort
+Installed-Size: 5
+Depends: docker.io
+Filename: release/apt-repo/dists/stable/main/binary-all/endoriumfort-web-bastion_1.0.18_all.deb
+Size: 3424
+MD5sum: bea450413202112d644fb215c451d15d
+SHA1: 81eca1ed3bc4735732f3dbdcd5d97881fd6e46f8
+SHA256: 4813a99ce2202be8b6ebc32c8e6b9fc579e7961e5f89146f0d8d8051393c1191
+Section: default
+Priority: optional
+Homepage: https://github.com/NergYR/EndoriumFort
+Description: EndoriumFort Web Bastion deployment bundle (Docker Compose + helper CLI)
+License: MIT
+Vendor: none
+
