@@ -406,6 +406,7 @@ inline crow::json::wvalue resource_to_json(const Resource &resource) {
   payload["port"] = resource.port;
   payload["description"] = resource.description;
   payload["imageUrl"] = resource.imageUrl;
+  payload["imageData"] = resource.imageData;
   payload["httpUsername"] = resource.httpUsername;
   payload["sshUsername"] = resource.sshUsername;
   payload["hasCredentials"] = !resource.sshPassword.empty();

@@ -258,12 +258,14 @@ void AppContext::init_database() {
       "port INTEGER NOT NULL DEFAULT 22,"
       "description TEXT,"
       "image_url TEXT,"
+      "image_data TEXT,"
       "created_at TEXT NOT NULL,"
       "updated_at TEXT NOT NULL"
       ");";
   if (!sqlite.exec(resource_schema, err))
     std::cerr << "SQLite resource schema failed: " << err << '\n';
   sqlite.exec("ALTER TABLE resources ADD COLUMN image_url TEXT;", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN image_data TEXT;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN http_username TEXT;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN http_password TEXT;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN ssh_username TEXT;", err);
@@ -628,6 +630,8 @@ void AppContext::load_resources_from_db() {
       if (desc) r.description = reinterpret_cast<const char *>(desc);
       auto img   = sqlite3_column_text(stmt, 6);
       if (img) r.imageUrl = reinterpret_cast<const char *>(img);
+      auto imgdata = sqlite3_column_text(stmt, 7);
+      if (imgdata) r.imageData = reinterpret_cast<const char *>(imgdata);
       auto hu    = sqlite3_column_text(stmt, 7);
       if (hu) r.httpUsername = reinterpret_cast<const char *>(hu);
       auto hp    = sqlite3_column_text(stmt, 8);
@@ -656,42 +660,44 @@ void AppContext::load_resources_from_db() {
 bool AppContext::insert_resource(const Resource &r) {
   if (!sqlite.db) return true;
   std::lock_guard<std::mutex> lock(sqlite.mutex);
-  const char *sql =
+    const char *sql =
       "INSERT INTO resources (id, name, target, protocol, port, description, "
-      "image_url, http_username, http_password, created_at, updated_at, "
+      "image_url, image_data, http_username, http_password, created_at, updated_at, "
       "ssh_username, ssh_password, require_access_justification, "
       "require_dual_approval, enable_command_guard, adaptive_access_policy, "
       "risk_level) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite resource insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
     return false;
   }
-  sqlite3_bind_int(stmt, 1, r.id);
-  sqlite3_bind_text(stmt, 2, r.name.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 3, r.target.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 4, r.protocol.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 5, r.port);
-  r.description.empty() ? sqlite3_bind_null(stmt, 6)
+    sqlite3_bind_int(stmt, 1, r.id);
+    sqlite3_bind_text(stmt, 2, r.name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, r.target.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, r.protocol.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 5, r.port);
+    r.description.empty() ? sqlite3_bind_null(stmt, 6)
       : sqlite3_bind_text(stmt, 6, r.description.c_str(), -1, SQLITE_TRANSIENT);
-  r.imageUrl.empty() ? sqlite3_bind_null(stmt, 7)
+    r.imageUrl.empty() ? sqlite3_bind_null(stmt, 7)
       : sqlite3_bind_text(stmt, 7, r.imageUrl.c_str(), -1, SQLITE_TRANSIENT);
-  r.httpUsername.empty() ? sqlite3_bind_null(stmt, 8)
-      : sqlite3_bind_text(stmt, 8, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
-  r.httpPassword.empty() ? sqlite3_bind_null(stmt, 9)
-      : sqlite3_bind_text(stmt, 9, r.httpPassword.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 10, r.createdAt.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 11, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
-  r.sshUsername.empty() ? sqlite3_bind_null(stmt, 12)
-      : sqlite3_bind_text(stmt, 12, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
-  r.sshPassword.empty() ? sqlite3_bind_null(stmt, 13)
-      : sqlite3_bind_text(stmt, 13, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 14, r.requireAccessJustification ? 1 : 0);
-  sqlite3_bind_int(stmt, 15, r.requireDualApproval ? 1 : 0);
-  sqlite3_bind_int(stmt, 16, r.enableCommandGuard ? 1 : 0);
-  sqlite3_bind_int(stmt, 17, r.adaptiveAccessPolicy ? 1 : 0);
-  sqlite3_bind_text(stmt, 18, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
+    r.imageData.empty() ? sqlite3_bind_null(stmt, 8)
+      : sqlite3_bind_text(stmt, 8, r.imageData.c_str(), -1, SQLITE_TRANSIENT);
+    r.httpUsername.empty() ? sqlite3_bind_null(stmt, 9)
+      : sqlite3_bind_text(stmt, 9, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
+    r.httpPassword.empty() ? sqlite3_bind_null(stmt, 10)
+      : sqlite3_bind_text(stmt, 10, r.httpPassword.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 11, r.createdAt.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 12, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+    r.sshUsername.empty() ? sqlite3_bind_null(stmt, 13)
+      : sqlite3_bind_text(stmt, 13, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
+    r.sshPassword.empty() ? sqlite3_bind_null(stmt, 14)
+      : sqlite3_bind_text(stmt, 14, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 15, r.requireAccessJustification ? 1 : 0);
+    sqlite3_bind_int(stmt, 16, r.requireDualApproval ? 1 : 0);
+    sqlite3_bind_int(stmt, 17, r.enableCommandGuard ? 1 : 0);
+    sqlite3_bind_int(stmt, 18, r.adaptiveAccessPolicy ? 1 : 0);
+    sqlite3_bind_text(stmt, 19, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite resource insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -701,9 +707,9 @@ bool AppContext::insert_resource(const Resource &r) {
 bool AppContext::update_resource_db(const Resource &r) {
   if (!sqlite.db) return true;
   std::lock_guard<std::mutex> lock(sqlite.mutex);
-  const char *sql =
+    const char *sql =
       "UPDATE resources SET name=?, target=?, protocol=?, port=?, "
-      "description=?, image_url=?, http_username=?, http_password=?, "
+      "description=?, image_url=?, image_data=?, http_username=?, http_password=?, "
       "updated_at=?, ssh_username=?, ssh_password=?, "
       "require_access_justification=?, require_dual_approval=?, "
       "enable_command_guard=?, adaptive_access_policy=?, risk_level=? "
@@ -717,25 +723,27 @@ bool AppContext::update_resource_db(const Resource &r) {
   sqlite3_bind_text(stmt, 2, r.target.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 3, r.protocol.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int(stmt, 4, r.port);
-  r.description.empty() ? sqlite3_bind_null(stmt, 5)
+    r.description.empty() ? sqlite3_bind_null(stmt, 5)
       : sqlite3_bind_text(stmt, 5, r.description.c_str(), -1, SQLITE_TRANSIENT);
-  r.imageUrl.empty() ? sqlite3_bind_null(stmt, 6)
+    r.imageUrl.empty() ? sqlite3_bind_null(stmt, 6)
       : sqlite3_bind_text(stmt, 6, r.imageUrl.c_str(), -1, SQLITE_TRANSIENT);
-  r.httpUsername.empty() ? sqlite3_bind_null(stmt, 7)
-      : sqlite3_bind_text(stmt, 7, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
-  r.httpPassword.empty() ? sqlite3_bind_null(stmt, 8)
-      : sqlite3_bind_text(stmt, 8, r.httpPassword.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 9, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
-  r.sshUsername.empty() ? sqlite3_bind_null(stmt, 10)
-      : sqlite3_bind_text(stmt, 10, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
-  r.sshPassword.empty() ? sqlite3_bind_null(stmt, 11)
-      : sqlite3_bind_text(stmt, 11, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 12, r.requireAccessJustification ? 1 : 0);
-  sqlite3_bind_int(stmt, 13, r.requireDualApproval ? 1 : 0);
-  sqlite3_bind_int(stmt, 14, r.enableCommandGuard ? 1 : 0);
-  sqlite3_bind_int(stmt, 15, r.adaptiveAccessPolicy ? 1 : 0);
-  sqlite3_bind_text(stmt, 16, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 17, r.id);
+    r.imageData.empty() ? sqlite3_bind_null(stmt, 7)
+      : sqlite3_bind_text(stmt, 7, r.imageData.c_str(), -1, SQLITE_TRANSIENT);
+    r.httpUsername.empty() ? sqlite3_bind_null(stmt, 8)
+      : sqlite3_bind_text(stmt, 8, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
+    r.httpPassword.empty() ? sqlite3_bind_null(stmt, 9)
+      : sqlite3_bind_text(stmt, 9, r.httpPassword.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+    r.sshUsername.empty() ? sqlite3_bind_null(stmt, 11)
+      : sqlite3_bind_text(stmt, 11, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
+    r.sshPassword.empty() ? sqlite3_bind_null(stmt, 12)
+      : sqlite3_bind_text(stmt, 12, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 13, r.requireAccessJustification ? 1 : 0);
+    sqlite3_bind_int(stmt, 14, r.requireDualApproval ? 1 : 0);
+    sqlite3_bind_int(stmt, 15, r.enableCommandGuard ? 1 : 0);
+    sqlite3_bind_int(stmt, 16, r.adaptiveAccessPolicy ? 1 : 0);
+    sqlite3_bind_text(stmt, 17, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 18, r.id);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite resource update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);

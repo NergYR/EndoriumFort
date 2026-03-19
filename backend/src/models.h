@@ -26,6 +26,7 @@ struct Resource {
   int port = 22;
   std::string description;
   std::string imageUrl;
+  std::string imageData; // base64
   std::string httpUsername;
   std::string httpPassword;
   std::string sshUsername;

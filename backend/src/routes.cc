@@ -747,6 +747,8 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
         if (body.has("description")) description = body["description"].s();
         std::string image_url;
         if (body.has("imageUrl")) image_url = body["imageUrl"].s();
+        std::string image_data;
+        if (body.has("imageData")) image_data = body["imageData"].s();
         std::string http_username;
         if (body.has("httpUsername")) http_username = body["httpUsername"].s();
         std::string http_password;
@@ -806,6 +808,7 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
         resource.port = port;
         resource.description = description;
         resource.imageUrl = image_url;
+        resource.imageData = image_data;
         resource.httpUsername = http_username;
         resource.httpPassword = http_password;
         resource.sshUsername = ssh_username;
@@ -859,6 +862,8 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
             if (body.has("description")) description = body["description"].s();
             std::string image_url;
             if (body.has("imageUrl")) image_url = body["imageUrl"].s();
+            std::string image_data;
+            if (body.has("imageData")) image_data = body["imageData"].s();
             std::string http_username;
             if (body.has("httpUsername")) http_username = body["httpUsername"].s();
             std::string http_password;
@@ -919,6 +924,7 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
               resource.port = port;
               resource.description = description;
               resource.imageUrl = image_url;
+              resource.imageData = image_data;
               resource.httpUsername = http_username;
               resource.httpPassword = http_password;
               resource.sshUsername = ssh_username;

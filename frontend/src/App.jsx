@@ -263,6 +263,7 @@ export default function App() {
     port: '22',
     description: '',
     imageUrl: '',
+    imageData: '', // base64 locale
     httpUsername: '',
     httpPassword: '',
     sshUsername: '',
@@ -2272,6 +2273,7 @@ export default function App() {
       port: Number.parseInt(resourceForm.port, 10) || 22,
       description: resourceForm.description.trim(),
       imageUrl: resourceForm.imageUrl.trim(),
+      imageData: resourceForm.imageData || '',
       httpUsername: resourceForm.httpUsername.trim(),
       httpPassword: resourceForm.httpPassword,
       sshUsername: resourceForm.sshUsername.trim(),
@@ -2327,6 +2329,7 @@ export default function App() {
       port: String(resource.port || 22),
       description: resource.description || '',
       imageUrl: resource.imageUrl || '',
+      imageData: resource.imageData || '',
       httpUsername: resource.httpUsername || '',
       httpPassword: '',
       sshUsername: resource.sshUsername || '',
@@ -3277,7 +3280,30 @@ export default function App() {
                   value={resourceForm.imageUrl}
                   onChange={onResourceFieldChange}
                   placeholder="https://..."
+                  disabled={!!resourceForm.imageData}
                 />
+              </label>
+              <label className="full">
+                ou upload d'une image
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={e => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    const reader = new window.FileReader();
+                    reader.onload = (ev) => {
+                      setResourceForm(f => ({ ...f, imageData: ev.target.result, imageUrl: '' }));
+                    };
+                    reader.readAsDataURL(file);
+                  }}
+                />
+                {resourceForm.imageData && (
+                  <div style={{marginTop:4}}>
+                    <img src={resourceForm.imageData} alt="aperçu" style={{maxWidth:64,maxHeight:64,borderRadius:8}} />
+                    <button type="button" onClick={()=>setResourceForm(f=>({...f,imageData:''}))} style={{marginLeft:8}}>Supprimer</button>
+                  </div>
+                )}
               </label>
               {(resourceForm.protocol === 'http' || resourceForm.protocol === 'https') && (
                 <>
@@ -4450,12 +4476,14 @@ export default function App() {
                 <div
                   className="resource-thumb"
                   style={
-                    resource.imageUrl
-                      ? { backgroundImage: `url(${resource.imageUrl})` }
-                      : undefined
+                    resource.imageData
+                      ? { backgroundImage: `url(${resource.imageData})` }
+                      : resource.imageUrl
+                        ? { backgroundImage: `url(${resource.imageUrl})` }
+                        : undefined
                   }
                 >
-                  {!resource.imageUrl && (
+                  {!(resource.imageData || resource.imageUrl) && (
                     <span className="resource-letter">
                       {resource.name ? resource.name[0] : 'R'}
                     </span>
