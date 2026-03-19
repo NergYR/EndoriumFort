@@ -1,6 +1,12 @@
 # Changelog
 
 ## v1.1.0-dev - 2026-03-11
+### Agent Tunnel UX (RDP/VNC)
+- Frontend now routes `rdp` and `vnc` resources through the same agent deep-link tunnel flow as `agent` resources, avoiding SSH-terminal startup attempts for non-SSH protocols.
+- Added protocol-aware agent modal guidance: browser auto-redirect remains for web-style usage, while RDP/VNC now show direct local endpoint instructions for native clients.
+- Added deep-link `no-browser=1` support in the Go agent to keep the tunnel running without auto-opening a browser (useful for RDP/SSH/VNC workflows).
+- Added unit test coverage for deep-link `no-browser` flag parsing in `agent/main_test.go`.
+
 ### Agent Distribution & Packaging
 - Added native packaging scripts for the agent:
   - Linux `.deb` / `.rpm` (`agent/packaging/linux/build-packages.sh`)

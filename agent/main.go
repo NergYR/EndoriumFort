@@ -68,6 +68,7 @@ type DeepLinkConfig struct {
 	ResourceID  int
 	LocalPort   int
 	RedirectURL string
+	NoBrowser   bool
 	InsecureTLS bool
 	AllowHTTP   bool
 	Manage      bool
@@ -959,6 +960,7 @@ func parseDeepLink(rawURL string) (DeepLinkConfig, error) {
 	cfg.Manage = parseBoolString(queryFirst(query, "manage"))
 	cfg.TUI = parseBoolString(queryFirst(query, "tui"))
 	cfg.JSONLogs = parseBoolString(queryFirst(query, "log-json", "log_json"))
+	cfg.NoBrowser = parseBoolString(queryFirst(query, "no-browser", "no_browser", "nobrowser"))
 
 	if cfg.ServerURL == "" {
 		return cfg, fmt.Errorf("paramètre requis manquant: server")
@@ -1053,7 +1055,7 @@ func runDeepLink(cfg DeepLinkConfig) {
 	useJSONLogs = cfg.JSONLogs
 
 	binding := TunnelBinding{
-		Resource: Resource{ID: cfg.ResourceID, Name: fmt.Sprintf("resource-%d", cfg.ResourceID)},
+		Resource:  Resource{ID: cfg.ResourceID, Name: fmt.Sprintf("resource-%d", cfg.ResourceID)},
 		LocalPort: cfg.LocalPort,
 	}
 
@@ -1064,11 +1066,15 @@ func runDeepLink(cfg DeepLinkConfig) {
 	}()
 
 	if waitTunnelReady(cfg.LocalPort, 10*time.Second) {
-		targetURL := buildRedirectURL(cfg)
-		if err := openInDefaultBrowser(targetURL); err != nil {
-			logEvent("warn", "deeplink.browser.open.failed", map[string]interface{}{"url": targetURL, "error": err.Error()})
+		if cfg.NoBrowser {
+			logEvent("info", "deeplink.browser.skip", map[string]interface{}{"localPort": cfg.LocalPort, "resourceId": cfg.ResourceID})
 		} else {
-			logEvent("info", "deeplink.browser.opened", map[string]interface{}{"url": targetURL, "localPort": cfg.LocalPort, "resourceId": cfg.ResourceID})
+			targetURL := buildRedirectURL(cfg)
+			if err := openInDefaultBrowser(targetURL); err != nil {
+				logEvent("warn", "deeplink.browser.open.failed", map[string]interface{}{"url": targetURL, "error": err.Error()})
+			} else {
+				logEvent("info", "deeplink.browser.opened", map[string]interface{}{"url": targetURL, "localPort": cfg.LocalPort, "resourceId": cfg.ResourceID})
+			}
 		}
 	} else {
 		logEvent("warn", "deeplink.tunnel.not_ready", map[string]interface{}{"localPort": cfg.LocalPort, "resourceId": cfg.ResourceID})

@@ -313,7 +313,7 @@ You can alternatively bootstrap with one-time enrollment token:
 
 ### Agent Tunnel
 
-For transparent access to web applications (no URL rewriting):
+For transparent TCP access through the bastion (HTTP, SSH, RDP, VNC, and other TCP protocols):
 
 ```bash
 # Authenticate
@@ -352,6 +352,22 @@ For transparent access to web applications (no URL rewriting):
   --tunnel 3:8888 --log-json
 
 # Browse http://127.0.0.1:8888 — traffic tunneled through bastion
+```
+
+Quick protocol tests with the same tunnel primitive:
+
+```bash
+# SSH over agent tunnel (local 2222 -> remote 22)
+./agent/endoriumfort-agent connect \
+  --server http://bastion:8080 --token <your-token> \
+  --resource <ssh-resource-id> --local-port 2222
+ssh user@127.0.0.1 -p 2222
+
+# RDP over agent tunnel (local 3390 -> remote 3389)
+./agent/endoriumfort-agent connect \
+  --server http://bastion:8080 --token <your-token> \
+  --resource <rdp-resource-id> --local-port 3390
+# Then open your native RDP client to 127.0.0.1:3390
 ```
 
 Security note (agent tunnel hardening):
@@ -408,6 +424,7 @@ Supported query parameters:
 - `local-port` (optional, auto-allocated if omitted)
 - `token` (optional if already available in `EF_TOKEN` or `~/.endoriumfort_token`)
 - `redirect-url` (optional, defaults to `http://127.0.0.1:<local-port>`)
+- `no-browser=1` (optional, skip automatic browser opening; useful for RDP/SSH/VNC client flows)
 - `insecure=1` / `allow-http=1` for lab usage only
 
 Template placeholders in `redirect-url`:

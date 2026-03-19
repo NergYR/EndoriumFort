@@ -1861,6 +1861,11 @@ export default function App() {
     }
   };
 
+  const isAgentTunnelProtocol = (protocol) => {
+    const normalized = String(protocol || '').toLowerCase();
+    return normalized === 'agent' || normalized === 'rdp' || normalized === 'vnc';
+  };
+
   const resolveAgentInstallGuide = () => {
     const ua = String(navigator.userAgent || '').toLowerCase();
     if (ua.includes('windows')) {
@@ -1883,18 +1888,27 @@ export default function App() {
 
   const buildAgentLaunchPayload = (resource, localPort) => {
     const normalizedOrigin = String(window.location.origin || '').replace(/\/$/, '');
+    const resourceProtocol = String(resource?.protocol || '').toLowerCase();
+    const openInBrowser = resourceProtocol === 'agent' || resourceProtocol === 'http' || resourceProtocol === 'https';
+    const localEndpoint = `127.0.0.1:${localPort}`;
     const localUrl = `http://127.0.0.1:${localPort}`;
     const params = new URLSearchParams();
     params.set('server', normalizedOrigin);
     params.set('resource', String(resource.id));
     params.set('local-port', String(localPort));
-    params.set('redirect-url', localUrl);
+    if (openInBrowser) {
+      params.set('redirect-url', localUrl);
+    } else {
+      params.set('no-browser', '1');
+    }
     if (auth.token) {
       params.set('token', auth.token);
     }
 
     return {
       localUrl,
+      localEndpoint,
+      openInBrowser,
       installGuide: resolveAgentInstallGuide(),
       command: `endoriumfort-agent connect --server ${normalizedOrigin} --token ${auth.token} --resource ${resource.id} --local-port ${localPort}`,
       deepLink: `endoriumfort://connect?${params.toString()}`
@@ -1952,8 +1966,8 @@ export default function App() {
       return true;
     }
 
-    // Handle agent resources — open agent launch modal with random port
-    if (resource.protocol === 'agent') {
+    // Handle protocols that should use local TCP tunnel through the agent
+    if (isAgentTunnelProtocol(resource.protocol)) {
       const randomPort = 10000 + Math.floor(Math.random() * 50000);
       const launchPayload = buildAgentLaunchPayload(resource, randomPort);
       setAgentModal({ resource, port: randomPort, copied: 'idle', linkCopied: 'idle', installCopied: 'idle', launchState: 'opening', ...launchPayload });
@@ -2025,7 +2039,7 @@ export default function App() {
 
   const onConnectResource = async (resource) => {
     const protocol = String(resource?.protocol || '').toLowerCase();
-    const sessionBackedProtocol = protocol !== 'http' && protocol !== 'https' && protocol !== 'agent';
+    const sessionBackedProtocol = protocol !== 'http' && protocol !== 'https' && !isAgentTunnelProtocol(protocol);
 
     if (resource.requireDualApproval && !canManagePlatform) {
       const existingPlaybook =
@@ -5297,7 +5311,11 @@ export default function App() {
               </div>
             </div>
             <div className="agent-modal-tip">
-              <p>💡 Une fois le tunnel actif, l'agent redirige automatiquement vers <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
+              {agentModal.openInBrowser ? (
+                <p>💡 Une fois le tunnel actif, l'agent redirige automatiquement vers <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
+              ) : (
+                <p>💡 Une fois le tunnel actif, connecte ton client {String(agentModal.resource?.protocol || '').toUpperCase()} sur <strong>{agentModal.localEndpoint}</strong>.</p>
+              )}
               {agentModal.launchState === 'opening' && (
                 <p className="muted">Ouverture de l'application agent en cours...</p>
               )}
