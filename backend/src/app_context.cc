@@ -391,10 +391,27 @@ void AppContext::init_database() {
   sqlite.exec("ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE users ADD COLUMN totp_secret TEXT;", err);
 
+  const std::string webauthn_schema =
+      "CREATE TABLE IF NOT EXISTS user_webauthn_credentials ("
+      "id INTEGER PRIMARY KEY,"
+      "user_id INTEGER NOT NULL,"
+      "credential_id TEXT NOT NULL UNIQUE,"
+      "public_key_spki TEXT NOT NULL,"
+      "sign_count INTEGER NOT NULL DEFAULT 0,"
+      "label TEXT,"
+      "transports_csv TEXT,"
+      "created_at TEXT NOT NULL,"
+      "last_used_at TEXT,"
+      "FOREIGN KEY (user_id) REFERENCES users(id)"
+      ");";
+  if (!sqlite.exec(webauthn_schema, err))
+    std::cerr << "SQLite user_webauthn_credentials schema failed: " << err << '\n';
+
   // Load data into memory
   load_sessions_from_db();
   load_resources_from_db();
   load_users_from_db();
+  load_webauthn_credentials_from_db();
   load_recordings_from_db();
   load_access_requests_from_db();
   load_ephemeral_credentials_from_db();
@@ -869,6 +886,15 @@ bool AppContext::update_user_db(const UserAccount &u) {
 bool AppContext::delete_user_db(int user_id) {
   if (!sqlite.db) return true;
   std::lock_guard<std::mutex> lock(sqlite.mutex);
+  sqlite3_stmt *cleanup_stmt = nullptr;
+  const char *cleanup_sql =
+      "DELETE FROM user_webauthn_credentials WHERE user_id = ?";
+  if (sqlite3_prepare_v2(sqlite.db, cleanup_sql, -1, &cleanup_stmt, nullptr) ==
+      SQLITE_OK) {
+    sqlite3_bind_int(cleanup_stmt, 1, user_id);
+    sqlite3_step(cleanup_stmt);
+  }
+  sqlite3_finalize(cleanup_stmt);
   const char *sql = "DELETE FROM users WHERE id = ?";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -990,6 +1016,267 @@ bool AppContext::update_user_totp(int user_id, bool enabled,
               << '\n';
   sqlite3_finalize(stmt);
   return ok;
+}
+
+void AppContext::load_webauthn_credentials_from_db() {
+  if (!sqlite.db) return;
+  std::lock_guard<std::mutex> db_lock(sqlite.mutex);
+  const char *sql =
+      "SELECT id, user_id, credential_id, public_key_spki, sign_count, label, "
+      "transports_csv, created_at, last_used_at "
+      "FROM user_webauthn_credentials";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite WebAuthn select failed: " << sqlite3_errmsg(sqlite.db)
+              << '\n';
+    return;
+  }
+  int max_id = 0;
+  std::lock_guard<std::mutex> webauthn_lock(webauthn_mutex);
+  std::lock_guard<std::mutex> user_lock(user_mutex);
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    WebAuthnCredential credential;
+    credential.id = sqlite3_column_int(stmt, 0);
+    credential.userId = sqlite3_column_int(stmt, 1);
+    credential.credentialId =
+        reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+    credential.publicKeySpki =
+        reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+    credential.signCount = sqlite3_column_int(stmt, 4);
+    if (auto value = sqlite3_column_text(stmt, 5))
+      credential.label = reinterpret_cast<const char *>(value);
+    if (auto value = sqlite3_column_text(stmt, 6))
+      credential.transportsCsv = reinterpret_cast<const char *>(value);
+    if (auto value = sqlite3_column_text(stmt, 7))
+      credential.createdAt = reinterpret_cast<const char *>(value);
+    if (auto value = sqlite3_column_text(stmt, 8))
+      credential.lastUsedAt = reinterpret_cast<const char *>(value);
+
+    webauthn_credentials[credential.id] = credential;
+    webauthn_credential_by_external_id[credential.credentialId] = credential.id;
+    auto user_it = users.find(credential.userId);
+    if (user_it != users.end()) {
+      user_it->second.webauthnCredentialCount += 1;
+    }
+    if (credential.id > max_id) max_id = credential.id;
+  }
+  sqlite3_finalize(stmt);
+  if (max_id > 0) next_webauthn_credential_id.store(max_id + 1);
+}
+
+bool AppContext::insert_webauthn_credential(const WebAuthnCredential &credential) {
+  {
+    std::lock_guard<std::mutex> webauthn_lock(webauthn_mutex);
+    if (webauthn_credential_by_external_id.count(credential.credentialId)) {
+      return false;
+    }
+  }
+  if (sqlite.db) {
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "INSERT INTO user_webauthn_credentials "
+        "(id, user_id, credential_id, public_key_spki, sign_count, label, "
+        "transports_csv, created_at, last_used_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite WebAuthn insert failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, credential.id);
+    sqlite3_bind_int(stmt, 2, credential.userId);
+    sqlite3_bind_text(stmt, 3, credential.credentialId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, credential.publicKeySpki.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 5, credential.signCount);
+    credential.label.empty()
+        ? sqlite3_bind_null(stmt, 6)
+        : sqlite3_bind_text(stmt, 6, credential.label.c_str(), -1, SQLITE_TRANSIENT);
+    credential.transportsCsv.empty()
+        ? sqlite3_bind_null(stmt, 7)
+        : sqlite3_bind_text(stmt, 7, credential.transportsCsv.c_str(), -1,
+                            SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, credential.createdAt.c_str(), -1, SQLITE_TRANSIENT);
+    credential.lastUsedAt.empty()
+        ? sqlite3_bind_null(stmt, 9)
+        : sqlite3_bind_text(stmt, 9, credential.lastUsedAt.c_str(), -1,
+                            SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok)
+      std::cerr << "SQLite WebAuthn insert failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+    sqlite3_finalize(stmt);
+    if (!ok) return false;
+  }
+
+  std::lock_guard<std::mutex> webauthn_lock(webauthn_mutex);
+  std::lock_guard<std::mutex> user_lock(user_mutex);
+  webauthn_credentials[credential.id] = credential;
+  webauthn_credential_by_external_id[credential.credentialId] = credential.id;
+  auto user_it = users.find(credential.userId);
+  if (user_it != users.end()) {
+    user_it->second.webauthnCredentialCount += 1;
+  }
+  return true;
+}
+
+bool AppContext::update_webauthn_credential(const WebAuthnCredential &credential) {
+  if (sqlite.db) {
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "UPDATE user_webauthn_credentials SET sign_count=?, label=?, "
+        "transports_csv=?, last_used_at=? WHERE id=?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite WebAuthn update failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, credential.signCount);
+    credential.label.empty()
+        ? sqlite3_bind_null(stmt, 2)
+        : sqlite3_bind_text(stmt, 2, credential.label.c_str(), -1, SQLITE_TRANSIENT);
+    credential.transportsCsv.empty()
+        ? sqlite3_bind_null(stmt, 3)
+        : sqlite3_bind_text(stmt, 3, credential.transportsCsv.c_str(), -1,
+                            SQLITE_TRANSIENT);
+    credential.lastUsedAt.empty()
+        ? sqlite3_bind_null(stmt, 4)
+        : sqlite3_bind_text(stmt, 4, credential.lastUsedAt.c_str(), -1,
+                            SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 5, credential.id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok)
+      std::cerr << "SQLite WebAuthn update failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+    sqlite3_finalize(stmt);
+    if (!ok) return false;
+  }
+
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  auto it = webauthn_credentials.find(credential.id);
+  if (it == webauthn_credentials.end()) return false;
+  it->second = credential;
+  return true;
+}
+
+bool AppContext::delete_webauthn_credential(int credential_id) {
+  WebAuthnCredential existing;
+  {
+    std::lock_guard<std::mutex> lock(webauthn_mutex);
+    auto it = webauthn_credentials.find(credential_id);
+    if (it == webauthn_credentials.end()) return false;
+    existing = it->second;
+  }
+
+  if (sqlite.db) {
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql = "DELETE FROM user_webauthn_credentials WHERE id=?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite WebAuthn delete failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, credential_id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok)
+      std::cerr << "SQLite WebAuthn delete failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+    sqlite3_finalize(stmt);
+    if (!ok) return false;
+  }
+
+  std::lock_guard<std::mutex> webauthn_lock(webauthn_mutex);
+  std::lock_guard<std::mutex> user_lock(user_mutex);
+  webauthn_credentials.erase(credential_id);
+  webauthn_credential_by_external_id.erase(existing.credentialId);
+  auto user_it = users.find(existing.userId);
+  if (user_it != users.end() && user_it->second.webauthnCredentialCount > 0) {
+    user_it->second.webauthnCredentialCount -= 1;
+  }
+  return true;
+}
+
+std::vector<WebAuthnCredential> AppContext::get_user_webauthn_credentials(
+    int user_id) {
+  std::vector<WebAuthnCredential> result;
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  for (const auto &entry : webauthn_credentials) {
+    if (entry.second.userId == user_id) {
+      result.push_back(entry.second);
+    }
+  }
+  std::sort(result.begin(), result.end(),
+            [](const WebAuthnCredential &a, const WebAuthnCredential &b) {
+              return a.createdAt < b.createdAt;
+            });
+  return result;
+}
+
+std::optional<WebAuthnCredential>
+AppContext::find_webauthn_credential_by_external_id(
+    const std::string &credential_id) {
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  auto map_it = webauthn_credential_by_external_id.find(credential_id);
+  if (map_it == webauthn_credential_by_external_id.end()) return std::nullopt;
+  auto cred_it = webauthn_credentials.find(map_it->second);
+  if (cred_it == webauthn_credentials.end()) return std::nullopt;
+  return cred_it->second;
+}
+
+bool AppContext::user_has_webauthn(int user_id) {
+  std::lock_guard<std::mutex> lock(user_mutex);
+  auto it = users.find(user_id);
+  return it != users.end() && it->second.webauthnCredentialCount > 0;
+}
+
+WebAuthnChallenge AppContext::create_webauthn_challenge(
+    int user_id, const std::string &username, const std::string &purpose,
+    const std::string &rp_id, const std::string &origin) {
+  cleanup_expired_webauthn_challenges();
+  WebAuthnChallenge challenge;
+  challenge.requestId = generate_token();
+  challenge.userId = user_id;
+  challenge.username = username;
+  challenge.purpose = purpose;
+  challenge.challenge = generate_token();
+  challenge.rpId = rp_id;
+  challenge.origin = origin;
+  challenge.createdAt = now_utc();
+  challenge.expiresAtEpoch = now_epoch_seconds() + webauthn_challenge_ttl_seconds;
+  challenge.expiresAt = utc_from_epoch_seconds(challenge.expiresAtEpoch);
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  webauthn_challenges[challenge.requestId] = challenge;
+  return challenge;
+}
+
+std::optional<WebAuthnChallenge> AppContext::consume_webauthn_challenge(
+    const std::string &request_id, int user_id, const std::string &purpose) {
+  cleanup_expired_webauthn_challenges();
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  auto it = webauthn_challenges.find(request_id);
+  if (it == webauthn_challenges.end()) return std::nullopt;
+  if (it->second.userId != user_id || it->second.purpose != purpose ||
+      it->second.expiresAtEpoch < now_epoch_seconds()) {
+    webauthn_challenges.erase(it);
+    return std::nullopt;
+  }
+  auto challenge = it->second;
+  webauthn_challenges.erase(it);
+  return challenge;
+}
+
+void AppContext::cleanup_expired_webauthn_challenges() {
+  const int64_t now = now_epoch_seconds();
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  for (auto it = webauthn_challenges.begin(); it != webauthn_challenges.end();) {
+    if (it->second.expiresAtEpoch < now) {
+      it = webauthn_challenges.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 // ── Password management ────────────────────────────────────────────────

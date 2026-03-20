@@ -58,6 +58,19 @@ struct RelayCertificate {
   bool revoked = false;
 };
 
+struct WebAuthnChallenge {
+  std::string requestId;
+  int userId = 0;
+  std::string username;
+  std::string purpose;
+  std::string challenge;
+  std::string rpId;
+  std::string origin;
+  std::string createdAt;
+  std::string expiresAt;
+  int64_t expiresAtEpoch = 0;
+};
+
 struct AppContext {
   // ── Session state ──
   std::mutex session_mutex;
@@ -78,6 +91,16 @@ struct AppContext {
   std::mutex user_mutex;
   std::unordered_map<int, UserAccount> users;
   std::atomic<int> next_user_id{1};
+
+  // ── WebAuthn / passkeys ──
+  std::mutex webauthn_mutex;
+  std::unordered_map<int, WebAuthnCredential> webauthn_credentials;
+  std::unordered_map<std::string, int> webauthn_credential_by_external_id;
+  std::unordered_map<std::string, WebAuthnChallenge> webauthn_challenges;
+  std::atomic<int> next_webauthn_credential_id{1};
+  int webauthn_challenge_ttl_seconds = 180;
+  std::string webauthn_rp_id_override;
+  std::string webauthn_origin_override;
 
   // ── Audit state ──
   std::mutex audit_mutex;
@@ -256,6 +279,22 @@ struct AppContext {
 
   // ── 2FA / TOTP ──
   bool update_user_totp(int user_id, bool enabled, const std::string &secret);
+  void load_webauthn_credentials_from_db();
+  bool insert_webauthn_credential(const WebAuthnCredential &credential);
+  bool update_webauthn_credential(const WebAuthnCredential &credential);
+  bool delete_webauthn_credential(int credential_id);
+  std::vector<WebAuthnCredential> get_user_webauthn_credentials(int user_id);
+  std::optional<WebAuthnCredential> find_webauthn_credential_by_external_id(
+      const std::string &credential_id);
+  bool user_has_webauthn(int user_id);
+  WebAuthnChallenge create_webauthn_challenge(int user_id,
+                                              const std::string &username,
+                                              const std::string &purpose,
+                                              const std::string &rp_id,
+                                              const std::string &origin);
+  std::optional<WebAuthnChallenge> consume_webauthn_challenge(
+      const std::string &request_id, int user_id, const std::string &purpose);
+  void cleanup_expired_webauthn_challenges();
 
   // ── Password management ──
   bool update_user_password_hash(int user_id, const std::string &hash);

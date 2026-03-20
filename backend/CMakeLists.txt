@@ -25,6 +25,7 @@ set(ASIO_INCLUDE_DIR "${asio_SOURCE_DIR}/asio/include" CACHE PATH "" FORCE)
 FetchContent_MakeAvailable(crow)
 
 find_package(SQLite3 REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_package(LibSSH2 QUIET)
 if (NOT LibSSH2_FOUND)
   find_package(PkgConfig QUIET)
@@ -71,7 +72,7 @@ target_compile_definitions(endoriumfort_backend
   PRIVATE ASIO_STANDALONE
 )
 
-target_link_libraries(endoriumfort_backend PRIVATE SQLite::SQLite3)
+target_link_libraries(endoriumfort_backend PRIVATE SQLite::SQLite3 OpenSSL::Crypto)
 
 if (LibSSH2_FOUND)
   target_link_libraries(endoriumfort_backend PRIVATE LibSSH2::LibSSH2)

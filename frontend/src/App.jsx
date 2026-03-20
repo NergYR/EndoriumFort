@@ -53,7 +53,10 @@ import {
   createRelayCertificate,
   assignRelayToResource,
   clearRelayForResource,
-  fetchRelayResolution
+  fetchRelayResolution,
+  beginWebAuthnRegistration,
+  verifyWebAuthnRegistration,
+  deleteWebAuthnCredential
 } from './api.js';
 
 const ROLE_BLUEPRINTS = [
@@ -107,6 +110,102 @@ const describeResourcePolicy = (resource) => {
   if (resource?.enableCommandGuard) items.push('SSH guard');
   if (riskLevel === 'high' || riskLevel === 'critical') items.push('MFA-sensitive');
   return items;
+};
+
+const isWebAuthnSupported = () =>
+  typeof window !== 'undefined' &&
+  typeof window.PublicKeyCredential !== 'undefined' &&
+  typeof navigator !== 'undefined' &&
+  !!navigator.credentials?.create &&
+  !!navigator.credentials?.get;
+
+const decodeBase64Url = (value) => {
+  const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
+  const binary = window.atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+};
+
+const encodeBase64Url = (value) => {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value || []);
+  let binary = '';
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return window.btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+};
+
+const serializeAuthenticatorTransports = (response) => {
+  if (!response || typeof response.getTransports !== 'function') return [];
+  try {
+    const transports = response.getTransports();
+    return Array.isArray(transports) ? transports : [];
+  } catch (_) {
+    return [];
+  }
+};
+
+const createBrowserPasskey = async (options) => {
+  if (!isWebAuthnSupported()) {
+    throw new Error('WebAuthn is not available in this browser.');
+  }
+  const publicKey = {
+    ...options.publicKey,
+    challenge: decodeBase64Url(options.publicKey.challenge),
+    user: {
+      ...options.publicKey.user,
+      id: decodeBase64Url(options.publicKey.user.id)
+    },
+    excludeCredentials: (options.publicKey.excludeCredentials || []).map((item) => ({
+      ...item,
+      id: decodeBase64Url(item.id)
+    }))
+  };
+  const credential = await navigator.credentials.create({ publicKey });
+  if (!credential || !credential.response || typeof credential.response.getPublicKey !== 'function') {
+    throw new Error('This browser did not return a usable WebAuthn public key.');
+  }
+  const publicKeyBuffer = credential.response.getPublicKey();
+  const authenticatorData = credential.response.getAuthenticatorData?.();
+  if (!publicKeyBuffer || !authenticatorData) {
+    throw new Error('Unable to extract WebAuthn registration data from this browser.');
+  }
+  return {
+    credentialId: credential.id,
+    publicKey: encodeBase64Url(new Uint8Array(publicKeyBuffer)),
+    algorithm: credential.response.getPublicKeyAlgorithm?.() || 0,
+    authenticatorData: encodeBase64Url(new Uint8Array(authenticatorData)),
+    clientDataJSON: encodeBase64Url(new Uint8Array(credential.response.clientDataJSON)),
+    transports: serializeAuthenticatorTransports(credential.response)
+  };
+};
+
+const getBrowserPasskeyAssertion = async (options) => {
+  if (!isWebAuthnSupported()) {
+    throw new Error('WebAuthn is not available in this browser.');
+  }
+  const publicKey = {
+    ...options,
+    challenge: decodeBase64Url(options.challenge),
+    allowCredentials: (options.allowCredentials || []).map((item) => ({
+      ...item,
+      id: decodeBase64Url(item.id)
+    }))
+  };
+  const credential = await navigator.credentials.get({ publicKey });
+  if (!credential || !credential.response) {
+    throw new Error('No passkey assertion was returned by the browser.');
+  }
+  return {
+    credentialId: credential.id,
+    authenticatorData: encodeBase64Url(new Uint8Array(credential.response.authenticatorData)),
+    clientDataJSON: encodeBase64Url(new Uint8Array(credential.response.clientDataJSON)),
+    signature: encodeBase64Url(new Uint8Array(credential.response.signature))
+  };
 };
 
 const CAPABILITY_PERMISSION_MAP = {
@@ -373,6 +472,7 @@ export default function App() {
   const [relayAssignOnlineOnly, setRelayAssignOnlineOnly] = useState(true);
   // 2FA state
   const [twoFARequired, setTwoFARequired] = useState(false);
+  const [availableMfaMethods, setAvailableMfaMethods] = useState([]);
   const [totpCode, setTotpCode] = useState('');
   const [totpEnabled, setTotpEnabled] = useState(false);
   const [totpSetupData, setTotpSetupData] = useState(null);
@@ -381,6 +481,11 @@ export default function App() {
   const [totpDisableCode, setTotpDisableCode] = useState('');
   const [totpCopyStatus, setTotpCopyStatus] = useState('');
   const [totpQrDataUrl, setTotpQrDataUrl] = useState('');
+  const [webauthnEnabled, setWebauthnEnabled] = useState(false);
+  const [webauthnCredentials, setWebauthnCredentials] = useState([]);
+  const [webauthnLoginOptions, setWebauthnLoginOptions] = useState(null);
+  const [webauthnBusy, setWebauthnBusy] = useState(false);
+  const [webauthnLabel, setWebauthnLabel] = useState('');
   // Recordings state
   const [recordings, setRecordings] = useState([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
@@ -456,7 +561,8 @@ export default function App() {
     required: false,
     passwordChangeRequired: false,
     mfaSetupRequired: false,
-    totpEnabled: false
+    totpEnabled: false,
+    webauthnEnabled: false
   });
   // Token expiry
   const [tokenExpiresAt, setTokenExpiresAt] = useState('');
@@ -625,8 +731,13 @@ export default function App() {
         required: false,
         passwordChangeRequired: false,
         mfaSetupRequired: false,
-        totpEnabled: false
+        totpEnabled: false,
+        webauthnEnabled: false
       });
+      setWebauthnEnabled(false);
+      setWebauthnCredentials([]);
+      setWebauthnLoginOptions(null);
+      setAvailableMfaMethods([]);
       setAuthToken('');
       navigate('/login');
     };
@@ -1352,14 +1463,18 @@ export default function App() {
       });
 
       // Check if 2FA is required
-      if (payload.status === '2fa_required') {
+      if (payload.status === 'mfa_required' || payload.status === '2fa_required') {
         setTwoFARequired(true);
         setTotpCode('');
+        setAvailableMfaMethods(Array.isArray(payload.mfaMethods) ? payload.mfaMethods : (payload.totpEnabled ? ['totp'] : []));
+        setWebauthnLoginOptions(payload.webauthn || null);
         setAuthError('');
         return;
       }
 
       setTwoFARequired(false);
+      setAvailableMfaMethods([]);
+      setWebauthnLoginOptions(null);
       setTotpCode('');
       const bootstrap = payload.bootstrap || {};
       setAuth((prev) => ({
@@ -1372,11 +1487,13 @@ export default function App() {
       }));
       setAuthToken(payload.token);
       setTotpEnabled(!!payload.totpEnabled);
+      setWebauthnEnabled(!!payload.webauthnEnabled);
       setBootstrapState({
         required: !!bootstrap.required,
         passwordChangeRequired: !!bootstrap.passwordChangeRequired,
         mfaSetupRequired: !!bootstrap.mfaSetupRequired,
-        totpEnabled: !!payload.totpEnabled
+        totpEnabled: !!payload.totpEnabled,
+        webauthnEnabled: !!payload.webauthnEnabled
       });
       setChangePwCurrent(bootstrap.passwordChangeRequired ? auth.password : '');
       setTotpSetupData(null);
@@ -1398,6 +1515,66 @@ export default function App() {
     }
   };
 
+  const onLoginWithPasskey = async () => {
+    if (!webauthnLoginOptions) {
+      setAuthError('No passkey challenge is available for this login.');
+      return;
+    }
+    setWebauthnBusy(true);
+    setAuthError('');
+    try {
+      const assertion = await getBrowserPasskeyAssertion(webauthnLoginOptions);
+      const payload = await login({
+        user: auth.user,
+        password: auth.password,
+        webauthnRequestId: webauthnLoginOptions.requestId,
+        webauthnCredentialId: assertion.credentialId,
+        webauthnAuthenticatorData: assertion.authenticatorData,
+        webauthnClientDataJSON: assertion.clientDataJSON,
+        webauthnSignature: assertion.signature
+      });
+      if (payload.status === 'mfa_required') {
+        setWebauthnLoginOptions(payload.webauthn || null);
+        throw new Error(payload.message || 'Passkey verification is still required.');
+      }
+      const bootstrap = payload.bootstrap || {};
+      setTwoFARequired(false);
+      setAvailableMfaMethods([]);
+      setWebauthnLoginOptions(null);
+      setTotpCode('');
+      setAuth((prev) => ({
+        ...prev,
+        token: payload.token,
+        role: normalizeRole(payload.role),
+        user: payload.user,
+        permissions: Array.isArray(payload.permissions) ? payload.permissions : [],
+        password: ''
+      }));
+      setAuthToken(payload.token);
+      setTotpEnabled(!!payload.totpEnabled);
+      setWebauthnEnabled(!!payload.webauthnEnabled);
+      setBootstrapState({
+        required: !!bootstrap.required,
+        passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+        mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+        totpEnabled: !!payload.totpEnabled,
+        webauthnEnabled: !!payload.webauthnEnabled
+      });
+      setTokenExpiresAt(payload.expiresAt || '');
+      localStorage.setItem('endoriumfort_auth', JSON.stringify({
+        token: payload.token,
+        user: payload.user,
+        role: normalizeRole(payload.role),
+        permissions: Array.isArray(payload.permissions) ? payload.permissions : []
+      }));
+      navigate('/');
+    } catch (error) {
+      setAuthError(error.message || 'Passkey sign-in failed');
+    } finally {
+      setWebauthnBusy(false);
+    }
+  };
+
   const onLogout = async () => {
     try { await logout(); } catch (_) {}
     setAuth((prev) => ({ ...prev, token: '', password: '', permissions: [] }));
@@ -1407,8 +1584,13 @@ export default function App() {
       required: false,
       passwordChangeRequired: false,
       mfaSetupRequired: false,
-      totpEnabled: false
+      totpEnabled: false,
+      webauthnEnabled: false
     });
+    setWebauthnEnabled(false);
+    setWebauthnCredentials([]);
+    setWebauthnLoginOptions(null);
+    setAvailableMfaMethods([]);
     setTotpSetupData(null);
     setTotpQrDataUrl('');
     setTotpCopyStatus('');
@@ -2603,6 +2785,7 @@ export default function App() {
     try {
       const data = await verify2FA(totpSetupCode);
       setTotpEnabled(true);
+      setWebauthnEnabled(!!data.webauthnEnabled);
       setTotpSetupData(null);
       setTotpQrDataUrl('');
       setTotpSetupCode('');
@@ -2613,7 +2796,8 @@ export default function App() {
         required: !!bootstrap.required,
         passwordChangeRequired: !!bootstrap.passwordChangeRequired,
         mfaSetupRequired: !!bootstrap.mfaSetupRequired,
-        totpEnabled: true
+        totpEnabled: true,
+        webauthnEnabled: !!data.webauthnEnabled
       });
     } catch (error) {
       setTotpError(error.message || 'Invalid code');
@@ -2623,10 +2807,17 @@ export default function App() {
   const onDisable2FA = async () => {
     setTotpError('');
     try {
-      await disable2FA(totpDisableCode);
+      const data = await disable2FA(totpDisableCode);
       setTotpEnabled(false);
+      setWebauthnEnabled(!!data.webauthnEnabled);
       setTotpDisableCode('');
       setTotpError('');
+      setBootstrapState((prev) => ({
+        ...prev,
+        mfaSetupRequired: !data.webauthnEnabled,
+        totpEnabled: false,
+        webauthnEnabled: !!data.webauthnEnabled
+      }));
     } catch (error) {
       setTotpError(error.message || 'Invalid code');
     }
@@ -2636,7 +2827,13 @@ export default function App() {
     try {
       const data = await get2FAStatus();
       setTotpEnabled(!!data.totpEnabled);
-      setBootstrapState((prev) => ({ ...prev, totpEnabled: !!data.totpEnabled }));
+      setWebauthnEnabled(!!data.webauthnEnabled);
+      setWebauthnCredentials(Array.isArray(data.credentials) ? data.credentials : []);
+      setBootstrapState((prev) => ({
+        ...prev,
+        totpEnabled: !!data.totpEnabled,
+        webauthnEnabled: !!data.webauthnEnabled
+      }));
     } catch (_) {}
   };
 
@@ -2653,14 +2850,73 @@ export default function App() {
     }
   };
 
+  const onRegisterPasskey = async (label = '') => {
+    setTotpError('');
+    setWebauthnBusy(true);
+    try {
+      const options = await beginWebAuthnRegistration({ label });
+      const registration = await createBrowserPasskey(options);
+      const data = await verifyWebAuthnRegistration({
+        requestId: options.requestId,
+        label,
+        ...registration
+      });
+      setWebauthnEnabled(!!data.webauthnEnabled);
+      setTotpEnabled(!!data.totpEnabled);
+      await onLoad2FAStatus();
+      const bootstrap = data.bootstrap || {};
+      setBootstrapState({
+        required: !!bootstrap.required,
+        passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+        mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+        totpEnabled: !!data.totpEnabled,
+        webauthnEnabled: !!data.webauthnEnabled
+      });
+      setWebauthnLabel('');
+    } catch (error) {
+      const message = error.message || 'Failed to register passkey';
+      if (message.toLowerCase().includes('valid domain')) {
+        setTotpError(`${message} Current origin: ${window.location.origin}`);
+      } else {
+        setTotpError(message);
+      }
+    } finally {
+      setWebauthnBusy(false);
+    }
+  };
+
+  const onDeletePasskey = async (credentialId) => {
+    setTotpError('');
+    setWebauthnBusy(true);
+    try {
+      const data = await deleteWebAuthnCredential(credentialId);
+      setWebauthnEnabled(!!data.webauthnEnabled);
+      setTotpEnabled(!!data.totpEnabled);
+      setWebauthnCredentials(Array.isArray(data.credentials) ? data.credentials : []);
+      setBootstrapState((prev) => ({
+        ...prev,
+        mfaSetupRequired: !data.totpEnabled && !data.webauthnEnabled,
+        totpEnabled: !!data.totpEnabled,
+        webauthnEnabled: !!data.webauthnEnabled
+      }));
+    } catch (error) {
+      setTotpError(error.message || 'Failed to remove passkey');
+    } finally {
+      setWebauthnBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (!auth.token) {
       setBootstrapState({
         required: false,
         passwordChangeRequired: false,
         mfaSetupRequired: false,
-        totpEnabled: false
+        totpEnabled: false,
+        webauthnEnabled: false
       });
+      setWebauthnEnabled(false);
+      setWebauthnCredentials([]);
       return;
     }
     let active = true;
@@ -2672,7 +2928,8 @@ export default function App() {
           required: !!bootstrap.required,
           passwordChangeRequired: !!bootstrap.passwordChangeRequired,
           mfaSetupRequired: !!bootstrap.mfaSetupRequired,
-          totpEnabled: !!bootstrap.totpEnabled
+          totpEnabled: !!bootstrap.totpEnabled,
+          webauthnEnabled: !!bootstrap.webauthnEnabled
         });
       })
       .catch(() => {});
@@ -2958,14 +3215,16 @@ export default function App() {
         required: !!bootstrap.required,
         passwordChangeRequired: !!bootstrap.passwordChangeRequired,
         mfaSetupRequired: !!bootstrap.mfaSetupRequired,
-        totpEnabled
+        totpEnabled,
+        webauthnEnabled
       });
       if (!bootstrapRequired) {
         setBootstrapState({
           required: false,
           passwordChangeRequired: false,
           mfaSetupRequired: false,
-          totpEnabled
+          totpEnabled,
+          webauthnEnabled
         });
       }
     } catch (error) {
@@ -3111,13 +3370,17 @@ export default function App() {
       },
       {
         key: '2fa',
-        severity: totpEnabled ? 'ok' : 'warning',
+        severity: (totpEnabled || webauthnEnabled) ? 'ok' : 'warning',
         title: 'MFA posture',
-        value: totpEnabled ? 'enabled' : 'disabled',
-        hint: totpEnabled ? 'Your account is protected with TOTP.' : 'Enable TOTP to strengthen operator authentication.'
+        value: (totpEnabled || webauthnEnabled) ? 'enabled' : 'disabled',
+        hint: webauthnEnabled
+          ? 'Your account is protected with a passkey or hardware security key.'
+          : totpEnabled
+            ? 'Your account is protected with TOTP.'
+            : 'Enable TOTP or a passkey to strengthen operator authentication.'
       }
     ];
-  }, [securityAuditItems, activeSessions, totpEnabled]);
+  }, [securityAuditItems, activeSessions, totpEnabled, webauthnEnabled]);
 
   const filteredAuditItems = useMemo(() => {
     let items = auditItems;
@@ -3225,7 +3488,7 @@ export default function App() {
           <h3>Secure the default admin account</h3>
           <p className="muted">
             This first-run checkpoint is mandatory before using the platform. We need a private
-            admin password and a TOTP authenticator bound to the account.
+            admin password and at least one MFA factor bound to the account: TOTP or a passkey.
           </p>
           <div className="bootstrap-checklist">
             <div className={`bootstrap-step ${bootstrapState.passwordChangeRequired ? 'active' : 'done'}`}>
@@ -3233,7 +3496,7 @@ export default function App() {
               <span>{bootstrapState.passwordChangeRequired ? 'Required now' : 'Done'}</span>
             </div>
             <div className={`bootstrap-step ${!bootstrapState.passwordChangeRequired && bootstrapState.mfaSetupRequired ? 'active' : ''} ${!bootstrapState.mfaSetupRequired ? 'done' : ''}`}>
-              <strong>2. Enable MFA with TOTP</strong>
+              <strong>2. Enable MFA with TOTP or passkey</strong>
               <span>{bootstrapState.mfaSetupRequired ? 'Pending' : 'Done'}</span>
             </div>
           </div>
@@ -3283,16 +3546,33 @@ export default function App() {
               {!totpEnabled && !totpSetupData && (
                 <>
                   <p className="muted">
-                    Start TOTP enrollment with your authenticator app to finish admin hardening.
+                    Finish admin hardening with either a TOTP authenticator or a WebAuthn passkey
+                    such as a physical security key.
                   </p>
                   <div className="bootstrap-actions">
                     <button type="button" onClick={onSetup2FA}>Start MFA setup</button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => onRegisterPasskey('Admin security key')}
+                      disabled={webauthnBusy || !isWebAuthnSupported()}
+                    >
+                      {webauthnBusy ? 'Registering...' : 'Use passkey / security key'}
+                    </button>
                   </div>
+                  {!isWebAuthnSupported() && (
+                    <p className="muted">
+                      Passkeys require a compatible browser in a secure context (HTTPS or localhost).
+                    </p>
+                  )}
                 </>
               )}
               {totpSetupData && (
                 <div className="bootstrap-totp-panel">
-                  <p>Use the secret below in your authenticator app, or copy the full `otpauth://` enrollment URI.</p>
+                  <p>
+                    Use the secret below in your authenticator app or OATH-TOTP hardware token,
+                    or copy the full `otpauth://` enrollment URI for compatible devices.
+                  </p>
                   {totpQrDataUrl && (
                     <div className="bootstrap-qr-image-card">
                       <img src={totpQrDataUrl} alt="Local TOTP QR Code" width={220} height={220} />
@@ -3327,7 +3607,7 @@ export default function App() {
                   </div>
                 </div>
               )}
-              {totpEnabled && !bootstrapState.mfaSetupRequired && (
+              {(totpEnabled || webauthnEnabled) && !bootstrapState.mfaSetupRequired && (
                 <p className="success">MFA enabled. The admin account is now secured.</p>
               )}
             </div>
@@ -3375,19 +3655,38 @@ export default function App() {
             />
           </label>
           {twoFARequired && (
-            <label>
-              Authenticator Code (6 digits)
-              <input
-                type="text"
-                inputMode="numeric"
-                maxLength={6}
-                value={totpCode}
-                onChange={(e) => setTotpCode(e.target.value)}
-                placeholder="123456"
-                autoFocus
-                style={{ letterSpacing: '0.3em', textAlign: 'center', fontSize: '1.2em' }}
-              />
-            </label>
+            <div className="login-mfa-block">
+              {availableMfaMethods.includes('totp') && (
+                <label>
+                  Authenticator Code (6 digits)
+                  <input
+                    className="mfa-code-input login-mfa-code"
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={totpCode}
+                    onChange={(e) => setTotpCode(e.target.value)}
+                    placeholder="123456"
+                    autoFocus
+                  />
+                </label>
+              )}
+              {availableMfaMethods.includes('webauthn') && (
+                <div className="mfa-panel-block login-passkey-card">
+                  <p className="muted">
+                    A registered passkey or physical security key can also complete this login.
+                  </p>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={onLoginWithPasskey}
+                    disabled={webauthnBusy || !webauthnLoginOptions}
+                  >
+                    {webauthnBusy ? 'Waiting for security key...' : 'Use passkey / security key'}
+                  </button>
+                </div>
+              )}
+            </div>
           )}
           <button type="submit">
             {twoFARequired ? 'Verify & Sign in' : 'Sign in'}
@@ -3396,7 +3695,13 @@ export default function App() {
             <button
               type="button"
               className="ghost"
-              onClick={() => { setTwoFARequired(false); setTotpCode(''); setAuthError(''); }}
+              onClick={() => {
+                setTwoFARequired(false);
+                setTotpCode('');
+                setAvailableMfaMethods([]);
+                setWebauthnLoginOptions(null);
+                setAuthError('');
+              }}
             >
               Back
             </button>
@@ -3671,52 +3976,60 @@ export default function App() {
                   </span>
                 </div>
                 <div className="policy-grid">
-                  <label className="policy-option">
+                  <label className={`policy-option ${resourceForm.requireAccessJustification ? 'selected' : ''}`}>
                     <input
                       name="requireAccessJustification"
                       type="checkbox"
                       checked={!!resourceForm.requireAccessJustification}
                       onChange={onResourceFieldChange}
                     />
-                    <div>
+                    <span className="policy-option-indicator" aria-hidden="true" />
+                    <div className="policy-option-copy">
                       <strong>Justification</strong>
                       <span>Prompt for access reason before connect.</span>
+                      <em>{resourceForm.requireAccessJustification ? 'Enabled' : 'Optional'}</em>
                     </div>
                   </label>
-                  <label className="policy-option">
+                  <label className={`policy-option ${resourceForm.requireDualApproval ? 'selected' : ''}`}>
                     <input
                       name="requireDualApproval"
                       type="checkbox"
                       checked={!!resourceForm.requireDualApproval}
                       onChange={onResourceFieldChange}
                     />
-                    <div>
+                    <span className="policy-option-indicator" aria-hidden="true" />
+                    <div className="policy-option-copy">
                       <strong>Dual approval</strong>
                       <span>Require review before session start.</span>
+                      <em>{resourceForm.requireDualApproval ? 'Required' : 'Disabled'}</em>
                     </div>
                   </label>
-                  <label className="policy-option">
+                  <label className={`policy-option ${resourceForm.enableCommandGuard ? 'selected' : ''}`}>
                     <input
                       name="enableCommandGuard"
                       type="checkbox"
                       checked={!!resourceForm.enableCommandGuard}
                       onChange={onResourceFieldChange}
                     />
-                    <div>
+                    <span className="policy-option-indicator" aria-hidden="true" />
+                    <div className="policy-option-copy">
                       <strong>SSH command guard</strong>
                       <span>Block dangerous commands server-side.</span>
+                      <em>{resourceForm.enableCommandGuard ? 'Protected' : 'Not enforced'}</em>
                     </div>
                   </label>
-                  <label className="policy-option">
+                  <label className={`policy-option ${resourceForm.adaptiveAccessPolicy ? 'selected' : ''}`}>
                     <input
                       name="adaptiveAccessPolicy"
                       type="checkbox"
                       checked={!!resourceForm.adaptiveAccessPolicy}
                       onChange={onResourceFieldChange}
                     />
-                    <div>
+                    <span className="policy-option-indicator" aria-hidden="true" />
+                    <div className="policy-option-copy">
                       <strong>Adaptive controls</strong>
                       <span>Raise requirements automatically based on risk.</span>
+                      <em>{resourceForm.adaptiveAccessPolicy ? 'Dynamic' : 'Static'}</em>
                     </div>
                   </label>
                 </div>
@@ -4201,7 +4514,7 @@ export default function App() {
                       )}
                       {user.role === 'admin' && (
                         <p className="muted">
-                          MFA {user.totpEnabled ? 'enabled' : 'required before platform use'}.
+                          MFA {(user.totpEnabled || user.webauthnEnabled) ? 'enabled' : 'required before platform use'}.
                         </p>
                       )}
                     </div>
@@ -4374,37 +4687,42 @@ export default function App() {
             <div className="panel-header">
               <div>
                 <h3>Two-Factor Authentication</h3>
-                <p>Manage TOTP 2FA for your account.</p>
+                <p>Manage TOTP and passkeys for your account.</p>
               </div>
-              <span className={`pill ${totpEnabled ? 'ok' : 'loading'}`}>
-                {totpEnabled ? 'enabled' : 'disabled'}
+              <span className={`pill ${(totpEnabled || webauthnEnabled) ? 'ok' : 'loading'}`}>
+                {(totpEnabled || webauthnEnabled) ? 'enabled' : 'disabled'}
               </span>
             </div>
-            {totpError && <p className="error">{totpError}</p>}
-            {!totpEnabled && !totpSetupData && (
-              <div style={{ padding: '12px 0' }}>
-                <p className="muted">2FA adds an extra layer of security to your account using an authenticator app (Google Authenticator, Authy, etc.).</p>
-                <button type="button" onClick={onSetup2FA} style={{ marginTop: '8px' }}>
-                  Setup 2FA
-                </button>
-              </div>
-            )}
-            {totpSetupData && (
-              <div style={{ padding: '12px 0' }}>
-                <p>Configure your authenticator locally with the secret below, or copy the full `otpauth://` URI:</p>
+              {totpError && <p className="error">{totpError}</p>}
+              {!totpEnabled && !totpSetupData && (
+                <div className="mfa-panel-block">
+                  <p className="muted">
+                    TOTP MFA works with authenticator apps and with physical OATH-TOTP tokens or
+                    hardware keys configured in OATH mode that generate 6-digit rotating codes.
+                  </p>
+                  <ul className="mfa-device-list">
+                    <li>Phone apps like Google Authenticator, Aegis, or Authy</li>
+                    <li>Physical OATH-TOTP tokens</li>
+                    <li>Hardware security keys that support OATH-TOTP enrollment</li>
+                  </ul>
+                  <button type="button" onClick={onSetup2FA} className="mfa-inline-action">
+                    Setup TOTP MFA
+                  </button>
+                </div>
+              )}
+              {totpSetupData && (
+              <div className="mfa-panel-block">
+                <p>
+                  Configure your authenticator app or physical TOTP token with the secret below,
+                  or copy the full `otpauth://` URI for compatible hardware enrolled in OATH-TOTP
+                  mode.
+                </p>
                 {totpQrDataUrl && (
-                  <div className="bootstrap-qr-image-card" style={{ marginBottom: '12px' }}>
+                  <div className="bootstrap-qr-image-card mfa-qr-card">
                     <img src={totpQrDataUrl} alt="Local TOTP QR Code" width={220} height={220} />
                   </div>
                 )}
-                <div style={{
-                  background: '#fff',
-                  display: 'grid',
-                  gap: '0.8rem',
-                  padding: '16px',
-                  borderRadius: '8px',
-                  margin: '12px 0'
-                }}>
+                <div className="mfa-setup-card">
                   <strong>Manual secret</strong>
                   <code className="inline-secret">{totpSetupData.secret}</code>
                   <div className="resource-actions">
@@ -4417,19 +4735,23 @@ export default function App() {
                   </div>
                 </div>
                 {totpCopyStatus && <p className="muted">{totpCopyStatus}</p>}
+                <p className="mfa-hint">
+                  If your hardware token cannot scan the QR code, use the manual secret or the
+                  `otpauth://` URI when the device supports direct enrollment.
+                </p>
                 <label>
-                  Enter code from your authenticator
+                  Enter code from your authenticator or hardware token
                   <input
+                    className="mfa-code-input"
                     type="text"
                     inputMode="numeric"
                     maxLength={6}
                     value={totpSetupCode}
                     onChange={(e) => setTotpSetupCode(e.target.value)}
                     placeholder="123456"
-                    style={{ letterSpacing: '0.3em', textAlign: 'center' }}
                   />
                 </label>
-                <div className="resource-actions" style={{ marginTop: '8px' }}>
+                <div className="resource-actions mfa-inline-action">
                   <button type="button" onClick={onVerify2FA}>
                     Verify &amp; Enable
                   </button>
@@ -4443,26 +4765,81 @@ export default function App() {
                 </div>
               </div>
             )}
+            <div className="mfa-panel-block">
+              <p className="muted">
+                WebAuthn passkeys work with platform passkeys and physical security keys such as
+                compatible YubiKey-like devices. This can replace TOTP for admin MFA enforcement.
+              </p>
+              <label>
+                Passkey label
+                <input
+                  className="mfa-code-input"
+                  type="text"
+                  value={webauthnLabel}
+                  onChange={(e) => setWebauthnLabel(e.target.value)}
+                  placeholder="Primary security key"
+                />
+              </label>
+              <div className="resource-actions mfa-inline-action">
+                <button
+                  type="button"
+                  onClick={() => onRegisterPasskey(webauthnLabel)}
+                  disabled={webauthnBusy || !isWebAuthnSupported()}
+                >
+                  {webauthnBusy ? 'Registering...' : 'Register passkey'}
+                </button>
+              </div>
+              {!isWebAuthnSupported() && (
+                <p className="mfa-hint">
+                  This browser does not expose the WebAuthn APIs required for passkeys.
+                </p>
+              )}
+              {webauthnCredentials.length > 0 && (
+                <div className="mfa-passkey-list">
+                  {webauthnCredentials.map((credential) => (
+                    <article key={credential.id} className="mfa-passkey-item">
+                      <div>
+                        <strong>{credential.label || 'Passkey'}</strong>
+                        <p className="muted">
+                          Added {formatRelativeDate(credential.createdAt)}
+                          {credential.lastUsedAt ? ` · used ${formatRelativeDate(credential.lastUsedAt)}` : ''}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => onDeletePasskey(credential.id)}
+                        disabled={webauthnBusy}
+                      >
+                        Remove
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
             {totpEnabled && (
-              <div style={{ padding: '12px 0' }}>
-                <p className="muted">2FA is currently active. Enter a code from your authenticator to disable it.</p>
+              <div className="mfa-panel-block">
+                <p className="muted">
+                  TOTP MFA is currently active. Enter a code from your authenticator app or
+                  physical OATH-TOTP token to disable it.
+                </p>
                 <label>
                   Current TOTP code
                   <input
+                    className="mfa-code-input"
                     type="text"
                     inputMode="numeric"
                     maxLength={6}
                     value={totpDisableCode}
                     onChange={(e) => setTotpDisableCode(e.target.value)}
                     placeholder="123456"
-                    style={{ letterSpacing: '0.3em', textAlign: 'center' }}
                   />
                 </label>
                 <button
                   type="button"
-                  className="ghost"
                   onClick={onDisable2FA}
-                  style={{ marginTop: '8px' }}
+                  className="ghost mfa-inline-action"
                 >
                   Disable 2FA
                 </button>

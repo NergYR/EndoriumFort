@@ -85,6 +85,19 @@ struct UserAccount {
   // 2FA / TOTP
   bool totpEnabled = false;
   std::string totpSecret;  // Base32-encoded secret
+  int webauthnCredentialCount = 0;
+};
+
+struct WebAuthnCredential {
+  int id = 0;
+  int userId = 0;
+  std::string credentialId;
+  std::string publicKeySpki;
+  int signCount = 0;
+  std::string label;
+  std::string transportsCsv;
+  std::string createdAt;
+  std::string lastUsedAt;
 };
 
 struct AuthSession {

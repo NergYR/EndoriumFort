@@ -77,6 +77,14 @@ int main() {
   ctx.relay_heartbeat_stale_seconds = parse_positive_int_env(
       "ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS",
       ctx.relay_heartbeat_stale_seconds);
+  if (const char *webauthn_rp_id = std::getenv("ENDORIUMFORT_WEBAUTHN_RP_ID");
+      webauthn_rp_id && *webauthn_rp_id != '\0') {
+    ctx.webauthn_rp_id_override = webauthn_rp_id;
+  }
+  if (const char *webauthn_origin = std::getenv("ENDORIUMFORT_WEBAUTHN_ORIGIN");
+      webauthn_origin && *webauthn_origin != '\0') {
+    ctx.webauthn_origin_override = webauthn_origin;
+  }
 
 #ifdef ENDORIUMFORT_SSH_ENABLED
 #ifndef _WIN32

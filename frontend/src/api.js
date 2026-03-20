@@ -400,6 +400,41 @@ export async function get2FAStatus() {
   return response.json();
 }
 
+export async function beginWebAuthnRegistration(payload = {}) {
+  const response = await fetch('/api/auth/webauthn/register/options', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to start passkey registration');
+  return response.json();
+}
+
+export async function verifyWebAuthnRegistration(payload) {
+  const response = await fetch('/api/auth/webauthn/register/verify', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to verify passkey registration');
+  return response.json();
+}
+
+export async function deleteWebAuthnCredential(credentialId) {
+  const response = await fetch(`/api/auth/webauthn/credentials/${credentialId}`, {
+    method: 'DELETE',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to remove passkey');
+  return response.json();
+}
+
 // ── Session Recordings ───────────────────────────────────────────────
 
 export async function fetchRecordings(sessionId = null) {

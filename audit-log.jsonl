@@ -148,3 +148,6 @@
 {"id":11,"type":"credential.ephemeral.issue","actor":"admin","role":"admin","createdAt":"2026-03-19T14:32:44Z","payload":{"leaseId":7,"resourceId":4,"expiresAt":"2026-03-19T14:34:44Z"}}
 {"id":12,"type":"credential.ephemeral.consume","actor":"admin","role":"admin","createdAt":"2026-03-19T14:32:44Z","payload":{"leaseId":6,"resourceId":4}}
 {"id":13,"type":"credential.ephemeral.consume","actor":"admin","role":"admin","createdAt":"2026-03-19T14:32:44Z","payload":{"leaseId":7,"resourceId":4}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-20T11:30:11Z","payload":{"userId":1,"username":"admin"}}
+{"id":2,"type":"session.terminate","actor":"admin","role":"admin","createdAt":"2026-03-20T11:33:33Z","payload":{"sessionId":15,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-03-19T14:32:44Z","terminatedAt":"2026-03-20T11:33:33Z"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-20T13:33:43Z","payload":{"userId":1,"username":"admin"}}

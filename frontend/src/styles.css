@@ -959,22 +959,75 @@ button:disabled {
   border-radius: 12px;
   border: 1px solid rgba(26, 43, 75, 0.12);
   background: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
 }
 
 .policy-option input {
-  width: auto;
-  margin-top: 0.2rem;
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
 }
 
-.policy-option strong,
-.policy-option span {
+.policy-option:hover {
+  transform: translateY(-1px);
+  border-color: rgba(58, 100, 240, 0.22);
+}
+
+.policy-option.selected {
+  border-color: rgba(58, 100, 240, 0.34);
+  background: linear-gradient(145deg, rgba(58, 100, 240, 0.12), rgba(38, 241, 255, 0.08));
+  box-shadow: inset 0 0 0 1px rgba(58, 100, 240, 0.08);
+}
+
+.policy-option-indicator {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: 2px solid rgba(26, 43, 75, 0.26);
+  background: rgba(255, 255, 255, 0.92);
+  margin-top: 0.1rem;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.policy-option.selected .policy-option-indicator {
+  border-color: rgba(58, 100, 240, 0.85);
+  background: linear-gradient(135deg, var(--brand-start), var(--brand-end));
+}
+
+.policy-option.selected .policy-option-indicator::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.policy-option-copy strong,
+.policy-option-copy span,
+.policy-option-copy em {
   display: block;
 }
 
-.policy-option span {
+.policy-option-copy span {
   margin-top: 0.18rem;
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+.policy-option-copy em {
+  margin-top: 0.5rem;
+  font-style: normal;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--brand-start);
 }
 
 .policy-preview,
@@ -2333,6 +2386,75 @@ button:disabled {
   border-color: var(--stroke);
 }
 
+[data-theme="dark"] .resource-section {
+  background: rgba(15, 23, 42, 0.72);
+  border-color: var(--stroke);
+}
+
+[data-theme="dark"] .policy-editor {
+  background: linear-gradient(145deg, rgba(30, 41, 59, 0.96), rgba(19, 35, 58, 0.92));
+  border-color: rgba(99, 102, 241, 0.18);
+}
+
+[data-theme="dark"] .policy-option,
+[data-theme="dark"] .routing-summary article {
+  background: rgba(15, 23, 42, 0.86);
+  border-color: var(--stroke);
+}
+
+[data-theme="dark"] .policy-option.selected {
+  background: linear-gradient(145deg, rgba(67, 56, 202, 0.2), rgba(8, 145, 178, 0.14));
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+[data-theme="dark"] .policy-option-indicator {
+  border-color: rgba(148, 163, 184, 0.34);
+  background: #0f172a;
+}
+
+[data-theme="dark"] .policy-option-copy em {
+  color: #93c5fd;
+}
+
+[data-theme="dark"] .policy-chip {
+  background: rgba(99, 102, 241, 0.18);
+  border-color: rgba(99, 102, 241, 0.26);
+  color: #dbeafe;
+}
+
+[data-theme="dark"] .resource-image-preview img,
+[data-theme="dark"] .bootstrap-qr-image-card {
+  border: 1px solid var(--stroke);
+  background: #0f172a;
+}
+
+[data-theme="dark"] .bootstrap-qr-card,
+[data-theme="dark"] .mfa-panel-block,
+[data-theme="dark"] .mfa-setup-card {
+  background: rgba(15, 23, 42, 0.86);
+  border-color: var(--stroke);
+}
+
+[data-theme="dark"] .mfa-device-list {
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .mfa-passkey-item,
+[data-theme="dark"] .login-passkey-card {
+  background: rgba(15, 23, 42, 0.7);
+  border-color: var(--stroke);
+}
+
+[data-theme="dark"] .mfa-code-input {
+  background: #0f172a;
+  border-color: var(--stroke);
+  color: #e2e8f0;
+}
+
+[data-theme="dark"] .mfa-hint {
+  color: #93c5fd;
+}
+
 [data-theme="dark"] .alert-card.warning {
   background: #3a2a0f;
   border-color: rgba(245, 158, 11, 0.35);
@@ -2534,6 +2656,7 @@ button:disabled {
   padding: 16px;
   border-radius: 12px;
   margin: 0.25rem 0;
+  border: 1px solid rgba(26, 43, 75, 0.08);
 }
 
 .bootstrap-secret {
@@ -2564,6 +2687,81 @@ button:disabled {
   background: rgba(15, 23, 42, 0.06);
   font-family: "IBM Plex Mono", "Fira Code", monospace;
   word-break: break-all;
+}
+
+.mfa-panel-block,
+.mfa-setup-card {
+  display: grid;
+  gap: 0.9rem;
+  padding: 1rem;
+  border-radius: 14px;
+  border: 1px solid rgba(26, 43, 75, 0.08);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.mfa-setup-card {
+  background: #fff;
+}
+
+.mfa-qr-card {
+  justify-self: start;
+}
+
+.mfa-device-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  color: var(--muted);
+  display: grid;
+  gap: 0.35rem;
+}
+
+.mfa-device-list li {
+  line-height: 1.4;
+}
+
+.mfa-passkey-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.mfa-passkey-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.9rem 1rem;
+  border-radius: 12px;
+  border: 1px solid rgba(26, 43, 75, 0.08);
+  background: rgba(248, 250, 252, 0.95);
+}
+
+.login-mfa-block {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.login-mfa-code {
+  text-align: center;
+  font-size: 1.15rem;
+}
+
+.login-passkey-card {
+  padding: 0.9rem;
+}
+
+.mfa-inline-action {
+  align-self: start;
+}
+
+.mfa-code-input {
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+}
+
+.mfa-hint {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #3156a3;
 }
 
 .checkbox-row {

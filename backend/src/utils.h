@@ -445,6 +445,8 @@ inline crow::json::wvalue user_to_json(const UserAccount &user) {
   payload["bootstrapPasswordChangeRequired"] = user.bootstrapPasswordChangeRequired;
   payload["bootstrapMfaRequired"] = user.bootstrapMfaRequired;
   payload["totpEnabled"] = user.totpEnabled;
+  payload["webauthnEnabled"] = user.webauthnCredentialCount > 0;
+  payload["webauthnCredentialCount"] = user.webauthnCredentialCount;
   return payload;
 }
 
