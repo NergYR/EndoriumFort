@@ -162,6 +162,17 @@ void AppContext::invalidate_user_tokens(int user_id) {
   }
 }
 
+void AppContext::invalidate_user_tokens_except(int user_id,
+                                               const std::string &token) {
+  std::lock_guard<std::mutex> lock(auth_mutex);
+  for (auto it = auth_sessions.begin(); it != auth_sessions.end();) {
+    if (it->second.userId == user_id && it->first != token)
+      it = auth_sessions.erase(it);
+    else
+      ++it;
+  }
+}
+
 void AppContext::cleanup_expired_tokens() {
   std::string current = now_utc();
   std::lock_guard<std::mutex> lock(auth_mutex);
@@ -300,21 +311,7 @@ void AppContext::init_database() {
       ");";
   if (!sqlite.exec(perm_schema, err))
     std::cerr << "SQLite user_resource_permissions schema failed: " << err << '\n';
-
-  const std::string perm_override_schema =
-      "CREATE TABLE IF NOT EXISTS user_permission_overrides ("
-      "id INTEGER PRIMARY KEY,"
-      "user_id INTEGER NOT NULL,"
-      "permission TEXT NOT NULL,"
-      "effect TEXT NOT NULL,"
-      "created_at TEXT NOT NULL,"
-      "updated_at TEXT NOT NULL,"
-      "FOREIGN KEY (user_id) REFERENCES users(id),"
-      "UNIQUE(user_id, permission)"
-      ");";
-  if (!sqlite.exec(perm_override_schema, err))
-    std::cerr << "SQLite user_permission_overrides schema failed: " << err
-              << '\n';
+  sqlite.exec("DROP TABLE IF EXISTS user_permission_overrides;", err);
 
   // Session recordings table
   const std::string rec_schema =
@@ -389,6 +386,8 @@ void AppContext::init_database() {
     std::cerr << "SQLite ephemeral_credentials schema failed: " << err << '\n';
 
   // TOTP columns on users
+  sqlite.exec("ALTER TABLE users ADD COLUMN bootstrap_password_change_required INTEGER DEFAULT 0;", err);
+  sqlite.exec("ALTER TABLE users ADD COLUMN bootstrap_mfa_required INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE users ADD COLUMN totp_secret TEXT;", err);
 
@@ -412,6 +411,8 @@ void AppContext::seed_default_admin() {
   admin.role = "admin";
   admin.createdAt = now_utc();
   admin.updatedAt = admin.createdAt;
+  admin.bootstrapPasswordChangeRequired = true;
+  admin.bootstrapMfaRequired = true;
   users[admin.id] = admin;
   if (!insert_user(admin))
     std::cerr << "Failed to persist default admin user" << '\n';
@@ -773,6 +774,7 @@ void AppContext::load_users_from_db() {
   std::lock_guard<std::mutex> db_lock(sqlite.mutex);
   const char *sql =
       "SELECT id, username, password, role, created_at, updated_at, "
+      "bootstrap_password_change_required, bootstrap_mfa_required, "
       "totp_enabled, totp_secret FROM users";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -790,8 +792,10 @@ void AppContext::load_users_from_db() {
       u.role     = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
       u.createdAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
       u.updatedAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
-      u.totpEnabled = sqlite3_column_int(stmt, 6) != 0;
-      auto secret = sqlite3_column_text(stmt, 7);
+      u.bootstrapPasswordChangeRequired = sqlite3_column_int(stmt, 6) != 0;
+      u.bootstrapMfaRequired = sqlite3_column_int(stmt, 7) != 0;
+      u.totpEnabled = sqlite3_column_int(stmt, 8) != 0;
+      auto secret = sqlite3_column_text(stmt, 9);
       if (secret) u.totpSecret = reinterpret_cast<const char *>(secret);
       users[u.id] = u;
       if (u.id > max_id) max_id = u.id;
@@ -806,7 +810,9 @@ bool AppContext::insert_user(const UserAccount &u) {
   std::lock_guard<std::mutex> lock(sqlite.mutex);
   const char *sql =
       "INSERT INTO users (id, username, password, role, created_at, "
-      "updated_at) VALUES (?, ?, ?, ?, ?, ?)";
+      "updated_at, bootstrap_password_change_required, "
+      "bootstrap_mfa_required, totp_enabled, totp_secret) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite user insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -818,6 +824,13 @@ bool AppContext::insert_user(const UserAccount &u) {
   sqlite3_bind_text(stmt, 4, u.role.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 5, u.createdAt.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 6, u.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 7, u.bootstrapPasswordChangeRequired ? 1 : 0);
+  sqlite3_bind_int(stmt, 8, u.bootstrapMfaRequired ? 1 : 0);
+  sqlite3_bind_int(stmt, 9, u.totpEnabled ? 1 : 0);
+  u.totpSecret.empty()
+      ? sqlite3_bind_null(stmt, 10)
+      : sqlite3_bind_text(stmt, 10, u.totpSecret.c_str(), -1,
+                          SQLITE_TRANSIENT);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite user insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -827,7 +840,10 @@ bool AppContext::insert_user(const UserAccount &u) {
 bool AppContext::update_user_db(const UserAccount &u) {
   if (!sqlite.db) return true;
   std::lock_guard<std::mutex> lock(sqlite.mutex);
-  const char *sql = "UPDATE users SET password=?, role=?, updated_at=? WHERE id=?";
+  const char *sql =
+      "UPDATE users SET password=?, role=?, updated_at=?, "
+      "bootstrap_password_change_required=?, bootstrap_mfa_required=?, "
+      "totp_enabled=?, totp_secret=? WHERE id=?";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite user update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -836,7 +852,14 @@ bool AppContext::update_user_db(const UserAccount &u) {
   sqlite3_bind_text(stmt, 1, u.password.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 2, u.role.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 3, u.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 4, u.id);
+  sqlite3_bind_int(stmt, 4, u.bootstrapPasswordChangeRequired ? 1 : 0);
+  sqlite3_bind_int(stmt, 5, u.bootstrapMfaRequired ? 1 : 0);
+  sqlite3_bind_int(stmt, 6, u.totpEnabled ? 1 : 0);
+  u.totpSecret.empty()
+      ? sqlite3_bind_null(stmt, 7)
+      : sqlite3_bind_text(stmt, 7, u.totpSecret.c_str(), -1,
+                          SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 8, u.id);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite user update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -917,46 +940,13 @@ bool AppContext::revoke_resource_permission(int user_id, int resource_id) {
   return ok;
 }
 
-std::unordered_map<std::string, bool> AppContext::get_user_permission_overrides(
-    int user_id) {
-  std::unordered_map<std::string, bool> overrides;
-  if (!sqlite.db) return overrides;
-
-  std::lock_guard<std::mutex> lock(sqlite.mutex);
-  const char *sql =
-      "SELECT permission, effect FROM user_permission_overrides WHERE user_id = ?";
-  sqlite3_stmt *stmt = nullptr;
-  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    std::cerr << "SQLite permission override select failed: "
-              << sqlite3_errmsg(sqlite.db) << '\n';
-    return overrides;
-  }
-  sqlite3_bind_int(stmt, 1, user_id);
-  while (sqlite3_step(stmt) == SQLITE_ROW) {
-    const auto *perm = sqlite3_column_text(stmt, 0);
-    const auto *effect = sqlite3_column_text(stmt, 1);
-    if (!perm || !effect) continue;
-    std::string permission = reinterpret_cast<const char *>(perm);
-    std::string effect_str = reinterpret_cast<const char *>(effect);
-    overrides[permission] = effect_str == "allow";
-  }
-  sqlite3_finalize(stmt);
-  return overrides;
-}
-
 std::unordered_set<std::string> AppContext::get_effective_permissions(
     int user_id, const std::string &role) {
-  auto effective = default_permissions_for_role(role);
-  const auto overrides = get_user_permission_overrides(user_id);
-  for (const auto &entry : overrides) {
-    if (entry.second) {
-      effective.insert(entry.first);
-    } else {
-      effective.erase(entry.first);
-      if (entry.first == "*") effective.erase("*");
-    }
-  }
-  return effective;
+  (void)user_id;
+  // Access decisions now follow a simpler role-policy model:
+  // global capabilities come from the role, while concrete access scope is
+  // enforced through per-resource assignments and resource-level controls.
+  return default_permissions_for_role(role);
 }
 
 bool AppContext::has_permission(int user_id, const std::string &role,
@@ -964,59 +954,6 @@ bool AppContext::has_permission(int user_id, const std::string &role,
   if (!is_known_permission(permission)) return false;
   const auto effective = get_effective_permissions(user_id, role);
   return permissions_contain(effective, permission);
-}
-
-bool AppContext::set_user_permission_override(
-    int user_id, const std::string &permission,
-    std::optional<bool> allow_effect) {
-  if (!is_known_permission(permission) && permission != "*") return false;
-  if (!sqlite.db) return true;
-
-  std::lock_guard<std::mutex> lock(sqlite.mutex);
-  if (!allow_effect.has_value()) {
-    const char *sql =
-        "DELETE FROM user_permission_overrides WHERE user_id=? AND permission=?";
-    sqlite3_stmt *stmt = nullptr;
-    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-      std::cerr << "SQLite permission override delete failed: "
-                << sqlite3_errmsg(sqlite.db) << '\n';
-      return false;
-    }
-    sqlite3_bind_int(stmt, 1, user_id);
-    sqlite3_bind_text(stmt, 2, permission.c_str(), -1, SQLITE_TRANSIENT);
-    const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
-    if (!ok)
-      std::cerr << "SQLite permission override delete failed: "
-                << sqlite3_errmsg(sqlite.db) << '\n';
-    sqlite3_finalize(stmt);
-    return ok;
-  }
-
-  const char *sql =
-      "INSERT INTO user_permission_overrides "
-      "(user_id, permission, effect, created_at, updated_at) "
-      "VALUES (?, ?, ?, ?, ?) "
-      "ON CONFLICT(user_id, permission) DO UPDATE SET "
-      "effect=excluded.effect, updated_at=excluded.updated_at";
-  sqlite3_stmt *stmt = nullptr;
-  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    std::cerr << "SQLite permission override upsert failed: "
-              << sqlite3_errmsg(sqlite.db) << '\n';
-    return false;
-  }
-  const std::string now = now_utc();
-  const std::string effect = *allow_effect ? "allow" : "deny";
-  sqlite3_bind_int(stmt, 1, user_id);
-  sqlite3_bind_text(stmt, 2, permission.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 3, effect.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 4, now.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 5, now.c_str(), -1, SQLITE_TRANSIENT);
-  const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
-  if (!ok)
-    std::cerr << "SQLite permission override upsert failed: "
-              << sqlite3_errmsg(sqlite.db) << '\n';
-  sqlite3_finalize(stmt);
-  return ok;
 }
 
 // ── 2FA / TOTP ─────────────────────────────────────────────────────────
@@ -1082,6 +1019,41 @@ bool AppContext::update_user_password_hash(int user_id,
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok)
     std::cerr << "SQLite password update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+  sqlite3_finalize(stmt);
+  return ok;
+}
+
+bool AppContext::update_user_bootstrap_flags(int user_id,
+                                             bool password_change_required,
+                                             bool mfa_required) {
+  {
+    std::lock_guard<std::mutex> lock(user_mutex);
+    auto it = users.find(user_id);
+    if (it == users.end()) return false;
+    it->second.bootstrapPasswordChangeRequired = password_change_required;
+    it->second.bootstrapMfaRequired = mfa_required;
+    it->second.updatedAt = now_utc();
+  }
+  if (!sqlite.db) return true;
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  const char *sql =
+      "UPDATE users SET bootstrap_password_change_required=?, "
+      "bootstrap_mfa_required=?, updated_at=? WHERE id=?";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite bootstrap flag update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return false;
+  }
+  std::string ts = now_utc();
+  sqlite3_bind_int(stmt, 1, password_change_required ? 1 : 0);
+  sqlite3_bind_int(stmt, 2, mfa_required ? 1 : 0);
+  sqlite3_bind_text(stmt, 3, ts.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 4, user_id);
+  bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+  if (!ok)
+    std::cerr << "SQLite bootstrap flag update failed: "
               << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
   return ok;

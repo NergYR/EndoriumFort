@@ -80,6 +80,8 @@ struct UserAccount {
   std::string role;
   std::string createdAt;
   std::string updatedAt;
+  bool bootstrapPasswordChangeRequired = false;
+  bool bootstrapMfaRequired = false;
   // 2FA / TOTP
   bool totpEnabled = false;
   std::string totpSecret;  // Base32-encoded secret

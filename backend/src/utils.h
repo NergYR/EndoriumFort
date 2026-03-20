@@ -190,7 +190,6 @@ inline const std::vector<std::string> &permission_catalog() {
   static const std::vector<std::string> catalog = {
       "users.read",
       "users.manage",
-      "users.permissions.manage",
       "resources.read",
       "resources.manage",
       "resources.assign",
@@ -443,6 +442,8 @@ inline crow::json::wvalue user_to_json(const UserAccount &user) {
   payload["role"] = user.role;
   payload["createdAt"] = user.createdAt;
   payload["updatedAt"] = user.updatedAt;
+  payload["bootstrapPasswordChangeRequired"] = user.bootstrapPasswordChangeRequired;
+  payload["bootstrapMfaRequired"] = user.bootstrapMfaRequired;
   payload["totpEnabled"] = user.totpEnabled;
   return payload;
 }

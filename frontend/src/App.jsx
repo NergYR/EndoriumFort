@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import QRCode from 'qrcode';
 import {
   changePassword,
   createResource,
@@ -8,6 +9,7 @@ import {
   deleteResource,
   deleteUser,
   disable2FA,
+  fetchBootstrapStatus,
   fetchAudit,
   fetchHealth,
   fetchRecordingCast,
@@ -39,8 +41,6 @@ import {
   getUserResourcePermissions,
   grantResourcePermission,
   revokeResourcePermission,
-  getUserPermissions,
-  setUserPermissionOverride,
   verify2FA,
   fetchAccessRequests,
   createAccessRequest,
@@ -89,6 +89,24 @@ const roleLabel = (role) => {
   const mapped = normalizeRole(role);
   const found = ROLE_BLUEPRINTS.find((item) => item.id === mapped);
   return found ? found.label : mapped;
+};
+
+const normalizeRiskLevel = (value) => {
+  const normalized = String(value || 'low').toLowerCase();
+  return ['low', 'medium', 'high', 'critical'].includes(normalized)
+    ? normalized
+    : 'low';
+};
+
+const describeResourcePolicy = (resource) => {
+  const riskLevel = normalizeRiskLevel(resource?.riskLevel);
+  const items = [`Risk ${riskLevel}`];
+  if (resource?.requireAccessJustification) items.push('Reason required');
+  if (resource?.requireDualApproval) items.push('Dual approval');
+  if (resource?.adaptiveAccessPolicy) items.push('Adaptive controls');
+  if (resource?.enableCommandGuard) items.push('SSH guard');
+  if (riskLevel === 'high' || riskLevel === 'critical') items.push('MFA-sensitive');
+  return items;
 };
 
 const CAPABILITY_PERMISSION_MAP = {
@@ -281,15 +299,14 @@ export default function App() {
   const [userForm, setUserForm] = useState({
     username: '',
     password: '',
-    role: 'operator'
+    role: 'operator',
+    forcePasswordRotation: false
   });
   const [editingUserId, setEditingUserId] = useState(null);
-  const [selectedUserForPermissions, setSelectedUserForPermissions] = useState(null);
-  const [userPermissions, setUserPermissions] = useState([]);
-  const [loadingPermissions, setLoadingPermissions] = useState(false);
-  const [permissionsError, setPermissionsError] = useState('');
-  const [granularPermissions, setGranularPermissions] = useState([]);
-  const [updatingPermissionKey, setUpdatingPermissionKey] = useState('');
+  const [selectedUserForAccessScope, setSelectedUserForAccessScope] = useState(null);
+  const [userResourceScope, setUserResourceScope] = useState([]);
+  const [loadingAccessScope, setLoadingAccessScope] = useState(false);
+  const [accessScopeError, setAccessScopeError] = useState('');
   const [route, setRoute] = useState(() =>
     window.location.pathname ? window.location.pathname : '/'
   );
@@ -362,6 +379,8 @@ export default function App() {
   const [totpSetupCode, setTotpSetupCode] = useState('');
   const [totpError, setTotpError] = useState('');
   const [totpDisableCode, setTotpDisableCode] = useState('');
+  const [totpCopyStatus, setTotpCopyStatus] = useState('');
+  const [totpQrDataUrl, setTotpQrDataUrl] = useState('');
   // Recordings state
   const [recordings, setRecordings] = useState([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
@@ -433,6 +452,12 @@ export default function App() {
   const [changePwConfirm, setChangePwConfirm] = useState('');
   const [changePwError, setChangePwError] = useState('');
   const [changePwSuccess, setChangePwSuccess] = useState('');
+  const [bootstrapState, setBootstrapState] = useState({
+    required: false,
+    passwordChangeRequired: false,
+    mfaSetupRequired: false,
+    totpEnabled: false
+  });
   // Token expiry
   const [tokenExpiresAt, setTokenExpiresAt] = useState('');
   const terminalRef = useRef(null);
@@ -454,6 +479,7 @@ export default function App() {
   const roleName = roleLabel(auth.role);
   const activeLiveAlertProfile = LIVE_ALERT_PROFILES[liveAlertProfile] || LIVE_ALERT_PROFILES.normal;
   const containmentEnabled = !!containmentStatus.enabled;
+  const bootstrapRequired = !!(auth.token && bootstrapState.required);
 
   useEffect(() => {
     try {
@@ -595,6 +621,12 @@ export default function App() {
       setAuth((prev) => ({ ...prev, token: '', password: '', permissions: [] }));
       setAuthError('Session expirée. Veuillez vous reconnecter.');
       setTokenExpiresAt('');
+      setBootstrapState({
+        required: false,
+        passwordChangeRequired: false,
+        mfaSetupRequired: false,
+        totpEnabled: false
+      });
       setAuthToken('');
       navigate('/login');
     };
@@ -1306,8 +1338,8 @@ export default function App() {
   };
 
   const onUserFieldChange = (event) => {
-    const { name, value } = event.target;
-    setUserForm((prev) => ({ ...prev, [name]: value }));
+    const { name, value, type, checked } = event.target;
+    setUserForm((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
   };
 
   const onLogin = async (event) => {
@@ -1329,6 +1361,7 @@ export default function App() {
 
       setTwoFARequired(false);
       setTotpCode('');
+      const bootstrap = payload.bootstrap || {};
       setAuth((prev) => ({
         ...prev,
         token: payload.token,
@@ -1339,6 +1372,18 @@ export default function App() {
       }));
       setAuthToken(payload.token);
       setTotpEnabled(!!payload.totpEnabled);
+      setBootstrapState({
+        required: !!bootstrap.required,
+        passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+        mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+        totpEnabled: !!payload.totpEnabled
+      });
+      setChangePwCurrent(bootstrap.passwordChangeRequired ? auth.password : '');
+      setTotpSetupData(null);
+      setTotpQrDataUrl('');
+      setTotpSetupCode('');
+      setTotpError('');
+      setTotpCopyStatus('');
       setTokenExpiresAt(payload.expiresAt || '');
       localStorage.setItem('endoriumfort_auth', JSON.stringify({
         token: payload.token,
@@ -1358,6 +1403,15 @@ export default function App() {
     setAuth((prev) => ({ ...prev, token: '', password: '', permissions: [] }));
     setAuthToken('');
     setTokenExpiresAt('');
+    setBootstrapState({
+      required: false,
+      passwordChangeRequired: false,
+      mfaSetupRequired: false,
+      totpEnabled: false
+    });
+    setTotpSetupData(null);
+    setTotpQrDataUrl('');
+    setTotpCopyStatus('');
     localStorage.removeItem('endoriumfort_auth');
     navigate('/login');
   };
@@ -2357,13 +2411,15 @@ export default function App() {
     const payload = {
       username: userForm.username.trim(),
       password: userForm.password,
-      role: userForm.role
+      role: userForm.role,
+      forcePasswordRotation: !!userForm.forcePasswordRotation
     };
     try {
       if (editingUserId) {
         const updated = await updateUser(editingUserId, {
           password: payload.password,
-          role: payload.role
+          role: payload.role,
+          forcePasswordRotation: payload.forcePasswordRotation
         });
         setUsers((prev) =>
           prev.map((item) => (item.id === editingUserId ? updated : item))
@@ -2376,7 +2432,8 @@ export default function App() {
       setUserForm({
         username: '',
         password: '',
-        role: 'operator'
+        role: 'operator',
+        forcePasswordRotation: false
       });
     } catch (error) {
       setUserError(error.message || 'Unable to save user');
@@ -2388,7 +2445,8 @@ export default function App() {
     setUserForm({
       username: user.username || '',
       password: '',
-      role: user.role || 'operator'
+      role: user.role || 'operator',
+      forcePasswordRotation: !!user.bootstrapPasswordChangeRequired
     });
   };
 
@@ -2403,37 +2461,33 @@ export default function App() {
 
   const onLoadUserPermissions = async (user) => {
     try {
-      setLoadingPermissions(true);
-      setSelectedUserForPermissions(user);
-      const [resourceResponse, granularResponse] = await Promise.all([
-        getUserResourcePermissions(user.id),
-        getUserPermissions(user.id)
-      ]);
-      setUserPermissions(resourceResponse.resourceIds || []);
-      setGranularPermissions(granularResponse.permissions || []);
-      setPermissionsError('');
+      setLoadingAccessScope(true);
+      setSelectedUserForAccessScope(user);
+      const resourceResponse = await getUserResourcePermissions(user.id);
+      setUserResourceScope(resourceResponse.resourceIds || []);
+      setAccessScopeError('');
     } catch (error) {
-      setPermissionsError(error.message || 'Unable to load permissions');
+      setAccessScopeError(error.message || 'Unable to load access scope');
     } finally {
-      setLoadingPermissions(false);
+      setLoadingAccessScope(false);
     }
   };
 
   const onToggleResourcePermission = async (resourceId) => {
-    if (!selectedUserForPermissions) return;
+    if (!selectedUserForAccessScope) return;
     
-    const hasPermission = userPermissions.includes(resourceId);
+    const hasPermission = userResourceScope.includes(resourceId);
     try {
       if (hasPermission) {
-        await revokeResourcePermission(selectedUserForPermissions.id, resourceId);
-        setUserPermissions((prev) => prev.filter((id) => id !== resourceId));
+        await revokeResourcePermission(selectedUserForAccessScope.id, resourceId);
+        setUserResourceScope((prev) => prev.filter((id) => id !== resourceId));
       } else {
-        await grantResourcePermission(selectedUserForPermissions.id, resourceId);
-        setUserPermissions((prev) => [...prev, resourceId]);
+        await grantResourcePermission(selectedUserForAccessScope.id, resourceId);
+        setUserResourceScope((prev) => [...prev, resourceId]);
       }
-      setPermissionsError('');
+      setAccessScopeError('');
     } catch (error) {
-      setPermissionsError(error.message || 'Unable to modify permission');
+      setAccessScopeError(error.message || 'Unable to modify resource scope');
     }
   };
 
@@ -2531,26 +2585,11 @@ export default function App() {
     }
   };
 
-  const onChangeGranularPermissionOverride = async (permission, override) => {
-    if (!selectedUserForPermissions) return;
-    const key = `${selectedUserForPermissions.id}:${permission}`;
-    try {
-      setUpdatingPermissionKey(key);
-      await setUserPermissionOverride(selectedUserForPermissions.id, permission, override);
-      const refreshed = await getUserPermissions(selectedUserForPermissions.id);
-      setGranularPermissions(refreshed.permissions || []);
-      setPermissionsError('');
-    } catch (error) {
-      setPermissionsError(error.message || 'Unable to update permission override');
-    } finally {
-      setUpdatingPermissionKey('');
-    }
-  };
-
   // ── 2FA handlers ──
 
   const onSetup2FA = async () => {
     setTotpError('');
+    setTotpCopyStatus('');
     try {
       const data = await setup2FA();
       setTotpSetupData(data);
@@ -2562,11 +2601,20 @@ export default function App() {
   const onVerify2FA = async () => {
     setTotpError('');
     try {
-      await verify2FA(totpSetupCode);
+      const data = await verify2FA(totpSetupCode);
       setTotpEnabled(true);
       setTotpSetupData(null);
+      setTotpQrDataUrl('');
       setTotpSetupCode('');
       setTotpError('');
+      setTotpCopyStatus('');
+      const bootstrap = data.bootstrap || {};
+      setBootstrapState({
+        required: !!bootstrap.required,
+        passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+        mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+        totpEnabled: true
+      });
     } catch (error) {
       setTotpError(error.message || 'Invalid code');
     }
@@ -2588,12 +2636,91 @@ export default function App() {
     try {
       const data = await get2FAStatus();
       setTotpEnabled(!!data.totpEnabled);
+      setBootstrapState((prev) => ({ ...prev, totpEnabled: !!data.totpEnabled }));
     } catch (_) {}
   };
 
   useEffect(() => {
     if (auth.token) onLoad2FAStatus();
   }, [auth.token]);
+
+  const onCopyTotpValue = async (value, label) => {
+    try {
+      await navigator.clipboard.writeText(value || '');
+      setTotpCopyStatus(`${label} copied`);
+    } catch (_) {
+      setTotpCopyStatus(`Unable to copy ${label.toLowerCase()}`);
+    }
+  };
+
+  useEffect(() => {
+    if (!auth.token) {
+      setBootstrapState({
+        required: false,
+        passwordChangeRequired: false,
+        mfaSetupRequired: false,
+        totpEnabled: false
+      });
+      return;
+    }
+    let active = true;
+    fetchBootstrapStatus()
+      .then((data) => {
+        if (!active) return;
+        const bootstrap = data.bootstrap || {};
+        setBootstrapState({
+          required: !!bootstrap.required,
+          passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+          mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+          totpEnabled: !!bootstrap.totpEnabled
+        });
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [auth.token]);
+
+  useEffect(() => {
+    if (!editingUserId) {
+      setUserForm((prev) => {
+        const nextValue = prev.role === 'admin' ? true : prev.forcePasswordRotation;
+        if (nextValue === prev.forcePasswordRotation) {
+          return prev;
+        }
+        return {
+          ...prev,
+          forcePasswordRotation: nextValue
+        };
+      });
+    }
+  }, [editingUserId, userForm.role]);
+
+  useEffect(() => {
+    let active = true;
+    if (!totpSetupData?.otpauthUri) {
+      setTotpQrDataUrl('');
+      return;
+    }
+    QRCode.toDataURL(totpSetupData.otpauthUri, {
+      errorCorrectionLevel: 'M',
+      margin: 1,
+      width: 220
+    })
+      .then((url) => {
+        if (active) {
+          setTotpQrDataUrl(url);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setTotpQrDataUrl('');
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [totpSetupData]);
 
   useEffect(() => {
     if (!auth.token || !canManagePlatform || !resources.length) {
@@ -2815,11 +2942,32 @@ export default function App() {
       return;
     }
     try {
-      await changePassword(changePwCurrent, changePwNew);
-      setChangePwSuccess('Password changed successfully');
+      const data = await changePassword(changePwCurrent, changePwNew, {
+        keepCurrentSession: bootstrapRequired
+      });
+      setChangePwSuccess(
+        bootstrapRequired
+          ? 'Password updated. Let us finish MFA setup to secure the admin account.'
+          : 'Password changed successfully'
+      );
       setChangePwCurrent('');
       setChangePwNew('');
       setChangePwConfirm('');
+      const bootstrap = data.bootstrap || {};
+      setBootstrapState({
+        required: !!bootstrap.required,
+        passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+        mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+        totpEnabled
+      });
+      if (!bootstrapRequired) {
+        setBootstrapState({
+          required: false,
+          passwordChangeRequired: false,
+          mfaSetupRequired: false,
+          totpEnabled
+        });
+      }
     } catch (error) {
       setChangePwError(error.message || 'Failed to change password');
     }
@@ -3065,6 +3213,130 @@ export default function App() {
     return `${Math.floor(diffSec / 86400)}d ago`;
   };
 
+  const renderBootstrapOverlay = () => {
+    if (!bootstrapRequired) return null;
+    const currentStep = bootstrapState.passwordChangeRequired
+      ? 'Change the default admin password'
+      : 'Enable MFA for the admin account';
+    return (
+      <div className="modal-overlay bootstrap-overlay">
+        <div className="modal-content bootstrap-modal" onClick={(event) => event.stopPropagation()}>
+          <p className="workflow-kicker">Initial Security Setup</p>
+          <h3>Secure the default admin account</h3>
+          <p className="muted">
+            This first-run checkpoint is mandatory before using the platform. We need a private
+            admin password and a TOTP authenticator bound to the account.
+          </p>
+          <div className="bootstrap-checklist">
+            <div className={`bootstrap-step ${bootstrapState.passwordChangeRequired ? 'active' : 'done'}`}>
+              <strong>1. Change the default password</strong>
+              <span>{bootstrapState.passwordChangeRequired ? 'Required now' : 'Done'}</span>
+            </div>
+            <div className={`bootstrap-step ${!bootstrapState.passwordChangeRequired && bootstrapState.mfaSetupRequired ? 'active' : ''} ${!bootstrapState.mfaSetupRequired ? 'done' : ''}`}>
+              <strong>2. Enable MFA with TOTP</strong>
+              <span>{bootstrapState.mfaSetupRequired ? 'Pending' : 'Done'}</span>
+            </div>
+          </div>
+          <p className="bootstrap-status">Current step: {currentStep}</p>
+          {bootstrapState.passwordChangeRequired ? (
+            <form onSubmit={onChangePassword}>
+              <label>
+                Current password
+                <input
+                  type="password"
+                  value={changePwCurrent}
+                  onChange={(e) => setChangePwCurrent(e.target.value)}
+                  required
+                  autoComplete="current-password"
+                />
+              </label>
+              <label>
+                New admin password
+                <input
+                  type="password"
+                  value={changePwNew}
+                  onChange={(e) => setChangePwNew(e.target.value)}
+                  required
+                  autoComplete="new-password"
+                  placeholder="Min 8 chars, upper + lower + digit"
+                />
+              </label>
+              <label>
+                Confirm new password
+                <input
+                  type="password"
+                  value={changePwConfirm}
+                  onChange={(e) => setChangePwConfirm(e.target.value)}
+                  required
+                  autoComplete="new-password"
+                />
+              </label>
+              {changePwError && <p className="error">{changePwError}</p>}
+              {changePwSuccess && <p className="success">{changePwSuccess}</p>}
+              <div className="bootstrap-actions">
+                <button type="submit">Save new password</button>
+              </div>
+            </form>
+          ) : (
+            <div className="bootstrap-mfa-block">
+              {totpError && <p className="error">{totpError}</p>}
+              {!totpEnabled && !totpSetupData && (
+                <>
+                  <p className="muted">
+                    Start TOTP enrollment with your authenticator app to finish admin hardening.
+                  </p>
+                  <div className="bootstrap-actions">
+                    <button type="button" onClick={onSetup2FA}>Start MFA setup</button>
+                  </div>
+                </>
+              )}
+              {totpSetupData && (
+                <div className="bootstrap-totp-panel">
+                  <p>Use the secret below in your authenticator app, or copy the full `otpauth://` enrollment URI.</p>
+                  {totpQrDataUrl && (
+                    <div className="bootstrap-qr-image-card">
+                      <img src={totpQrDataUrl} alt="Local TOTP QR Code" width={220} height={220} />
+                    </div>
+                  )}
+                  <div className="bootstrap-qr-card">
+                    <strong>Manual secret</strong>
+                    <code className="inline-secret">{totpSetupData.secret}</code>
+                    <div className="bootstrap-actions">
+                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.secret, 'Secret')}>
+                        Copy secret
+                      </button>
+                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.otpauthUri, 'Enrollment URI')}>
+                        Copy URI
+                      </button>
+                    </div>
+                  </div>
+                  {totpCopyStatus && <p className="muted">{totpCopyStatus}</p>}
+                  <label>
+                    Authenticator code
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={totpSetupCode}
+                      onChange={(e) => setTotpSetupCode(e.target.value)}
+                      placeholder="123456"
+                    />
+                  </label>
+                  <div className="bootstrap-actions">
+                    <button type="button" onClick={onVerify2FA}>Verify and enable MFA</button>
+                  </div>
+                </div>
+              )}
+              {totpEnabled && !bootstrapState.mfaSetupRequired && (
+                <p className="success">MFA enabled. The admin account is now secured.</p>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderLogin = () => (
     <div className="login-page">
       <div className="login-card">
@@ -3213,7 +3485,7 @@ export default function App() {
         </div>
       ) : (
         <div className="admin-grid">
-          <div className="panel reveal permissions-panel">
+          <div className="panel reveal access-scope-panel">
             <div className="panel-header">
               <div>
                 <h3>{editingResourceId ? 'Edit resource' : 'New resource'}</h3>
@@ -3221,205 +3493,280 @@ export default function App() {
               </div>
             </div>
             <form className="resource-form" onSubmit={onSubmitResource}>
-              <label>
-                Name
-                <input
-                  name="name"
-                  value={resourceForm.name}
-                  onChange={onResourceFieldChange}
-                  placeholder="Finance jump host"
-                />
-              </label>
-              <label>
-                Target
-                <input
-                  name="target"
-                  value={resourceForm.target}
-                  onChange={onResourceFieldChange}
-                  placeholder="10.0.0.12"
-                />
-              </label>
-              <label>
-                Protocol
-                <select
-                  name="protocol"
-                  value={resourceForm.protocol}
-                  onChange={onResourceFieldChange}
-                >
-                  <option value="ssh">ssh</option>
-                  <option value="rdp">rdp</option>
-                  <option value="vnc">vnc</option>
-                  <option value="http">http</option>
-                  <option value="agent">agent (tunnel)</option>
-                </select>
-              </label>
-              <label>
-                Port
-                <input
-                  name="port"
-                  type="number"
-                  min="1"
-                  max="65535"
-                  value={resourceForm.port}
-                  onChange={onResourceFieldChange}
-                />
-              </label>
-              <label className="full">
-                Description
-                <input
-                  name="description"
-                  value={resourceForm.description}
-                  onChange={onResourceFieldChange}
-                  placeholder="Short usage note"
-                />
-              </label>
-              <label className="full">
-                Image URL
-                <input
-                  name="imageUrl"
-                  value={resourceForm.imageUrl}
-                  onChange={onResourceFieldChange}
-                  placeholder="https://..."
-                  disabled={!!resourceForm.imageData}
-                />
-              </label>
-              <label className="full">
-                ou upload d'une image
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={e => {
-                    const file = e.target.files[0];
-                    if (!file) return;
-                    const reader = new window.FileReader();
-                    reader.onload = (ev) => {
-                      setResourceForm(f => ({ ...f, imageData: ev.target.result, imageUrl: '' }));
-                    };
-                    reader.readAsDataURL(file);
-                  }}
-                />
-                {resourceForm.imageData && (
-                  <div style={{marginTop:4}}>
-                    <img src={resourceForm.imageData} alt="aperçu" style={{maxWidth:64,maxHeight:64,borderRadius:8}} />
-                    <button type="button" onClick={()=>setResourceForm(f=>({...f,imageData:''}))} style={{marginLeft:8}}>Supprimer</button>
+              <div className="full resource-section">
+                <div className="resource-section-header">
+                  <div>
+                    <p className="workflow-kicker">Identity</p>
+                    <h4>Resource Identity</h4>
+                    <p className="muted">
+                      Define how the tile is named, described, and visually recognized in the operator workspace.
+                    </p>
                   </div>
-                )}
-              </label>
-              {(resourceForm.protocol === 'http' || resourceForm.protocol === 'https') && (
-                <>
-                  <label className="full">
-                    HTTP Username (optional)
+                </div>
+                <div className="section-grid">
+                  <label>
+                    Name
                     <input
-                      name="httpUsername"
-                      value={resourceForm.httpUsername}
+                      name="name"
+                      value={resourceForm.name}
                       onChange={onResourceFieldChange}
-                      placeholder="admin"
-                      autoComplete="off"
+                      placeholder="Finance jump host"
+                    />
+                  </label>
+                  <label>
+                    Description
+                    <input
+                      name="description"
+                      value={resourceForm.description}
+                      onChange={onResourceFieldChange}
+                      placeholder="Short usage note"
                     />
                   </label>
                   <label className="full">
-                    HTTP Password (optional)
+                    Image URL
                     <input
-                      name="httpPassword"
-                      type="password"
-                      value={resourceForm.httpPassword}
+                      name="imageUrl"
+                      value={resourceForm.imageUrl}
                       onChange={onResourceFieldChange}
-                      placeholder="••••••••"
-                      autoComplete="new-password"
-                    />
-                  </label>
-                </>
-              )}
-              {resourceForm.protocol === 'ssh' && (
-                <>
-                  <label className="full">
-                    SSH Username (vault)
-                    <input
-                      name="sshUsername"
-                      value={resourceForm.sshUsername}
-                      onChange={onResourceFieldChange}
-                      placeholder="root"
-                      autoComplete="off"
+                      placeholder="https://..."
+                      disabled={!!resourceForm.imageData}
                     />
                   </label>
                   <label className="full">
-                    SSH Password (vault)
+                    Visual upload
                     <input
-                      name="sshPassword"
-                      type="password"
-                      value={resourceForm.sshPassword}
+                      type="file"
+                      accept="image/*"
+                      onChange={e => {
+                        const file = e.target.files[0];
+                        if (!file) return;
+                        const reader = new window.FileReader();
+                        reader.onload = (ev) => {
+                          setResourceForm(f => ({ ...f, imageData: ev.target.result, imageUrl: '' }));
+                        };
+                        reader.readAsDataURL(file);
+                      }}
+                    />
+                    {resourceForm.imageData && (
+                      <div className="resource-image-preview">
+                        <img src={resourceForm.imageData} alt="aperçu" />
+                        <button type="button" className="ghost" onClick={() => setResourceForm(f => ({ ...f, imageData: '' }))}>
+                          Remove
+                        </button>
+                      </div>
+                    )}
+                  </label>
+                </div>
+              </div>
+
+              <div className="full resource-section">
+                <div className="resource-section-header">
+                  <div>
+                    <p className="workflow-kicker">Connectivity</p>
+                    <h4>Target Connectivity</h4>
+                    <p className="muted">
+                      Configure the target endpoint, protocol, port, and optional vault material used during access.
+                    </p>
+                  </div>
+                </div>
+                <div className="section-grid">
+                  <label>
+                    Target
+                    <input
+                      name="target"
+                      value={resourceForm.target}
                       onChange={onResourceFieldChange}
-                      placeholder={editingResourceId ? 'Leave empty to keep current' : 'Stored securely, injected on connect'}
-                      autoComplete="new-password"
+                      placeholder="10.0.0.12"
                     />
                   </label>
-                </>
-              )}
-              <label
-                className="full"
-                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
-              >
-                <input
-                  name="requireAccessJustification"
-                  type="checkbox"
-                  checked={!!resourceForm.requireAccessJustification}
-                  onChange={onResourceFieldChange}
-                  style={{ width: 'auto' }}
-                />
-                Require reason popup before connect
-              </label>
-              <label
-                className="full"
-                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
-              >
-                <input
-                  name="requireDualApproval"
-                  type="checkbox"
-                  checked={!!resourceForm.requireDualApproval}
-                  onChange={onResourceFieldChange}
-                  style={{ width: 'auto' }}
-                />
-                Require dual approval before session start
-              </label>
-              <label
-                className="full"
-                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
-              >
-                <input
-                  name="enableCommandGuard"
-                  type="checkbox"
-                  checked={!!resourceForm.enableCommandGuard}
-                  onChange={onResourceFieldChange}
-                  style={{ width: 'auto' }}
-                />
-                Enable SSH command guard
-              </label>
-              <label
-                className="full"
-                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
-              >
-                <input
-                  name="adaptiveAccessPolicy"
-                  type="checkbox"
-                  checked={!!resourceForm.adaptiveAccessPolicy}
-                  onChange={onResourceFieldChange}
-                  style={{ width: 'auto' }}
-                />
-                Adaptive policy (extra controls by risk)
-              </label>
-              <label className="full">
-                Risk level
-                <select
-                  name="riskLevel"
-                  value={resourceForm.riskLevel}
-                  onChange={onResourceFieldChange}
-                >
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="critical">critical</option>
-                </select>
-              </label>
+                  <label>
+                    Protocol
+                    <select
+                      name="protocol"
+                      value={resourceForm.protocol}
+                      onChange={onResourceFieldChange}
+                    >
+                      <option value="ssh">ssh</option>
+                      <option value="rdp">rdp</option>
+                      <option value="vnc">vnc</option>
+                      <option value="http">http</option>
+                      <option value="agent">agent (tunnel)</option>
+                    </select>
+                  </label>
+                  <label>
+                    Port
+                    <input
+                      name="port"
+                      type="number"
+                      min="1"
+                      max="65535"
+                      value={resourceForm.port}
+                      onChange={onResourceFieldChange}
+                    />
+                  </label>
+                  {(resourceForm.protocol === 'http' || resourceForm.protocol === 'https') && (
+                    <>
+                      <label>
+                        HTTP Username (optional)
+                        <input
+                          name="httpUsername"
+                          value={resourceForm.httpUsername}
+                          onChange={onResourceFieldChange}
+                          placeholder="admin"
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label>
+                        HTTP Password (optional)
+                        <input
+                          name="httpPassword"
+                          type="password"
+                          value={resourceForm.httpPassword}
+                          onChange={onResourceFieldChange}
+                          placeholder="••••••••"
+                          autoComplete="new-password"
+                        />
+                      </label>
+                    </>
+                  )}
+                  {resourceForm.protocol === 'ssh' && (
+                    <>
+                      <label>
+                        SSH Username (vault)
+                        <input
+                          name="sshUsername"
+                          value={resourceForm.sshUsername}
+                          onChange={onResourceFieldChange}
+                          placeholder="root"
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label>
+                        SSH Password (vault)
+                        <input
+                          name="sshPassword"
+                          type="password"
+                          value={resourceForm.sshPassword}
+                          onChange={onResourceFieldChange}
+                          placeholder={editingResourceId ? 'Leave empty to keep current' : 'Stored securely, injected on connect'}
+                          autoComplete="new-password"
+                        />
+                      </label>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className="full policy-editor">
+                <div className="policy-editor-header">
+                  <div>
+                    <p className="workflow-kicker">Access Policy</p>
+                    <h4>Access Policy</h4>
+                    <p className="muted">
+                      Define the guardrails applied once a user has the role capability and resource scope.
+                    </p>
+                  </div>
+                  <span className={`pill ${normalizeRiskLevel(resourceForm.riskLevel) === 'critical' ? 'error' : normalizeRiskLevel(resourceForm.riskLevel) === 'high' ? 'warning' : 'ok'}`}>
+                    {normalizeRiskLevel(resourceForm.riskLevel)}
+                  </span>
+                </div>
+                <div className="policy-grid">
+                  <label className="policy-option">
+                    <input
+                      name="requireAccessJustification"
+                      type="checkbox"
+                      checked={!!resourceForm.requireAccessJustification}
+                      onChange={onResourceFieldChange}
+                    />
+                    <div>
+                      <strong>Justification</strong>
+                      <span>Prompt for access reason before connect.</span>
+                    </div>
+                  </label>
+                  <label className="policy-option">
+                    <input
+                      name="requireDualApproval"
+                      type="checkbox"
+                      checked={!!resourceForm.requireDualApproval}
+                      onChange={onResourceFieldChange}
+                    />
+                    <div>
+                      <strong>Dual approval</strong>
+                      <span>Require review before session start.</span>
+                    </div>
+                  </label>
+                  <label className="policy-option">
+                    <input
+                      name="enableCommandGuard"
+                      type="checkbox"
+                      checked={!!resourceForm.enableCommandGuard}
+                      onChange={onResourceFieldChange}
+                    />
+                    <div>
+                      <strong>SSH command guard</strong>
+                      <span>Block dangerous commands server-side.</span>
+                    </div>
+                  </label>
+                  <label className="policy-option">
+                    <input
+                      name="adaptiveAccessPolicy"
+                      type="checkbox"
+                      checked={!!resourceForm.adaptiveAccessPolicy}
+                      onChange={onResourceFieldChange}
+                    />
+                    <div>
+                      <strong>Adaptive controls</strong>
+                      <span>Raise requirements automatically based on risk.</span>
+                    </div>
+                  </label>
+                </div>
+                <label className="full">
+                  Risk level
+                  <select
+                    name="riskLevel"
+                    value={resourceForm.riskLevel}
+                    onChange={onResourceFieldChange}
+                  >
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="critical">critical</option>
+                  </select>
+                </label>
+                <div className="policy-preview">
+                  {describeResourcePolicy(resourceForm).map((item) => (
+                    <span className="policy-chip" key={`preview-${item}`}>{item}</span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="full resource-section routing-section">
+                <div className="resource-section-header">
+                  <div>
+                    <p className="workflow-kicker">Routing</p>
+                    <h4>Transport Path</h4>
+                    <p className="muted">
+                      Resource routing is managed in the Relay Fabric panel below. Create the
+                      resource here, then decide whether it uses direct routing or a dedicated relay.
+                    </p>
+                  </div>
+                </div>
+                <div className="routing-summary">
+                  <article>
+                    <strong>Direct</strong>
+                    <span>Backend connects straight to the target.</span>
+                  </article>
+                  <article>
+                    <strong>Relay</strong>
+                    <span>Route traffic through the Relay Fabric for segmented environments.</span>
+                  </article>
+                  <article>
+                    <strong>Agent</strong>
+                    <span>Use the local agent path when transparent tunneling is needed.</span>
+                  </article>
+                </div>
+              </div>
+
               <div className="resource-actions">
                 <button type="submit">
                   {savingResource
@@ -3479,18 +3826,11 @@ export default function App() {
                       {resource.description && (
                         <p className="muted">{resource.description}</p>
                       )}
-                      {resource.requireAccessJustification && (
-                        <p className="muted">Reason popup required</p>
-                      )}
-                      {resource.requireDualApproval && (
-                        <p className="muted">Dual approval required</p>
-                      )}
-                      {resource.enableCommandGuard && (
-                        <p className="muted">Command guard enabled</p>
-                      )}
-                      {resource.adaptiveAccessPolicy && (
-                        <p className="muted">Adaptive policy ({resource.riskLevel || 'low'})</p>
-                      )}
+                      <div className="policy-chip-row">
+                        {describeResourcePolicy(resource).map((item) => (
+                          <span className="policy-chip" key={`${resource.id}-${item}`}>{item}</span>
+                        ))}
+                      </div>
                     </div>
                     <div className="resource-actions">
                       <button
@@ -3810,6 +4150,21 @@ export default function App() {
                   <option value="auditor">Security Auditor</option>
                 </select>
               </label>
+              <label className="checkbox-row">
+                <input
+                  name="forcePasswordRotation"
+                  type="checkbox"
+                  checked={!!userForm.forcePasswordRotation}
+                  onChange={onUserFieldChange}
+                />
+                <span>Require password rotation on next sign-in</span>
+              </label>
+              {userForm.role === 'admin' && (
+                <p className="muted">
+                  MFA is mandatory for all admin accounts. If the account is not enrolled yet, the
+                  user will be forced through MFA setup at sign-in.
+                </p>
+              )}
               <div className="resource-actions">
                 <button type="submit">
                   {editingUserId ? 'Update' : 'Create'} user
@@ -3823,7 +4178,8 @@ export default function App() {
                       setUserForm({
                         username: '',
                         password: '',
-                        role: 'operator'
+                        role: 'operator',
+                        forcePasswordRotation: false
                       });
                     }}
                   >
@@ -3840,6 +4196,14 @@ export default function App() {
                     <div>
                       <h4>{user.username}</h4>
                       <p className="muted">Role: {roleLabel(user.role)}</p>
+                      {user.bootstrapPasswordChangeRequired && (
+                        <p className="muted">Password rotation required at next sign-in.</p>
+                      )}
+                      {user.role === 'admin' && (
+                        <p className="muted">
+                          MFA {user.totpEnabled ? 'enabled' : 'required before platform use'}.
+                        </p>
+                      )}
                     </div>
                     <div className="resource-actions">
                       <button
@@ -3854,7 +4218,7 @@ export default function App() {
                         className="secondary"
                         onClick={() => onLoadUserPermissions(user)}
                       >
-                        Permissions
+                        Access Scope
                       </button>
                       <button
                         type="button"
@@ -3894,25 +4258,24 @@ export default function App() {
             </div>
           </div>
 
-          <div className="panel reveal permissions-panel">
+          <div className="panel reveal access-scope-panel">
             <div className="panel-header">
               <div>
-                <h3>Granular Permissions</h3>
+                <h3>Access Scope</h3>
                 <p>
-                  {selectedUserForPermissions
-                    ? `Manage access rights for ${selectedUserForPermissions.username}`
-                    : 'Select a user and click Permissions to manage granular rights.'}
+                  {selectedUserForAccessScope
+                    ? `Manage resource scope and role policy for ${selectedUserForAccessScope.username}`
+                    : 'Select a user and click Access Scope to manage resource access.'}
                 </p>
               </div>
-              {selectedUserForPermissions && (
+              {selectedUserForAccessScope && (
                 <button
                   type="button"
                   className="ghost"
                   onClick={() => {
-                    setSelectedUserForPermissions(null);
-                    setUserPermissions([]);
-                    setGranularPermissions([]);
-                    setPermissionsError('');
+                    setSelectedUserForAccessScope(null);
+                    setUserResourceScope([]);
+                    setAccessScopeError('');
                   }}
                 >
                   Close
@@ -3920,16 +4283,19 @@ export default function App() {
               )}
             </div>
 
-            {!selectedUserForPermissions ? (
+            {!selectedUserForAccessScope ? (
               <p className="muted">No user selected yet.</p>
             ) : (
               <>
-                {loadingPermissions && <p>Loading permissions...</p>}
-                {permissionsError && <p className="error">{permissionsError}</p>}
+                {loadingAccessScope && <p>Loading access scope...</p>}
+                {accessScopeError && <p className="error">{accessScopeError}</p>}
                 <div className="panel-header" style={{ marginTop: '0.5rem' }}>
                   <div>
-                    <h3>Resource Permissions</h3>
-                    <p>Assign resource scope.</p>
+                    <h3>Resource Scope</h3>
+                    <p>
+                      Roles define what a user may do globally. Resource assignments define which
+                      targets they may actually access.
+                    </p>
                   </div>
                 </div>
                 <div className="resource-list permissions-resources-list">
@@ -3946,7 +4312,7 @@ export default function App() {
                           >
                             <input
                               type="checkbox"
-                              checked={userPermissions.includes(resource.id)}
+                              checked={userResourceScope.includes(resource.id)}
                               onChange={() => onToggleResourcePermission(resource.id)}
                               style={{ cursor: 'pointer' }}
                             />
@@ -3967,45 +4333,37 @@ export default function App() {
 
                 <div className="panel-header" style={{ marginTop: '1rem' }}>
                   <div>
-                    <h3>Action-Level Overrides</h3>
-                    <p>Set per-action policy: inherit, allow, deny.</p>
+                    <h3>Role Policy</h3>
+                    <p>
+                      Global capabilities are granted by the user role. Fine-grained action
+                      overrides are no longer part of the day-to-day access model.
+                    </p>
                   </div>
                 </div>
                 <div className="resource-list permissions-grid">
-                  {granularPermissions.length ? (
-                    granularPermissions.map((permission) => {
-                      const key = `${selectedUserForPermissions.id}:${permission.name}`;
-                      const isSaving = updatingPermissionKey === key;
-                      return (
-                        <article className="resource-row compact-perm-row" key={permission.name}>
-                          <div>
-                            <h4>{permission.name}</h4>
-                            <p className="muted">
-                              Effective: {permission.effective ? 'allowed' : 'denied'}
-                            </p>
-                          </div>
-                          <div className="resource-actions">
-                            <select
-                              value={permission.override || 'inherit'}
-                              disabled={isSaving}
-                              onChange={(event) =>
-                                onChangeGranularPermissionOverride(
-                                  permission.name,
-                                  event.target.value
-                                )
-                              }
-                            >
-                              <option value="inherit">inherit</option>
-                              <option value="allow">allow</option>
-                              <option value="deny">deny</option>
-                            </select>
-                          </div>
-                        </article>
-                      );
-                    })
-                  ) : (
-                    <p className="muted">No granular permissions loaded.</p>
-                  )}
+                  {(ROLE_BLUEPRINTS.find((role) => role.id === normalizeRole(selectedUserForAccessScope.role))?.permissions || [])
+                    .map((permission) => (
+                      <article className="resource-row compact-perm-row" key={permission}>
+                        <div>
+                          <h4>{permission}</h4>
+                          <p className="muted">
+                            Granted by role: {roleLabel(selectedUserForAccessScope.role)}
+                          </p>
+                        </div>
+                      </article>
+                    ))}
+                </div>
+                <div className="mission-board" style={{ marginTop: '1rem' }}>
+                  <div className="mission-headline">
+                    <div>
+                      <h3>Policy Layers</h3>
+                      <p className="muted">
+                        Effective access now follows three layers: role capability, resource scope,
+                        then resource guardrails like justification, dual approval, adaptive risk,
+                        and mandatory MFA.
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </>
             )}
@@ -4033,24 +4391,32 @@ export default function App() {
             )}
             {totpSetupData && (
               <div style={{ padding: '12px 0' }}>
-                <p>Scan this QR code with your authenticator app, or manually enter the secret:</p>
+                <p>Configure your authenticator locally with the secret below, or copy the full `otpauth://` URI:</p>
+                {totpQrDataUrl && (
+                  <div className="bootstrap-qr-image-card" style={{ marginBottom: '12px' }}>
+                    <img src={totpQrDataUrl} alt="Local TOTP QR Code" width={220} height={220} />
+                  </div>
+                )}
                 <div style={{
                   background: '#fff',
-                  display: 'inline-block',
+                  display: 'grid',
+                  gap: '0.8rem',
                   padding: '16px',
                   borderRadius: '8px',
                   margin: '12px 0'
                 }}>
-                  <img
-                    src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(totpSetupData.otpauthUri)}`}
-                    alt="TOTP QR Code"
-                    width={200}
-                    height={200}
-                  />
+                  <strong>Manual secret</strong>
+                  <code className="inline-secret">{totpSetupData.secret}</code>
+                  <div className="resource-actions">
+                    <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.secret, 'Secret')}>
+                      Copy secret
+                    </button>
+                    <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.otpauthUri, 'Enrollment URI')}>
+                      Copy URI
+                    </button>
+                  </div>
                 </div>
-                <p className="muted" style={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                  Secret: {totpSetupData.secret}
-                </p>
+                {totpCopyStatus && <p className="muted">{totpCopyStatus}</p>}
                 <label>
                   Enter code from your authenticator
                   <input
@@ -5446,7 +5812,17 @@ export default function App() {
     return renderLogin();
   }
   if (route === '/admin') {
-    return renderAdmin();
+    return (
+      <>
+        {renderAdmin()}
+        {renderBootstrapOverlay()}
+      </>
+    );
   }
-  return renderMain();
+  return (
+    <>
+      {renderMain()}
+      {renderBootstrapOverlay()}
+    </>
+  );
 }

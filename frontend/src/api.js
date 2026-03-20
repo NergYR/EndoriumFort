@@ -75,16 +75,28 @@ export async function logout() {
   return response.json();
 }
 
-export async function changePassword(currentPassword, newPassword) {
+export async function changePassword(currentPassword, newPassword, options = {}) {
   const response = await fetch('/api/auth/change-password', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...withAuthHeaders()
     },
-    body: JSON.stringify({ currentPassword, newPassword })
+    body: JSON.stringify({
+      currentPassword,
+      newPassword,
+      keepCurrentSession: !!options.keepCurrentSession
+    })
   });
   await ensureResponseOk(response, 'Failed to change password');
+  return response.json();
+}
+
+export async function fetchBootstrapStatus() {
+  const response = await fetch('/api/auth/bootstrap-status', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch bootstrap status');
   return response.json();
 }
 
@@ -340,27 +352,6 @@ export async function revokeResourcePermission(userId, resourceId) {
     headers: withAuthHeaders()
   });
   await ensureResponseOk(response, 'Failed to revoke permission');
-  return response.json();
-}
-
-export async function getUserPermissions(userId) {
-  const response = await fetch(`/api/users/${userId}/permissions`, {
-    headers: withAuthHeaders()
-  });
-  await ensureResponseOk(response, 'Failed to fetch user permissions');
-  return response.json();
-}
-
-export async function setUserPermissionOverride(userId, permission, override) {
-  const response = await fetch(`/api/users/${userId}/permissions/${encodeURIComponent(permission)}`, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      ...withAuthHeaders()
-    },
-    body: JSON.stringify({ override })
-  });
-  await ensureResponseOk(response, 'Failed to set permission override');
   return response.json();
 }
 

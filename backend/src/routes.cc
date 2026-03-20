@@ -59,6 +59,16 @@ bool can_access_any_resource(AppContext &ctx, const AuthSession &auth) {
   return false;
 }
 
+crow::json::wvalue build_bootstrap_payload(const UserAccount &user) {
+  crow::json::wvalue payload;
+  payload["required"] =
+      user.bootstrapPasswordChangeRequired || user.bootstrapMfaRequired;
+  payload["passwordChangeRequired"] = user.bootstrapPasswordChangeRequired;
+  payload["mfaSetupRequired"] = user.bootstrapMfaRequired;
+  payload["totpEnabled"] = user.totpEnabled;
+  return payload;
+}
+
 struct SecurityAlertTemplate {
   std::string severity;
   std::string title;
@@ -260,6 +270,7 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
         payload["issuedAt"] = auth.issuedAt;
         payload["expiresAt"] = auth.expiresAt;
         payload["totpEnabled"] = matched->totpEnabled;
+        payload["bootstrap"] = build_bootstrap_payload(*matched);
         crow::response response{payload};
         response.add_header(
             "Set-Cookie",
@@ -308,6 +319,8 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
         if (!body) return crow::response(400, "Invalid JSON body");
         std::string current_password = body["currentPassword"].s();
         std::string new_password = body["newPassword"].s();
+        bool keep_current_session = body.has("keepCurrentSession") &&
+                                    body["keepCurrentSession"].b();
         if (current_password.empty() || new_password.empty())
           return crow::response(400, "Missing currentPassword or newPassword");
 
@@ -332,10 +345,23 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
         std::string hashed = crypto::hash_password(new_password);
         if (!ctx.update_user_password_hash(auth->userId, hashed))
           return crow::response(500, "Failed to update password");
+        bool mfa_required = false;
+        {
+          std::lock_guard<std::mutex> lock(ctx.user_mutex);
+          auto it = ctx.users.find(auth->userId);
+          if (it == ctx.users.end())
+            return crow::response(404, "User not found");
+          mfa_required = it->second.bootstrapMfaRequired;
+        }
+        if (!ctx.update_user_bootstrap_flags(auth->userId, false, mfa_required))
+          return crow::response(500, "Failed to update bootstrap security status");
 
-        // Invalidate all existing tokens for this user (force re-login)
-        std::string current_token = auth->token;
-        ctx.invalidate_user_tokens(auth->userId);
+        // Invalidate sessions, optionally preserving the current bootstrap flow.
+        if (keep_current_session) {
+          ctx.invalidate_user_tokens_except(auth->userId, auth->token);
+        } else {
+          ctx.invalidate_user_tokens(auth->userId);
+        }
 
         // Audit
         AuditEvent evt;
@@ -350,12 +376,42 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
 
         crow::json::wvalue payload;
         payload["status"] = "ok";
-        payload["message"] = "Password changed. All sessions invalidated — please log in again.";
+        {
+          std::lock_guard<std::mutex> lock(ctx.user_mutex);
+          auto it = ctx.users.find(auth->userId);
+          if (it != ctx.users.end()) {
+            payload["bootstrap"] = build_bootstrap_payload(it->second);
+          }
+        }
+        payload["message"] = keep_current_session
+                                 ? "Password changed successfully."
+                                 : "Password changed. All sessions invalidated — please log in again.";
         crow::response response{payload};
-        response.add_header("Set-Cookie",
-                            build_cleared_auth_cookie(request_uses_https(request)));
+        response.add_header(
+            "Set-Cookie",
+            keep_current_session
+                ? build_auth_cookie(auth->token, request_uses_https(request),
+                                    ctx.token_ttl_seconds)
+                : build_cleared_auth_cookie(request_uses_https(request)));
         response.add_header("Cache-Control", "no-store");
         return response;
+      });
+
+  // GET /api/auth/bootstrap-status
+  CROW_ROUTE(app, "/api/auth/bootstrap-status").methods(crow::HTTPMethod::Get)(
+      [&ctx](const crow::request &request) {
+        auto auth = ctx.find_auth(request);
+        if (!auth) return crow::response(401, "Unauthorized");
+
+        std::lock_guard<std::mutex> lock(ctx.user_mutex);
+        auto it = ctx.users.find(auth->userId);
+        if (it == ctx.users.end())
+          return crow::response(404, "User not found");
+
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        payload["bootstrap"] = build_bootstrap_payload(it->second);
+        return crow::response{payload};
       });
 }
 
@@ -404,6 +460,10 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
         std::string username = body["username"].s();
         std::string password = body["password"].s();
         std::string role = body["role"].s();
+        bool force_password_rotation =
+            body.has("forcePasswordRotation")
+                ? body["forcePasswordRotation"].b()
+                : normalize_user_role(role) == "admin";
         if (username.empty() || password.empty() || role.empty())
           return crow::response(400, "Missing username, password, or role");
         if (!is_allowed_user_role(role, {"operator", "admin", "auditor"}))
@@ -429,6 +489,8 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
         user.role = normalize_user_role(role);
         user.createdAt = now_utc();
         user.updatedAt = user.createdAt;
+        user.bootstrapPasswordChangeRequired = force_password_rotation;
+        user.bootstrapMfaRequired = user.role == "admin";
 
         {
           std::lock_guard<std::mutex> lock(ctx.user_mutex);
@@ -464,6 +526,11 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
 
             std::string password = body["password"].s();
             std::string role = body["role"].s();
+            std::string normalized_role = normalize_user_role(role);
+            bool force_password_rotation =
+                body.has("forcePasswordRotation")
+                    ? body["forcePasswordRotation"].b()
+                    : normalized_role == "admin";
             if (password.empty() || role.empty())
               return crow::response(400, "Missing password or role");
             if (!is_allowed_user_role(role, {"operator", "admin", "auditor"}))
@@ -482,8 +549,10 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
                 return crow::response(404, "User not found");
               user = it->second;
               user.password = crypto::hash_password(password);
-              user.role = normalize_user_role(role);
+              user.role = normalized_role;
               user.updatedAt = now_utc();
+              user.bootstrapPasswordChangeRequired = force_password_rotation;
+              user.bootstrapMfaRequired = user.role == "admin" && !user.totpEnabled;
               it->second = user;
             }
             if (!ctx.update_user_db(user))
@@ -594,94 +663,6 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
             payload["message"] = "Permission revoked";
             payload["userId"] = user_id;
             payload["resourceId"] = resource_id;
-            return crow::response{payload};
-          });
-  // GET /api/users/<int>/permissions
-  CROW_ROUTE(app, "/api/users/<int>/permissions")
-      .methods(crow::HTTPMethod::Get)(
-          [&ctx](const crow::request &request, int user_id) {
-            auto auth = ctx.find_auth(request);
-            if (!auth) return crow::response(401, "Unauthorized");
-            if (!has_permission(ctx, *auth, "users.permissions.manage"))
-              return crow::response(403, "Forbidden");
-
-            UserAccount target_user;
-            {
-              std::lock_guard<std::mutex> lock(ctx.user_mutex);
-              auto it = ctx.users.find(user_id);
-              if (it == ctx.users.end()) return crow::response(404, "User not found");
-              target_user = it->second;
-            }
-
-            auto overrides = ctx.get_user_permission_overrides(user_id);
-            auto effective = ctx.get_effective_permissions(user_id, target_user.role);
-
-            crow::json::wvalue payload;
-            payload["status"] = "ok";
-            payload["userId"] = user_id;
-            payload["role"] = target_user.role;
-            payload["permissions"] = crow::json::wvalue::list();
-
-            int idx = 0;
-            for (const auto &permission : permission_catalog()) {
-              payload["permissions"][idx]["name"] = permission;
-              payload["permissions"][idx]["effective"] =
-                  permissions_contain(effective, permission);
-              if (overrides.find(permission) == overrides.end()) {
-                payload["permissions"][idx]["override"] = "inherit";
-              } else {
-                payload["permissions"][idx]["override"] =
-                    overrides[permission] ? "allow" : "deny";
-              }
-              idx++;
-            }
-            return crow::response{payload};
-          });
-
-  // PUT /api/users/<int>/permissions/<string>
-  CROW_ROUTE(app, "/api/users/<int>/permissions/<string>")
-      .methods(crow::HTTPMethod::Put)(
-          [&ctx](const crow::request &request, int user_id,
-                 const std::string &permission) {
-            auto auth = ctx.find_auth(request);
-            if (!auth) return crow::response(401, "Unauthorized");
-            if (!has_permission(ctx, *auth, "users.permissions.manage"))
-              return crow::response(403, "Forbidden");
-
-            auto body = crow::json::load(request.body);
-            if (!body || !body.has("override")) {
-              return crow::response(400, "Missing override (allow|deny|inherit)");
-            }
-            const std::string override = to_lower(std::string(body["override"].s()));
-            std::optional<bool> effect;
-            if (override == "allow") effect = true;
-            else if (override == "deny") effect = false;
-            else if (override == "inherit") effect = std::nullopt;
-            else return crow::response(400, "Invalid override value");
-
-            if (!ctx.set_user_permission_override(user_id, permission, effect)) {
-              return crow::response(500, "Failed to update permission override");
-            }
-
-            AuditEvent event;
-            event.id = ctx.next_audit_id.fetch_add(1);
-            event.type = "user.permission.override";
-            event.actor = auth->user;
-            event.role = auth->role;
-            event.createdAt = now_utc();
-            event.payloadJson = "{\"userId\":" + std::to_string(user_id) +
-                                ",\"permission\":\"" +
-                                json_escape(permission) +
-                                "\",\"override\":\"" +
-                                json_escape(override) + "\"}";
-            event.payloadIsJson = true;
-            ctx.append_audit(event);
-
-            crow::json::wvalue payload;
-            payload["status"] = "ok";
-            payload["userId"] = user_id;
-            payload["permission"] = permission;
-            payload["override"] = override;
             return crow::response{payload};
           });
 }
@@ -2239,8 +2220,8 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
             payload["secret"] = secret;
             payload["otpauthUri"] = uri;
             payload["message"] =
-                "Scan the QR code with your authenticator app, then call "
-                "/api/auth/verify-2fa with a code to enable.";
+                "Import the secret or otpauth URI into your authenticator app, "
+                "then call /api/auth/verify-2fa with a code to enable.";
             return crow::response{payload};
           });
 
@@ -2274,6 +2255,15 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
 
             // Enable 2FA
             ctx.update_user_totp(auth->userId, true, secret);
+            bool password_required = false;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              if (it != ctx.users.end()) {
+                password_required = it->second.bootstrapPasswordChangeRequired;
+              }
+            }
+            ctx.update_user_bootstrap_flags(auth->userId, password_required, false);
 
             AuditEvent event;
             event.id = ctx.next_audit_id.fetch_add(1);
@@ -2289,6 +2279,13 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
             payload["status"] = "ok";
             payload["message"] = "2FA has been enabled successfully";
             payload["totpEnabled"] = true;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              if (it != ctx.users.end()) {
+                payload["bootstrap"] = build_bootstrap_payload(it->second);
+              }
+            }
             return crow::response{payload};
           });
 
@@ -2308,6 +2305,7 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
 
             std::string secret;
             bool enabled = false;
+            std::string role;
             {
               std::lock_guard<std::mutex> lock(ctx.user_mutex);
               auto it = ctx.users.find(auth->userId);
@@ -2315,9 +2313,12 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
                 return crow::response(404, "User not found");
               secret = it->second.totpSecret;
               enabled = it->second.totpEnabled;
+              role = it->second.role;
             }
             if (!enabled)
               return crow::response(400, "2FA is not enabled");
+            if (normalize_user_role(role) == "admin")
+              return crow::response(403, "2FA cannot be disabled for admin accounts");
 
             if (!totp::verify_code(secret, code))
               return crow::response(401, "Invalid TOTP code");

@@ -223,6 +223,7 @@ struct AppContext {
   void append_session_event(const std::string &type, const Session &session);
   bool invalidate_token(const std::string &token);
   void invalidate_user_tokens(int user_id);
+  void invalidate_user_tokens_except(int user_id, const std::string &token);
   void cleanup_expired_tokens();
   std::string compute_expiry();
 
@@ -258,6 +259,8 @@ struct AppContext {
 
   // ── Password management ──
   bool update_user_password_hash(int user_id, const std::string &hash);
+  bool update_user_bootstrap_flags(int user_id, bool password_change_required,
+                                   bool mfa_required);
 
   // ── Session recordings ──
   void init_recordings_dir();
@@ -291,13 +294,8 @@ struct AppContext {
   bool grant_resource_permission(int user_id, int resource_id);
   bool revoke_resource_permission(int user_id, int resource_id);
 
-  // ── Granular permission overrides ──
-  std::unordered_map<std::string, bool> get_user_permission_overrides(
-      int user_id);
   std::unordered_set<std::string> get_effective_permissions(
       int user_id, const std::string &role);
   bool has_permission(int user_id, const std::string &role,
                       const std::string &permission);
-  bool set_user_permission_override(int user_id, const std::string &permission,
-                                    std::optional<bool> allow_effect);
 };
