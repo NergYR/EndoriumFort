@@ -6,6 +6,8 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 struct Session {
   int id = 0;
@@ -86,6 +88,7 @@ struct UserAccount {
   bool totpEnabled = false;
   std::string totpSecret;  // Base32-encoded secret
   int webauthnCredentialCount = 0;
+  std::string preferredMfaMethod = "any";
 };
 
 struct WebAuthnCredential {

@@ -3,6 +3,7 @@
 // Small standalone helpers (header-only).
 
 #include "crow.h"
+#include "auth_mfa.h"
 #include "models.h"
 
 #include <algorithm>
@@ -143,6 +144,29 @@ inline std::string build_user_payload_json(const UserAccount &user) {
   }
   oss << '}';
   return oss.str();
+}
+
+inline crow::json::wvalue build_bootstrap_payload(const UserAccount &user) {
+  crow::json::wvalue payload;
+  payload["required"] =
+      user.bootstrapPasswordChangeRequired || user.bootstrapMfaRequired;
+  payload["passwordChangeRequired"] = user.bootstrapPasswordChangeRequired;
+  payload["mfaSetupRequired"] = user.bootstrapMfaRequired;
+  payload["totpEnabled"] = user.totpEnabled;
+  payload["webauthnEnabled"] = user_has_webauthn_enabled(user);
+  payload["preferredMfaMethod"] = effective_mfa_preference(user);
+  return payload;
+}
+
+inline void apply_auth_mfa_payload(crow::json::wvalue &payload,
+                                   const UserAccount &user,
+                                   bool include_bootstrap = true) {
+  payload["totpEnabled"] = user.totpEnabled;
+  payload["webauthnEnabled"] = user_has_webauthn_enabled(user);
+  payload["preferredMfaMethod"] = effective_mfa_preference(user);
+  if (include_bootstrap) {
+    payload["bootstrap"] = build_bootstrap_payload(user);
+  }
 }
 
 inline bool is_allowed_role(const std::string &role,
@@ -445,8 +469,9 @@ inline crow::json::wvalue user_to_json(const UserAccount &user) {
   payload["bootstrapPasswordChangeRequired"] = user.bootstrapPasswordChangeRequired;
   payload["bootstrapMfaRequired"] = user.bootstrapMfaRequired;
   payload["totpEnabled"] = user.totpEnabled;
-  payload["webauthnEnabled"] = user.webauthnCredentialCount > 0;
+  payload["webauthnEnabled"] = user_has_webauthn_enabled(user);
   payload["webauthnCredentialCount"] = user.webauthnCredentialCount;
+  payload["preferredMfaMethod"] = effective_mfa_preference(user);
   return payload;
 }
 

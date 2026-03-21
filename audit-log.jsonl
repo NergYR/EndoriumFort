@@ -151,3 +151,6 @@
 {"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-20T11:30:11Z","payload":{"userId":1,"username":"admin"}}
 {"id":2,"type":"session.terminate","actor":"admin","role":"admin","createdAt":"2026-03-20T11:33:33Z","payload":{"sessionId":15,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-03-19T14:32:44Z","terminatedAt":"2026-03-20T11:33:33Z"}}
 {"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-20T13:33:43Z","payload":{"userId":1,"username":"admin"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-20T13:42:53Z","payload":{"userId":1,"username":"admin"}}
+{"id":1,"type":"auth.login.failure","actor":"admin","role":"","createdAt":"2026-03-21T11:09:41Z","payload":{"reason":"invalid_credentials","username":"admin"}}
+{"id":2,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-21T11:10:03Z","payload":{"userId":1,"username":"admin"}}

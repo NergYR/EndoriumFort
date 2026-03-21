@@ -435,6 +435,19 @@ export async function deleteWebAuthnCredential(credentialId) {
   return response.json();
 }
 
+export async function setMfaPreference(method) {
+  const response = await fetch('/api/auth/mfa-preference', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify({ method })
+  });
+  await ensureResponseOk(response, 'Failed to save MFA preference');
+  return response.json();
+}
+
 // ── Session Recordings ───────────────────────────────────────────────
 
 export async function fetchRecordings(sessionId = null) {

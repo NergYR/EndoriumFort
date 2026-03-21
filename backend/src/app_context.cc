@@ -390,6 +390,7 @@ void AppContext::init_database() {
   sqlite.exec("ALTER TABLE users ADD COLUMN bootstrap_mfa_required INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE users ADD COLUMN totp_secret TEXT;", err);
+  sqlite.exec("ALTER TABLE users ADD COLUMN preferred_mfa_method TEXT DEFAULT 'any';", err);
 
   const std::string webauthn_schema =
       "CREATE TABLE IF NOT EXISTS user_webauthn_credentials ("
@@ -792,7 +793,7 @@ void AppContext::load_users_from_db() {
   const char *sql =
       "SELECT id, username, password, role, created_at, updated_at, "
       "bootstrap_password_change_required, bootstrap_mfa_required, "
-      "totp_enabled, totp_secret FROM users";
+      "totp_enabled, totp_secret, preferred_mfa_method FROM users";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite user select failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -814,6 +815,8 @@ void AppContext::load_users_from_db() {
       u.totpEnabled = sqlite3_column_int(stmt, 8) != 0;
       auto secret = sqlite3_column_text(stmt, 9);
       if (secret) u.totpSecret = reinterpret_cast<const char *>(secret);
+      auto preferred = sqlite3_column_text(stmt, 10);
+      if (preferred) u.preferredMfaMethod = reinterpret_cast<const char *>(preferred);
       users[u.id] = u;
       if (u.id > max_id) max_id = u.id;
     }
@@ -828,8 +831,8 @@ bool AppContext::insert_user(const UserAccount &u) {
   const char *sql =
       "INSERT INTO users (id, username, password, role, created_at, "
       "updated_at, bootstrap_password_change_required, "
-      "bootstrap_mfa_required, totp_enabled, totp_secret) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      "bootstrap_mfa_required, totp_enabled, totp_secret, preferred_mfa_method) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite user insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -848,6 +851,7 @@ bool AppContext::insert_user(const UserAccount &u) {
       ? sqlite3_bind_null(stmt, 10)
       : sqlite3_bind_text(stmt, 10, u.totpSecret.c_str(), -1,
                           SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 11, u.preferredMfaMethod.c_str(), -1, SQLITE_TRANSIENT);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite user insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -860,7 +864,7 @@ bool AppContext::update_user_db(const UserAccount &u) {
   const char *sql =
       "UPDATE users SET password=?, role=?, updated_at=?, "
       "bootstrap_password_change_required=?, bootstrap_mfa_required=?, "
-      "totp_enabled=?, totp_secret=? WHERE id=?";
+      "totp_enabled=?, totp_secret=?, preferred_mfa_method=? WHERE id=?";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite user update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -876,7 +880,8 @@ bool AppContext::update_user_db(const UserAccount &u) {
       ? sqlite3_bind_null(stmt, 7)
       : sqlite3_bind_text(stmt, 7, u.totpSecret.c_str(), -1,
                           SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 8, u.id);
+  sqlite3_bind_text(stmt, 8, u.preferredMfaMethod.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 9, u.id);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite user update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -1014,6 +1019,37 @@ bool AppContext::update_user_totp(int user_id, bool enabled,
   if (!ok)
     std::cerr << "SQLite TOTP update failed: " << sqlite3_errmsg(sqlite.db)
               << '\n';
+  sqlite3_finalize(stmt);
+  return ok;
+}
+
+bool AppContext::update_user_mfa_preference(int user_id,
+                                            const std::string &method) {
+  {
+    std::lock_guard<std::mutex> lock(user_mutex);
+    auto it = users.find(user_id);
+    if (it == users.end()) return false;
+    it->second.preferredMfaMethod = method;
+    it->second.updatedAt = now_utc();
+  }
+  if (!sqlite.db) return true;
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  const char *sql =
+      "UPDATE users SET preferred_mfa_method=?, updated_at=? WHERE id=?";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite MFA preference update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return false;
+  }
+  std::string ts = now_utc();
+  sqlite3_bind_text(stmt, 1, method.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 2, ts.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 3, user_id);
+  bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+  if (!ok)
+    std::cerr << "SQLite MFA preference update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
   return ok;
 }

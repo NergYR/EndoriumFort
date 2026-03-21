@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import QRCode from 'qrcode';
@@ -56,8 +56,14 @@ import {
   fetchRelayResolution,
   beginWebAuthnRegistration,
   verifyWebAuthnRegistration,
-  deleteWebAuthnCredential
+  deleteWebAuthnCredential,
+  setMfaPreference
 } from './api.js';
+import { describeAccessOutcome, describeResourcePolicy, normalizeRiskLevel } from './accessPolicy.js';
+import AdminSectionNav from './components/admin/AdminSectionNav.jsx';
+import { EmptyState, InlineAlert, MetricTile, SectionCard, StatusBadge } from './components/ui/primitives.jsx';
+
+const RecordingsPanel = lazy(() => import('./components/operator/RecordingsPanel.jsx'));
 
 const ROLE_BLUEPRINTS = [
   {
@@ -92,24 +98,6 @@ const roleLabel = (role) => {
   const mapped = normalizeRole(role);
   const found = ROLE_BLUEPRINTS.find((item) => item.id === mapped);
   return found ? found.label : mapped;
-};
-
-const normalizeRiskLevel = (value) => {
-  const normalized = String(value || 'low').toLowerCase();
-  return ['low', 'medium', 'high', 'critical'].includes(normalized)
-    ? normalized
-    : 'low';
-};
-
-const describeResourcePolicy = (resource) => {
-  const riskLevel = normalizeRiskLevel(resource?.riskLevel);
-  const items = [`Risk ${riskLevel}`];
-  if (resource?.requireAccessJustification) items.push('Reason required');
-  if (resource?.requireDualApproval) items.push('Dual approval');
-  if (resource?.adaptiveAccessPolicy) items.push('Adaptive controls');
-  if (resource?.enableCommandGuard) items.push('SSH guard');
-  if (riskLevel === 'high' || riskLevel === 'critical') items.push('MFA-sensitive');
-  return items;
 };
 
 const isWebAuthnSupported = () =>
@@ -409,6 +397,7 @@ export default function App() {
   const [route, setRoute] = useState(() =>
     window.location.pathname ? window.location.pathname : '/'
   );
+  const [adminSection, setAdminSection] = useState('resources');
   const [mainTab, setMainTab] = useState('sessions');
   const [inlineWebResource, setInlineWebResource] = useState(null);
   const [accessPromptResource, setAccessPromptResource] = useState(null);
@@ -486,6 +475,7 @@ export default function App() {
   const [webauthnLoginOptions, setWebauthnLoginOptions] = useState(null);
   const [webauthnBusy, setWebauthnBusy] = useState(false);
   const [webauthnLabel, setWebauthnLabel] = useState('');
+  const [preferredMfaMethod, setPreferredMfaMethod] = useState('any');
   // Recordings state
   const [recordings, setRecordings] = useState([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
@@ -634,22 +624,22 @@ export default function App() {
     const base = {
       overview: {
         title: 'Overview',
-        hint: 'Use this page for global posture and rapid checks.',
+        hint: 'Fast health and posture checks.',
         focus: 'Review posture and recent sessions.'
       },
       sessions: {
         title: 'Sessions',
-        hint: 'Operate live access and intervene when needed.',
+        hint: 'Operate live access.',
         focus: 'Start, monitor, and terminate active sessions.'
       },
       audit: {
         title: 'Audit',
-        hint: 'Investigate events and validate user actions.',
+        hint: 'Investigate events.',
         focus: 'Filter and inspect traceability records.'
       },
       recordings: {
         title: 'Recordings',
-        hint: 'Replay session evidence for forensic analysis.',
+        hint: 'Replay captured evidence.',
         focus: 'Open SSH cast files and inspect timelines.'
       }
     };
@@ -663,21 +653,21 @@ export default function App() {
         stage: 'Operate',
         title: 'Live Access',
         shortcut: 'Alt+1',
-        hint: 'Run and supervise remote sessions in real time.'
+        hint: 'Open and supervise sessions.'
       },
       {
         id: 'audit',
         stage: 'Trace',
         title: 'Investigation',
         shortcut: 'Alt+2',
-        hint: 'Hunt activity trails and suspicious sequences.'
+        hint: 'Review events and trails.'
       },
       {
         id: 'recordings',
         stage: 'Evidence',
         title: 'Replay Vault',
         shortcut: 'Alt+3',
-        hint: 'Replay captured sessions and validate behavior.',
+        hint: 'Replay recorded SSH sessions.',
         hidden: !canViewRecordings
       }
     ];
@@ -704,6 +694,41 @@ export default function App() {
       offline: Math.max(0, relays.length - online)
     };
   }, [relays]);
+
+  const adminSections = useMemo(() => {
+    const adminsWithoutMfa = stats?.users?.adminsWithoutMfa || 0;
+    const pendingRequests = accessRequests.filter((item) => item.status === 'pending').length;
+    return [
+      {
+        id: 'resources',
+        label: 'Resources',
+        hint: 'Inventory and policies',
+        badge: String(resources.length),
+        badgeTone: loadingResources ? 'loading' : 'ok'
+      },
+      {
+        id: 'users',
+        label: 'Users',
+        hint: 'Accounts and access scope',
+        badge: String(users.length),
+        badgeTone: loadingUsers ? 'loading' : 'ok'
+      },
+      {
+        id: 'routing',
+        label: 'Routing',
+        hint: 'Relays and approvals',
+        badge: pendingRequests ? `${pendingRequests} pending` : `${relayInventorySummary.online} online`,
+        badgeTone: pendingRequests ? 'active' : 'ok'
+      },
+      {
+        id: 'security',
+        label: 'Security',
+        hint: 'MFA and posture',
+        badge: adminsWithoutMfa ? `${adminsWithoutMfa} risk` : 'healthy',
+        badgeTone: adminsWithoutMfa ? 'loading' : 'ok'
+      }
+    ];
+  }, [accessRequests, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, users.length]);
 
   const isRelayOnline = (relay) => String(relay?.status || '').toLowerCase() === 'online';
 
@@ -738,6 +763,7 @@ export default function App() {
       setWebauthnCredentials([]);
       setWebauthnLoginOptions(null);
       setAvailableMfaMethods([]);
+      setPreferredMfaMethod('any');
       setAuthToken('');
       navigate('/login');
     };
@@ -1468,6 +1494,7 @@ export default function App() {
         setTotpCode('');
         setAvailableMfaMethods(Array.isArray(payload.mfaMethods) ? payload.mfaMethods : (payload.totpEnabled ? ['totp'] : []));
         setWebauthnLoginOptions(payload.webauthn || null);
+        setPreferredMfaMethod(String(payload.preferredMfaMethod || 'any'));
         setAuthError('');
         return;
       }
@@ -1488,6 +1515,7 @@ export default function App() {
       setAuthToken(payload.token);
       setTotpEnabled(!!payload.totpEnabled);
       setWebauthnEnabled(!!payload.webauthnEnabled);
+      setPreferredMfaMethod(String(payload.preferredMfaMethod || 'any'));
       setBootstrapState({
         required: !!bootstrap.required,
         passwordChangeRequired: !!bootstrap.passwordChangeRequired,
@@ -1553,6 +1581,7 @@ export default function App() {
       setAuthToken(payload.token);
       setTotpEnabled(!!payload.totpEnabled);
       setWebauthnEnabled(!!payload.webauthnEnabled);
+      setPreferredMfaMethod(String(payload.preferredMfaMethod || 'any'));
       setBootstrapState({
         required: !!bootstrap.required,
         passwordChangeRequired: !!bootstrap.passwordChangeRequired,
@@ -1591,6 +1620,7 @@ export default function App() {
     setWebauthnCredentials([]);
     setWebauthnLoginOptions(null);
     setAvailableMfaMethods([]);
+    setPreferredMfaMethod('any');
     setTotpSetupData(null);
     setTotpQrDataUrl('');
     setTotpCopyStatus('');
@@ -2786,6 +2816,7 @@ export default function App() {
       const data = await verify2FA(totpSetupCode);
       setTotpEnabled(true);
       setWebauthnEnabled(!!data.webauthnEnabled);
+      if (data.preferredMfaMethod) setPreferredMfaMethod(String(data.preferredMfaMethod));
       setTotpSetupData(null);
       setTotpQrDataUrl('');
       setTotpSetupCode('');
@@ -2810,6 +2841,7 @@ export default function App() {
       const data = await disable2FA(totpDisableCode);
       setTotpEnabled(false);
       setWebauthnEnabled(!!data.webauthnEnabled);
+      if (data.preferredMfaMethod) setPreferredMfaMethod(String(data.preferredMfaMethod));
       setTotpDisableCode('');
       setTotpError('');
       setBootstrapState((prev) => ({
@@ -2829,6 +2861,7 @@ export default function App() {
       setTotpEnabled(!!data.totpEnabled);
       setWebauthnEnabled(!!data.webauthnEnabled);
       setWebauthnCredentials(Array.isArray(data.credentials) ? data.credentials : []);
+      setPreferredMfaMethod(String(data.preferredMfaMethod || 'any'));
       setBootstrapState((prev) => ({
         ...prev,
         totpEnabled: !!data.totpEnabled,
@@ -2863,6 +2896,7 @@ export default function App() {
       });
       setWebauthnEnabled(!!data.webauthnEnabled);
       setTotpEnabled(!!data.totpEnabled);
+      if (data.preferredMfaMethod) setPreferredMfaMethod(String(data.preferredMfaMethod));
       await onLoad2FAStatus();
       const bootstrap = data.bootstrap || {};
       setBootstrapState({
@@ -2893,6 +2927,7 @@ export default function App() {
       setWebauthnEnabled(!!data.webauthnEnabled);
       setTotpEnabled(!!data.totpEnabled);
       setWebauthnCredentials(Array.isArray(data.credentials) ? data.credentials : []);
+      if (data.preferredMfaMethod) setPreferredMfaMethod(String(data.preferredMfaMethod));
       setBootstrapState((prev) => ({
         ...prev,
         mfaSetupRequired: !data.totpEnabled && !data.webauthnEnabled,
@@ -2903,6 +2938,16 @@ export default function App() {
       setTotpError(error.message || 'Failed to remove passkey');
     } finally {
       setWebauthnBusy(false);
+    }
+  };
+
+  const onUpdateMfaPreference = async (method) => {
+    setTotpError('');
+    try {
+      const data = await setMfaPreference(method);
+      setPreferredMfaMethod(String(data.preferredMfaMethod || method || 'any'));
+    } catch (error) {
+      setTotpError(error.message || 'Failed to save MFA preference');
     }
   };
 
@@ -3719,7 +3764,6 @@ export default function App() {
           <img src="/assets/logo-icon-dark.png" alt="EndoriumFort" className="brand-logo" />
           <div>
             <h1>Admin Console</h1>
-            <p>Govern users, resources, and role-based permissions.</p>
           </div>
         </div>
         <div className="top-actions">
@@ -3736,76 +3780,43 @@ export default function App() {
         </div>
       </header>
 
-      {canManagePlatform && stats && (
-        <section className="stats-grid reveal" style={{ marginBottom: '1rem' }}>
-          <div className="stat-card">
-            <div className="stat-icon stat-sessions">⚡</div>
-            <div>
-              <h4>{stats.sessions?.active || 0}</h4>
-              <p className="muted">Active sessions</p>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-icon stat-total">📊</div>
-            <div>
-              <h4>{stats.sessions?.total || 0}</h4>
-              <p className="muted">Total sessions</p>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-icon stat-resources">🖥️</div>
-            <div>
-              <h4>{stats.resources?.total || 0}</h4>
-              <p className="muted">Resources</p>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-icon stat-users">👤</div>
-            <div>
-              <h4>{stats.users?.total || 0}</h4>
-              <p className="muted">Users</p>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-icon stat-recordings">🎬</div>
-            <div>
-              <h4>{stats.recordings?.total || 0}</h4>
-              <p className="muted">Recordings</p>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-icon stat-tokens">🔑</div>
-            <div>
-              <h4>{stats.auth?.activeTokens || 0}</h4>
-              <p className="muted">Active tokens</p>
-            </div>
-          </div>
-        </section>
+      {canManagePlatform && (
+        <>
+          {stats && (
+            <section className="metric-tile-grid reveal" style={{ marginBottom: '1rem' }}>
+              <MetricTile icon="⚡" label="Active sessions" value={stats.sessions?.active || 0} />
+              <MetricTile icon="📊" label="Total sessions" value={stats.sessions?.total || 0} />
+              <MetricTile icon="🖥️" label="Resources" value={stats.resources?.total || 0} />
+              <MetricTile icon="👤" label="Users" value={stats.users?.total || 0} />
+              <MetricTile icon="🎬" label="Recordings" value={stats.recordings?.total || 0} />
+              <MetricTile icon="🔑" label="Active tokens" value={stats.auth?.activeTokens || 0} />
+            </section>
+          )}
+
+          <section className="admin-shell-head reveal" style={{ marginBottom: '1rem' }}>
+            <AdminSectionNav sections={adminSections} current={adminSection} onChange={setAdminSection} />
+          </section>
+        </>
       )}
 
       {!canManagePlatform ? (
-        <div className="panel reveal">
-          <h3>Platform admin access required</h3>
-          <p className="muted">Sign in with the Platform Admin role to manage users and resources.</p>
-        </div>
+        <SectionCard title="Platform admin access required">
+          <EmptyState title="Admin access only" message="Sign in with a platform admin account to manage users, resources, routing, and security." />
+        </SectionCard>
       ) : (
         <div className="admin-grid">
+          {adminSection === 'resources' && (
           <div className="panel reveal access-scope-panel">
             <div className="panel-header">
               <div>
                 <h3>{editingResourceId ? 'Edit resource' : 'New resource'}</h3>
-                <p>Create tiles operators can connect to.</p>
               </div>
             </div>
             <form className="resource-form" onSubmit={onSubmitResource}>
               <div className="full resource-section">
                 <div className="resource-section-header">
                   <div>
-                    <p className="workflow-kicker">Identity</p>
-                    <h4>Resource Identity</h4>
-                    <p className="muted">
-                      Define how the tile is named, described, and visually recognized in the operator workspace.
-                    </p>
+                    <h4>Identity</h4>
                   </div>
                 </div>
                 <div className="section-grid">
@@ -3867,11 +3878,7 @@ export default function App() {
               <div className="full resource-section">
                 <div className="resource-section-header">
                   <div>
-                    <p className="workflow-kicker">Connectivity</p>
-                    <h4>Target Connectivity</h4>
-                    <p className="muted">
-                      Configure the target endpoint, protocol, port, and optional vault material used during access.
-                    </p>
+                    <h4>Connectivity</h4>
                   </div>
                 </div>
                 <div className="section-grid">
@@ -3965,11 +3972,7 @@ export default function App() {
               <div className="full policy-editor">
                 <div className="policy-editor-header">
                   <div>
-                    <p className="workflow-kicker">Access Policy</p>
                     <h4>Access Policy</h4>
-                    <p className="muted">
-                      Define the guardrails applied once a user has the role capability and resource scope.
-                    </p>
                   </div>
                   <span className={`pill ${normalizeRiskLevel(resourceForm.riskLevel) === 'critical' ? 'error' : normalizeRiskLevel(resourceForm.riskLevel) === 'high' ? 'warning' : 'ok'}`}>
                     {normalizeRiskLevel(resourceForm.riskLevel)}
@@ -4056,26 +4059,21 @@ export default function App() {
               <div className="full resource-section routing-section">
                 <div className="resource-section-header">
                   <div>
-                    <p className="workflow-kicker">Routing</p>
-                    <h4>Transport Path</h4>
-                    <p className="muted">
-                      Resource routing is managed in the Relay Fabric panel below. Create the
-                      resource here, then decide whether it uses direct routing or a dedicated relay.
-                    </p>
+                    <h4>Routing</h4>
                   </div>
                 </div>
                 <div className="routing-summary">
                   <article>
                     <strong>Direct</strong>
-                    <span>Backend connects straight to the target.</span>
+                    <span>Backend to target.</span>
                   </article>
                   <article>
                     <strong>Relay</strong>
-                    <span>Route traffic through the Relay Fabric for segmented environments.</span>
+                    <span>Through assigned relay.</span>
                   </article>
                   <article>
                     <strong>Agent</strong>
-                    <span>Use the local agent path when transparent tunneling is needed.</span>
+                    <span>Local tunnel path.</span>
                   </article>
                 </div>
               </div>
@@ -4118,7 +4116,9 @@ export default function App() {
             </form>
             {resourceError && <p className="error">{resourceError}</p>}
           </div>
+          )}
 
+          {adminSection === 'resources' && (
           <div className="panel reveal">
             <div className="panel-header">
               <div>
@@ -4168,12 +4168,13 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
+          {adminSection === 'routing' && (
           <div className="panel reveal relay-panel">
             <div className="panel-header">
               <div>
                 <h3>Relay Fabric</h3>
-                <p>Distributed bastion control-plane: fleet health and per-resource routing.</p>
               </div>
               {loadingRelays && <span className="pill loading">syncing</span>}
             </div>
@@ -4197,25 +4198,13 @@ export default function App() {
               </article>
             </div>
 
-            <p className="muted">
-              Cert required: {relayConfig.certificateRequired ? 'yes' : 'no'} • Cert TTL: {relayConfig.certificateTtlSeconds}s • Token TTL: {relayConfig.tokenTtlSeconds}s • Offline threshold: {relayConfig.heartbeatStaleSeconds}s
-            </p>
-
             <div className="relay-enroll-panel">
               <div>
-                <h4>Relay Agent Bootstrap (recommended)</h4>
-                <p className="muted">
-                  Use the EndoriumFort agent path first. Manual API bootstrap is available as advanced fallback.
-                </p>
+                <h4>Relay Bootstrap</h4>
               </div>
               <div className="relay-enroll-token-box">
-                <p>
-                  <strong>Install helper ({resolveAgentInstallGuide().platform})</strong>
-                </p>
+                <p><strong>Install helper ({resolveAgentInstallGuide().platform})</strong></p>
                 <code className="relay-enroll-command">{resolveAgentInstallGuide().command}</code>
-                <p className="muted">
-                  After install, use the built-in agent launch flow from the resource access workflow.
-                </p>
               </div>
               <div className="resource-actions">
                 <button
@@ -4229,12 +4218,7 @@ export default function App() {
 
               {showRelayManualBootstrap && (
                 <>
-                  <div>
-                    <h4>Manual bootstrap (optional)</h4>
-                    <p className="muted">
-                      Generate certificate + short-lived token, then enroll relay manually through API.
-                    </p>
-                  </div>
+                  <div><h4>Manual</h4></div>
                   <div className="resource-actions">
                     <button
                       type="button"
@@ -4278,9 +4262,7 @@ export default function App() {
                     </div>
                   )}
                   {!relayConfig.enrollmentEnabled && (
-                    <p className="muted">
-                      Enrollment secret is not configured on backend. Set `ENDORIUMFORT_RELAY_ENROLL_SECRET` first.
-                    </p>
+                    <p className="muted">Enrollment secret missing on backend.</p>
                   )}
                   {relayEnrollmentToken && (
                     <div className="relay-enroll-token-box">
@@ -4314,14 +4296,13 @@ export default function App() {
                   </article>
                 ))
               ) : (
-                <p className="muted">No relay enrolled yet. Configure `ENDORIUMFORT_RELAY_ENROLL_SECRET` and enroll a relay node.</p>
+                <p className="muted">No relay enrolled yet.</p>
               )}
             </div>
 
             <div className="panel-header" style={{ marginTop: '0.9rem' }}>
               <div>
                 <h3>Resource Routing Assignments</h3>
-                <p>Bind each resource to one relay, or keep direct routing fallback.</p>
               </div>
               <label className="relay-filter-toggle">
                 <input
@@ -4368,12 +4349,13 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
+          {adminSection === 'routing' && (
           <div className="panel reveal">
             <div className="panel-header">
               <div>
                 <h3>Access Requests</h3>
-                <p>Dual-control queue and user requests.</p>
               </div>
               {loadingAccessRequests && <span className="pill loading">loading</span>}
             </div>
@@ -4421,12 +4403,13 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
+          {adminSection === 'users' && (
           <div className="panel reveal">
             <div className="panel-header">
               <div>
                 <h3>{editingUserId ? 'Edit user' : 'New user'}</h3>
-                <p>Create login accounts for the console.</p>
               </div>
               {loadingUsers && <span className="pill loading">loading</span>}
             </div>
@@ -4472,12 +4455,6 @@ export default function App() {
                 />
                 <span>Require password rotation on next sign-in</span>
               </label>
-              {userForm.role === 'admin' && (
-                <p className="muted">
-                  MFA is mandatory for all admin accounts. If the account is not enrolled yet, the
-                  user will be forced through MFA setup at sign-in.
-                </p>
-              )}
               <div className="resource-actions">
                 <button type="submit">
                   {editingUserId ? 'Update' : 'Create'} user
@@ -4548,38 +4525,13 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
-          <div className="panel reveal">
-            <div className="panel-header">
-              <div>
-                <h3>RBAC Blueprint</h3>
-                <p>Operational role model and expected permissions.</p>
-              </div>
-            </div>
-            <div className="rbac-grid">
-              {ROLE_BLUEPRINTS.map((role) => (
-                <article className="rbac-card" key={role.id}>
-                  <h4>{role.label}</h4>
-                  <p className="muted">{role.description}</p>
-                  <ul>
-                    {role.permissions.map((permission) => (
-                      <li key={`${role.id}-${permission}`}>{permission}</li>
-                    ))}
-                  </ul>
-                </article>
-              ))}
-            </div>
-          </div>
-
+          {adminSection === 'users' && (
           <div className="panel reveal access-scope-panel">
             <div className="panel-header">
               <div>
                 <h3>Access Scope</h3>
-                <p>
-                  {selectedUserForAccessScope
-                    ? `Manage resource scope and role policy for ${selectedUserForAccessScope.username}`
-                    : 'Select a user and click Access Scope to manage resource access.'}
-                </p>
               </div>
               {selectedUserForAccessScope && (
                 <button
@@ -4605,10 +4557,6 @@ export default function App() {
                 <div className="panel-header" style={{ marginTop: '0.5rem' }}>
                   <div>
                     <h3>Resource Scope</h3>
-                    <p>
-                      Roles define what a user may do globally. Resource assignments define which
-                      targets they may actually access.
-                    </p>
                   </div>
                 </div>
                 <div className="resource-list permissions-resources-list">
@@ -4647,10 +4595,6 @@ export default function App() {
                 <div className="panel-header" style={{ marginTop: '1rem' }}>
                   <div>
                     <h3>Role Policy</h3>
-                    <p>
-                      Global capabilities are granted by the user role. Fine-grained action
-                      overrides are no longer part of the day-to-day access model.
-                    </p>
                   </div>
                 </div>
                 <div className="resource-list permissions-grid">
@@ -4666,45 +4610,99 @@ export default function App() {
                       </article>
                     ))}
                 </div>
-                <div className="mission-board" style={{ marginTop: '1rem' }}>
-                  <div className="mission-headline">
-                    <div>
-                      <h3>Policy Layers</h3>
-                      <p className="muted">
-                        Effective access now follows three layers: role capability, resource scope,
-                        then resource guardrails like justification, dual approval, adaptive risk,
-                        and mandatory MFA.
-                      </p>
-                    </div>
-                  </div>
-                </div>
               </>
             )}
           </div>
+          )}
+
+          {adminSection === 'security' && stats && (
+            <SectionCard
+              title="Security Posture"
+              actions={
+                <div className="status-row">
+                  <StatusBadge tone={stats.auth?.webauthn?.configured ? 'ok' : 'loading'}>
+                    {stats.auth?.webauthn?.configured ? 'WebAuthn ready' : 'WebAuthn needs attention'}
+                  </StatusBadge>
+                </div>
+              }
+              className="security-posture-panel"
+            >
+              <div className="security-posture-grid">
+                <article className="security-posture-card">
+                  <StatusBadge tone={(stats.users?.adminsWithoutMfa || 0) === 0 ? 'ok' : 'loading'}>
+                    {(stats.users?.adminsWithoutMfa || 0) === 0 ? 'Protected' : 'Action needed'}
+                  </StatusBadge>
+                  <h4>{stats.users?.adminsWithoutMfa || 0}</h4>
+                </article>
+                <article className="security-posture-card">
+                  <StatusBadge tone={(stats.users?.adminsPendingBootstrap || 0) === 0 ? 'ok' : 'active'}>
+                    {(stats.users?.adminsPendingBootstrap || 0) === 0 ? 'Cleared' : 'Bootstrap pending'}
+                  </StatusBadge>
+                  <h4>{stats.users?.adminsPendingBootstrap || 0}</h4>
+                </article>
+                <article className="security-posture-card">
+                  <StatusBadge tone={stats.auth?.webauthn?.rpIdValid ? 'ok' : 'loading'}>
+                    {stats.auth?.webauthn?.rpIdValid ? 'RP ID valid' : 'RP ID invalid'}
+                  </StatusBadge>
+                  <h4>{stats.auth?.webauthn?.rpId || 'n/a'}</h4>
+                </article>
+                <article className="security-posture-card">
+                  <StatusBadge tone={stats.auth?.webauthn?.originValid ? 'ok' : 'loading'}>
+                    {stats.auth?.webauthn?.originValid ? 'Origin valid' : 'Origin invalid'}
+                  </StatusBadge>
+                  <h4>{stats.auth?.webauthn?.origin || 'n/a'}</h4>
+                </article>
+                <article className="security-posture-card">
+                  <StatusBadge tone={stats.relay?.runtime?.enrollmentEnabled ? 'ok' : 'loading'}>
+                    {stats.relay?.runtime?.enrollmentEnabled ? 'Relay enrollment on' : 'Relay enrollment off'}
+                  </StatusBadge>
+                  <h4>{stats.relay?.runtime?.heartbeatStaleSeconds || 0}s</h4>
+                </article>
+              </div>
+            </SectionCard>
+          )}
 
           {/* 2FA Management Panel */}
+          {adminSection === 'security' && (
           <div className="panel reveal">
             <div className="panel-header">
               <div>
                 <h3>Two-Factor Authentication</h3>
-                <p>Manage TOTP and passkeys for your account.</p>
               </div>
               <span className={`pill ${(totpEnabled || webauthnEnabled) ? 'ok' : 'loading'}`}>
                 {(totpEnabled || webauthnEnabled) ? 'enabled' : 'disabled'}
               </span>
             </div>
+              <div className="mfa-panel-block">
+                <div className="mfa-preference-grid">
+                  <button
+                    type="button"
+                    className={`ghost ${preferredMfaMethod === 'any' ? 'selected-pref' : ''}`}
+                    onClick={() => onUpdateMfaPreference('any')}
+                  >
+                    Flexible
+                  </button>
+                  <button
+                    type="button"
+                    className={`ghost ${preferredMfaMethod === 'totp' ? 'selected-pref' : ''}`}
+                    onClick={() => onUpdateMfaPreference('totp')}
+                    disabled={!totpEnabled}
+                  >
+                    Prefer TOTP
+                  </button>
+                  <button
+                    type="button"
+                    className={`ghost ${preferredMfaMethod === 'webauthn' ? 'selected-pref' : ''}`}
+                    onClick={() => onUpdateMfaPreference('webauthn')}
+                    disabled={!webauthnEnabled}
+                  >
+                    Prefer Passkey
+                  </button>
+                </div>
+              </div>
               {totpError && <p className="error">{totpError}</p>}
               {!totpEnabled && !totpSetupData && (
                 <div className="mfa-panel-block">
-                  <p className="muted">
-                    TOTP MFA works with authenticator apps and with physical OATH-TOTP tokens or
-                    hardware keys configured in OATH mode that generate 6-digit rotating codes.
-                  </p>
-                  <ul className="mfa-device-list">
-                    <li>Phone apps like Google Authenticator, Aegis, or Authy</li>
-                    <li>Physical OATH-TOTP tokens</li>
-                    <li>Hardware security keys that support OATH-TOTP enrollment</li>
-                  </ul>
                   <button type="button" onClick={onSetup2FA} className="mfa-inline-action">
                     Setup TOTP MFA
                   </button>
@@ -4712,11 +4710,6 @@ export default function App() {
               )}
               {totpSetupData && (
               <div className="mfa-panel-block">
-                <p>
-                  Configure your authenticator app or physical TOTP token with the secret below,
-                  or copy the full `otpauth://` URI for compatible hardware enrolled in OATH-TOTP
-                  mode.
-                </p>
                 {totpQrDataUrl && (
                   <div className="bootstrap-qr-image-card mfa-qr-card">
                     <img src={totpQrDataUrl} alt="Local TOTP QR Code" width={220} height={220} />
@@ -4735,10 +4728,6 @@ export default function App() {
                   </div>
                 </div>
                 {totpCopyStatus && <p className="muted">{totpCopyStatus}</p>}
-                <p className="mfa-hint">
-                  If your hardware token cannot scan the QR code, use the manual secret or the
-                  `otpauth://` URI when the device supports direct enrollment.
-                </p>
                 <label>
                   Enter code from your authenticator or hardware token
                   <input
@@ -4766,10 +4755,6 @@ export default function App() {
               </div>
             )}
             <div className="mfa-panel-block">
-              <p className="muted">
-                WebAuthn passkeys work with platform passkeys and physical security keys such as
-                compatible YubiKey-like devices. This can replace TOTP for admin MFA enforcement.
-              </p>
               <label>
                 Passkey label
                 <input
@@ -4790,9 +4775,7 @@ export default function App() {
                 </button>
               </div>
               {!isWebAuthnSupported() && (
-                <p className="mfa-hint">
-                  This browser does not expose the WebAuthn APIs required for passkeys.
-                </p>
+                <p className="mfa-hint">WebAuthn unavailable in this browser.</p>
               )}
               {webauthnCredentials.length > 0 && (
                 <div className="mfa-passkey-list">
@@ -4809,7 +4792,7 @@ export default function App() {
                         type="button"
                         className="ghost"
                         onClick={() => onDeletePasskey(credential.id)}
-                        disabled={webauthnBusy}
+                        disabled={webauthnBusy || (auth.role === 'admin' && !totpEnabled && webauthnCredentials.length <= 1)}
                       >
                         Remove
                       </button>
@@ -4817,13 +4800,12 @@ export default function App() {
                   ))}
                 </div>
               )}
+              {auth.role === 'admin' && !totpEnabled && webauthnCredentials.length <= 1 && (
+                <p className="mfa-hint">Add another factor before removing the last passkey.</p>
+              )}
             </div>
             {totpEnabled && (
               <div className="mfa-panel-block">
-                <p className="muted">
-                  TOTP MFA is currently active. Enter a code from your authenticator app or
-                  physical OATH-TOTP token to disable it.
-                </p>
                 <label>
                   Current TOTP code
                   <input
@@ -4840,12 +4822,17 @@ export default function App() {
                   type="button"
                   onClick={onDisable2FA}
                   className="ghost mfa-inline-action"
+                  disabled={auth.role === 'admin' && !webauthnEnabled}
                 >
                   Disable 2FA
                 </button>
+                {auth.role === 'admin' && !webauthnEnabled && (
+                  <p className="mfa-hint">Register a passkey before disabling TOTP.</p>
+                )}
               </div>
             )}
           </div>
+          )}
         </div>
       )}
     </div>
@@ -5039,8 +5026,8 @@ export default function App() {
         <div className="mission-headline">
           <div>
             <p className="workflow-kicker">Access Workspace</p>
-            <h3>Operate Without Context Switching</h3>
-            <p>Open a resource and access it directly on this page. No dashboard detours.</p>
+            <h3>Choose a resource and act</h3>
+            <p>Risk, requirements, and launch path are visible before you connect.</p>
           </div>
           <div className="mission-headline-actions">
             <button type="button" className="ghost" onClick={onQuickRefresh} disabled={quickRefreshing}>
@@ -5196,7 +5183,7 @@ export default function App() {
         <div className="panel-header">
           <div>
             <h3>Resources</h3>
-            <p>Select a resource tile to connect instantly.</p>
+            <p>Open a tile to see what the session will require.</p>
           </div>
           <div className="status-row">
             {loadingResources ? (
@@ -5206,7 +5193,7 @@ export default function App() {
             )}
           </div>
         </div>
-        {resourceError && <p className="error">{resourceError}</p>}
+        {resourceError && <InlineAlert tone="error">{resourceError}</InlineAlert>}
         <div className="resource-tiles">
           {resources.length ? (
             resources.map((resource) => (
@@ -5240,6 +5227,11 @@ export default function App() {
                   {resource.description && (
                     <p className="muted">{resource.description}</p>
                   )}
+                  <div className="policy-chip-row">
+                    {describeAccessOutcome(resource).map((item) => (
+                      <span className="policy-chip" key={`outcome-${resource.id}-${item}`}>{item}</span>
+                    ))}
+                  </div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   {resource.hasCredentials && (
@@ -5254,7 +5246,7 @@ export default function App() {
               </button>
             ))
           ) : (
-            <p className="muted">No resources yet. Ask an admin to add one.</p>
+            <EmptyState title="No resources yet" message="Ask an admin to add a target or assign a resource to your scope." />
           )}
         </div>
       </section>
@@ -5589,99 +5581,30 @@ export default function App() {
 
       {/* Recordings panel */}
       {mainTab === 'recordings' && canViewRecordings && (
-        <section className="panel reveal" style={{ marginBottom: '24px' }}>
-          <div className="panel-header">
-            <div>
-              <h3>Session Recordings</h3>
-              <p>Replay SSH sessions recorded in Asciinema format.</p>
-            </div>
-            <div className="status-row">
-              {loadingRecordings ? (
-                <span className="pill loading">loading</span>
-              ) : (
-                <span className="pill ok">{recordings.length} recordings</span>
-              )}
-            </div>
-          </div>
-          <div className="audit-controls">
-            <button type="button" className="secondary" onClick={() => loadRecordings()} disabled={loadingRecordings}>
-              Refresh
-            </button>
-            <button type="button" className="ghost" onClick={closePlayer}>Reset player</button>
-          </div>
-          {recordingsError && <p className="error">{recordingsError}</p>}
-          <div className="audit-list">
-            {recordings.length ? (
-              recordings.map((rec) => (
-                <article className="audit-item" key={rec.id}>
-                  <div>
-                    <h4>Recording #{rec.id} — Session #{rec.sessionId}</h4>
-                    <p className="muted">
-                      Duration: {rec.durationMs ? `${(rec.durationMs / 1000).toFixed(1)}s` : 'in progress'} —
-                      Size: {rec.fileSize ? `${(rec.fileSize / 1024).toFixed(1)} KB` : '—'}
-                    </p>
-                  </div>
-                  <div className="audit-meta">
-                    <span className="muted">{rec.createdAt}</span>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => onPlayRecording(rec.id)}
-                    >
-                      {castRecordingId === rec.id ? 'Playing' : 'Play'}
-                    </button>
-                  </div>
-                </article>
-              ))
-            ) : (
-              <p className="muted">No recordings available.</p>
-            )}
-          </div>
-          {castData && (
-            <div className="recording-player-card">
-              <div className="recording-player-header">
-                <h4 className="recording-player-title">Replay — Recording #{castRecordingId}</h4>
-                <div className="recording-player-actions">
-                  {!playerPlaying ? (
-                    <button
-                      type="button"
-                      className="secondary recording-player-btn"
-                      onClick={startPlayer}
-                    >
-                      ▶ Play
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="secondary recording-player-btn"
-                      onClick={stopPlayer}
-                    >
-                      ⏸ Pause
-                    </button>
-                  )}
-                  <span className="recording-player-meta">
-                    {playerIndex}/{playerEvents.length} events
-                  </span>
-                  <button
-                    type="button"
-                    className="ghost recording-player-close"
-                    onClick={closePlayer}
-                  >
-                    Close
-                  </button>
-                </div>
-              </div>
-              <div
-                className="terminal-shell"
-                ref={playerTermRef}
-                style={{ minHeight: '240px', borderRadius: '6px' }}
-              />
-              <p className="recording-player-note">
-                Animated replay powered by xterm.js. Click Play to watch the session unfold in real time.
-              </p>
-            </div>
+        <Suspense
+          fallback={(
+            <SectionCard title="Session Recordings" subtitle="Loading recordings view...">
+              <EmptyState title="Loading" message="Preparing the replay workspace." />
+            </SectionCard>
           )}
-        </section>
+        >
+          <RecordingsPanel
+            loadingRecordings={loadingRecordings}
+            recordings={recordings}
+            recordingsError={recordingsError}
+            loadRecordings={loadRecordings}
+            closePlayer={closePlayer}
+            castData={castData}
+            castRecordingId={castRecordingId}
+            playerPlaying={playerPlaying}
+            startPlayer={startPlayer}
+            stopPlayer={stopPlayer}
+            playerIndex={playerIndex}
+            playerEvents={playerEvents}
+            playerTermRef={playerTermRef}
+            onPlayRecording={onPlayRecording}
+          />
+        </Suspense>
       )}
 
       {mainTab === 'sessions' && (
@@ -5848,6 +5771,11 @@ export default function App() {
                   ? `${accessPromptResource.name} requires an access reason because containment mode is active.`
                   : `${accessPromptResource.name} requires an access reason before opening the session.`}
             </p>
+            <div className="policy-chip-row" style={{ marginBottom: '0.8rem' }}>
+              {describeAccessOutcome(accessPromptResource).map((item) => (
+                <span className="policy-chip" key={`access-prompt-${item}`}>{item}</span>
+              ))}
+            </div>
             {containmentEnabled && accessPromptMode === 'connect' && containmentStatus.reason && (
               <p className="muted" style={{ marginTop: 0 }}>
                 Containment context: {containmentStatus.reason}

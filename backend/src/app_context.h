@@ -80,6 +80,7 @@ struct AppContext {
   // ── Auth state ──
   std::mutex auth_mutex;
   std::unordered_map<std::string, AuthSession> auth_sessions;
+  int listen_port = 8080;
   int token_ttl_seconds = 3600;  // 1 hour default
 
   // ── Resource state ──
@@ -279,6 +280,7 @@ struct AppContext {
 
   // ── 2FA / TOTP ──
   bool update_user_totp(int user_id, bool enabled, const std::string &secret);
+  bool update_user_mfa_preference(int user_id, const std::string &method);
   void load_webauthn_credentials_from_db();
   bool insert_webauthn_credential(const WebAuthnCredential &credential);
   bool update_webauthn_credential(const WebAuthnCredential &credential);

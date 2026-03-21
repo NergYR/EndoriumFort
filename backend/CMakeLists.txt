@@ -93,7 +93,29 @@ if (BUILD_TESTING)
     tests/utils_test.cc
   )
 
+  add_executable(endoriumfort_backend_auth_mfa_tests
+    tests/auth_mfa_test.cc
+  )
+
+  add_executable(endoriumfort_backend_runtime_config_tests
+    tests/runtime_config_test.cc
+  )
+
   target_include_directories(endoriumfort_backend_tests
+    PRIVATE
+      ${crow_SOURCE_DIR}/include
+      ${asio_SOURCE_DIR}/asio/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_include_directories(endoriumfort_backend_auth_mfa_tests
+    PRIVATE
+      ${crow_SOURCE_DIR}/include
+      ${asio_SOURCE_DIR}/asio/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_include_directories(endoriumfort_backend_runtime_config_tests
     PRIVATE
       ${crow_SOURCE_DIR}/include
       ${asio_SOURCE_DIR}/asio/include
@@ -104,5 +126,19 @@ if (BUILD_TESTING)
     PRIVATE ASIO_STANDALONE
   )
 
+  target_compile_definitions(endoriumfort_backend_auth_mfa_tests
+    PRIVATE ASIO_STANDALONE
+  )
+
+  target_compile_definitions(endoriumfort_backend_runtime_config_tests
+    PRIVATE ASIO_STANDALONE
+  )
+
+  target_link_libraries(endoriumfort_backend_tests PRIVATE OpenSSL::Crypto)
+  target_link_libraries(endoriumfort_backend_auth_mfa_tests PRIVATE OpenSSL::Crypto)
+  target_link_libraries(endoriumfort_backend_runtime_config_tests PRIVATE OpenSSL::Crypto SQLite::SQLite3)
+
   add_test(NAME backend_utils_test COMMAND endoriumfort_backend_tests)
+  add_test(NAME backend_auth_mfa_test COMMAND endoriumfort_backend_auth_mfa_tests)
+  add_test(NAME backend_runtime_config_test COMMAND endoriumfort_backend_runtime_config_tests)
 endif()

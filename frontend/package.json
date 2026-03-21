@@ -1,13 +1,13 @@
 {
   "name": "endoriumfort-frontend",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test ./test/api.test.mjs",
+    "test": "node --test ./test/*.test.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {
