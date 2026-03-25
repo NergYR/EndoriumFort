@@ -9,7 +9,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #  Stage 1 — Build backend (C++17)
 # ═══════════════════════════════════════════════════════════════════════════
-FROM debian:bookworm-slim AS backend-build
+FROM debian:13.4-slim AS backend-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git ca-certificates \
@@ -52,7 +52,7 @@ RUN npm run build
 # ═══════════════════════════════════════════════════════════════════════════
 #  Stage 3 — Production image
 # ═══════════════════════════════════════════════════════════════════════════
-FROM debian:bookworm-slim AS production
+FROM debian:13.4-slim AS production
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   nginx libsqlite3-0 libssh2-1 ca-certificates curl openssl certbot \
