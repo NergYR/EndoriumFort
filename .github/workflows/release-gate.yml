@@ -76,7 +76,7 @@ jobs:
 
       - name: Upload backend test log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backend-ctest-log
           path: backend-ctest.log
@@ -103,7 +103,7 @@ jobs:
 
       - name: Upload frontend unit log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-unit-log
           path: frontend/frontend-unit.log
@@ -168,14 +168,14 @@ jobs:
 
       - name: Upload playwright report on failure
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: frontend/playwright-report
 
       - name: Upload e2e runtime logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-runtime-logs
           path: |
@@ -261,7 +261,7 @@ jobs:
             sbom.cdx.json >/dev/null
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: repository-sbom
           path: |
@@ -303,7 +303,7 @@ jobs:
 
       - name: Publish compose logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compose-smoke-log
           path: compose-smoke.log
