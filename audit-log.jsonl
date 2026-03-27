@@ -154,3 +154,4 @@
 {"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-20T13:42:53Z","payload":{"userId":1,"username":"admin"}}
 {"id":1,"type":"auth.login.failure","actor":"admin","role":"","createdAt":"2026-03-21T11:09:41Z","payload":{"reason":"invalid_credentials","username":"admin"}}
 {"id":2,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-21T11:10:03Z","payload":{"userId":1,"username":"admin"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-21T15:45:13Z","payload":{"userId":1,"username":"admin"}}
