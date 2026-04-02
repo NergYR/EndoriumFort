@@ -135,3 +135,25 @@
 {"id":58,"type":"recording.watermark","actor":"system","role":"system","createdAt":"2026-03-10T16:13:40Z","payload":{"sessionId":14,"recordingId":3,"watermark":"wm-14-29993-1130"}}
 {"id":59,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-10T16:13:43Z","payload":{"userId":1,"username":"admin"}}
 {"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-11T10:22:43Z","payload":{"userId":1,"username":"admin"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-19T11:11:48Z","payload":{"userId":1,"username":"admin"}}
+{"id":2,"type":"resource.update","actor":"admin","role":"admin","createdAt":"2026-03-19T11:12:06Z","payload":{"resourceId":5,"name":"VM (web)","target":"10.47.174.134","protocol":"agent","port":80,"requireAccessJustification":false,"requireDualApproval":false,"enableCommandGuard":false,"adaptiveAccessPolicy":false,"riskLevel":"low","description":"test","createdAt":"2026-03-10T15:14:20Z","updatedAt":"2026-03-19T11:12:06Z"}}
+{"id":3,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-19T13:59:01Z","payload":{"userId":1,"username":"admin"}}
+{"id":4,"type":"relay.certificate.issued","actor":"admin","role":"admin","createdAt":"2026-03-19T14:01:05Z","payload":{"certificateId":"efrc_701948a37155625126bcdb26824d57ed5cfc488fa248d2fb8050823e2d987e60","expiresAt":"2026-04-18T14:01:05Z"}}
+{"id":5,"type":"auth.logout","actor":"admin","role":"admin","createdAt":"2026-03-19T14:31:41Z","payload":{"userId":1}}
+{"id":6,"type":"auth.login.failure","actor":"admin","role":"","createdAt":"2026-03-19T14:32:27Z","payload":{"reason":"invalid_credentials","username":"admin"}}
+{"id":7,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-19T14:32:29Z","payload":{"userId":1,"username":"admin"}}
+{"id":8,"type":"session.create","actor":"admin","role":"admin","createdAt":"2026-03-19T14:32:44Z","payload":{"sessionId":15,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"active","createdAt":"2026-03-19T14:32:44Z"}}
+{"id":9,"type":"session.create.unjustified","actor":"admin","role":"admin","createdAt":"2026-03-19T14:32:44Z","payload":{"sessionId":15}}
+{"id":10,"type":"credential.ephemeral.issue","actor":"admin","role":"admin","createdAt":"2026-03-19T14:32:44Z","payload":{"leaseId":6,"resourceId":4,"expiresAt":"2026-03-19T14:34:44Z"}}
+{"id":11,"type":"credential.ephemeral.issue","actor":"admin","role":"admin","createdAt":"2026-03-19T14:32:44Z","payload":{"leaseId":7,"resourceId":4,"expiresAt":"2026-03-19T14:34:44Z"}}
+{"id":12,"type":"credential.ephemeral.consume","actor":"admin","role":"admin","createdAt":"2026-03-19T14:32:44Z","payload":{"leaseId":6,"resourceId":4}}
+{"id":13,"type":"credential.ephemeral.consume","actor":"admin","role":"admin","createdAt":"2026-03-19T14:32:44Z","payload":{"leaseId":7,"resourceId":4}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-20T11:30:11Z","payload":{"userId":1,"username":"admin"}}
+{"id":2,"type":"session.terminate","actor":"admin","role":"admin","createdAt":"2026-03-20T11:33:33Z","payload":{"sessionId":15,"target":"10.47.174.134","user":"energetiq","protocol":"ssh","port":22,"status":"terminated","createdAt":"2026-03-19T14:32:44Z","terminatedAt":"2026-03-20T11:33:33Z"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-20T13:33:43Z","payload":{"userId":1,"username":"admin"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-20T13:42:53Z","payload":{"userId":1,"username":"admin"}}
+{"id":1,"type":"auth.login.failure","actor":"admin","role":"","createdAt":"2026-03-21T11:09:41Z","payload":{"reason":"invalid_credentials","username":"admin"}}
+{"id":2,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-21T11:10:03Z","payload":{"userId":1,"username":"admin"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-03-21T15:45:13Z","payload":{"userId":1,"username":"admin"}}
+{"id":1,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-04-02T14:22:21Z","payload":{"userId":1,"username":"admin"}}
+{"id":2,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-04-02T14:40:17Z","payload":{"userId":1,"username":"admin"}}

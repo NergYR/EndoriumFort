@@ -162,6 +162,17 @@ void AppContext::invalidate_user_tokens(int user_id) {
   }
 }
 
+void AppContext::invalidate_user_tokens_except(int user_id,
+                                               const std::string &token) {
+  std::lock_guard<std::mutex> lock(auth_mutex);
+  for (auto it = auth_sessions.begin(); it != auth_sessions.end();) {
+    if (it->second.userId == user_id && it->first != token)
+      it = auth_sessions.erase(it);
+    else
+      ++it;
+  }
+}
+
 void AppContext::cleanup_expired_tokens() {
   std::string current = now_utc();
   std::lock_guard<std::mutex> lock(auth_mutex);
@@ -258,12 +269,14 @@ void AppContext::init_database() {
       "port INTEGER NOT NULL DEFAULT 22,"
       "description TEXT,"
       "image_url TEXT,"
+      "image_data TEXT,"
       "created_at TEXT NOT NULL,"
       "updated_at TEXT NOT NULL"
       ");";
   if (!sqlite.exec(resource_schema, err))
     std::cerr << "SQLite resource schema failed: " << err << '\n';
   sqlite.exec("ALTER TABLE resources ADD COLUMN image_url TEXT;", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN image_data TEXT;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN http_username TEXT;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN http_password TEXT;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN ssh_username TEXT;", err);
@@ -273,6 +286,7 @@ void AppContext::init_database() {
   sqlite.exec("ALTER TABLE resources ADD COLUMN enable_command_guard INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN adaptive_access_policy INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN risk_level TEXT DEFAULT 'low';", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN tunnel_ticket_rate_limit_max_attempts INTEGER DEFAULT 0;", err);
 
   const std::string user_schema =
       "CREATE TABLE IF NOT EXISTS users ("
@@ -298,21 +312,7 @@ void AppContext::init_database() {
       ");";
   if (!sqlite.exec(perm_schema, err))
     std::cerr << "SQLite user_resource_permissions schema failed: " << err << '\n';
-
-  const std::string perm_override_schema =
-      "CREATE TABLE IF NOT EXISTS user_permission_overrides ("
-      "id INTEGER PRIMARY KEY,"
-      "user_id INTEGER NOT NULL,"
-      "permission TEXT NOT NULL,"
-      "effect TEXT NOT NULL,"
-      "created_at TEXT NOT NULL,"
-      "updated_at TEXT NOT NULL,"
-      "FOREIGN KEY (user_id) REFERENCES users(id),"
-      "UNIQUE(user_id, permission)"
-      ");";
-  if (!sqlite.exec(perm_override_schema, err))
-    std::cerr << "SQLite user_permission_overrides schema failed: " << err
-              << '\n';
+  sqlite.exec("DROP TABLE IF EXISTS user_permission_overrides;", err);
 
   // Session recordings table
   const std::string rec_schema =
@@ -387,13 +387,33 @@ void AppContext::init_database() {
     std::cerr << "SQLite ephemeral_credentials schema failed: " << err << '\n';
 
   // TOTP columns on users
+  sqlite.exec("ALTER TABLE users ADD COLUMN bootstrap_password_change_required INTEGER DEFAULT 0;", err);
+  sqlite.exec("ALTER TABLE users ADD COLUMN bootstrap_mfa_required INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE users ADD COLUMN totp_secret TEXT;", err);
+  sqlite.exec("ALTER TABLE users ADD COLUMN preferred_mfa_method TEXT DEFAULT 'any';", err);
+
+  const std::string webauthn_schema =
+      "CREATE TABLE IF NOT EXISTS user_webauthn_credentials ("
+      "id INTEGER PRIMARY KEY,"
+      "user_id INTEGER NOT NULL,"
+      "credential_id TEXT NOT NULL UNIQUE,"
+      "public_key_spki TEXT NOT NULL,"
+      "sign_count INTEGER NOT NULL DEFAULT 0,"
+      "label TEXT,"
+      "transports_csv TEXT,"
+      "created_at TEXT NOT NULL,"
+      "last_used_at TEXT,"
+      "FOREIGN KEY (user_id) REFERENCES users(id)"
+      ");";
+  if (!sqlite.exec(webauthn_schema, err))
+    std::cerr << "SQLite user_webauthn_credentials schema failed: " << err << '\n';
 
   // Load data into memory
   load_sessions_from_db();
   load_resources_from_db();
   load_users_from_db();
+  load_webauthn_credentials_from_db();
   load_recordings_from_db();
   load_access_requests_from_db();
   load_ephemeral_credentials_from_db();
@@ -410,6 +430,8 @@ void AppContext::seed_default_admin() {
   admin.role = "admin";
   admin.createdAt = now_utc();
   admin.updatedAt = admin.createdAt;
+  admin.bootstrapPasswordChangeRequired = true;
+  admin.bootstrapMfaRequired = true;
   users[admin.id] = admin;
   if (!insert_user(admin))
     std::cerr << "Failed to persist default admin user" << '\n';
@@ -607,7 +629,7 @@ void AppContext::load_resources_from_db() {
       "http_username, http_password, created_at, updated_at, "
       "ssh_username, ssh_password, require_access_justification, "
       "require_dual_approval, enable_command_guard, adaptive_access_policy, "
-      "risk_level FROM resources";
+      "risk_level, tunnel_ticket_rate_limit_max_attempts FROM resources";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite resource select failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -628,6 +650,8 @@ void AppContext::load_resources_from_db() {
       if (desc) r.description = reinterpret_cast<const char *>(desc);
       auto img   = sqlite3_column_text(stmt, 6);
       if (img) r.imageUrl = reinterpret_cast<const char *>(img);
+      auto imgdata = sqlite3_column_text(stmt, 7);
+      if (imgdata) r.imageData = reinterpret_cast<const char *>(imgdata);
       auto hu    = sqlite3_column_text(stmt, 7);
       if (hu) r.httpUsername = reinterpret_cast<const char *>(hu);
       auto hp    = sqlite3_column_text(stmt, 8);
@@ -645,6 +669,10 @@ void AppContext::load_resources_from_db() {
       auto rl = sqlite3_column_text(stmt, 17);
       if (rl) r.riskLevel = reinterpret_cast<const char *>(rl);
       if (r.riskLevel.empty()) r.riskLevel = "low";
+      r.tunnelTicketRateLimitMaxAttempts = sqlite3_column_int(stmt, 18);
+      if (r.tunnelTicketRateLimitMaxAttempts < 0) {
+        r.tunnelTicketRateLimitMaxAttempts = 0;
+      }
       resources[r.id] = r;
       if (r.id > max_id) max_id = r.id;
     }
@@ -656,42 +684,45 @@ void AppContext::load_resources_from_db() {
 bool AppContext::insert_resource(const Resource &r) {
   if (!sqlite.db) return true;
   std::lock_guard<std::mutex> lock(sqlite.mutex);
-  const char *sql =
+    const char *sql =
       "INSERT INTO resources (id, name, target, protocol, port, description, "
-      "image_url, http_username, http_password, created_at, updated_at, "
+      "image_url, image_data, http_username, http_password, created_at, updated_at, "
       "ssh_username, ssh_password, require_access_justification, "
       "require_dual_approval, enable_command_guard, adaptive_access_policy, "
-      "risk_level) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      "risk_level, tunnel_ticket_rate_limit_max_attempts) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite resource insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
     return false;
   }
-  sqlite3_bind_int(stmt, 1, r.id);
-  sqlite3_bind_text(stmt, 2, r.name.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 3, r.target.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 4, r.protocol.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 5, r.port);
-  r.description.empty() ? sqlite3_bind_null(stmt, 6)
+    sqlite3_bind_int(stmt, 1, r.id);
+    sqlite3_bind_text(stmt, 2, r.name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, r.target.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, r.protocol.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 5, r.port);
+    r.description.empty() ? sqlite3_bind_null(stmt, 6)
       : sqlite3_bind_text(stmt, 6, r.description.c_str(), -1, SQLITE_TRANSIENT);
-  r.imageUrl.empty() ? sqlite3_bind_null(stmt, 7)
+    r.imageUrl.empty() ? sqlite3_bind_null(stmt, 7)
       : sqlite3_bind_text(stmt, 7, r.imageUrl.c_str(), -1, SQLITE_TRANSIENT);
-  r.httpUsername.empty() ? sqlite3_bind_null(stmt, 8)
-      : sqlite3_bind_text(stmt, 8, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
-  r.httpPassword.empty() ? sqlite3_bind_null(stmt, 9)
-      : sqlite3_bind_text(stmt, 9, r.httpPassword.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 10, r.createdAt.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 11, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
-  r.sshUsername.empty() ? sqlite3_bind_null(stmt, 12)
-      : sqlite3_bind_text(stmt, 12, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
-  r.sshPassword.empty() ? sqlite3_bind_null(stmt, 13)
-      : sqlite3_bind_text(stmt, 13, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 14, r.requireAccessJustification ? 1 : 0);
-  sqlite3_bind_int(stmt, 15, r.requireDualApproval ? 1 : 0);
-  sqlite3_bind_int(stmt, 16, r.enableCommandGuard ? 1 : 0);
-  sqlite3_bind_int(stmt, 17, r.adaptiveAccessPolicy ? 1 : 0);
-  sqlite3_bind_text(stmt, 18, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
+    r.imageData.empty() ? sqlite3_bind_null(stmt, 8)
+      : sqlite3_bind_text(stmt, 8, r.imageData.c_str(), -1, SQLITE_TRANSIENT);
+    r.httpUsername.empty() ? sqlite3_bind_null(stmt, 9)
+      : sqlite3_bind_text(stmt, 9, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
+    r.httpPassword.empty() ? sqlite3_bind_null(stmt, 10)
+      : sqlite3_bind_text(stmt, 10, r.httpPassword.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 11, r.createdAt.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 12, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+    r.sshUsername.empty() ? sqlite3_bind_null(stmt, 13)
+      : sqlite3_bind_text(stmt, 13, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
+    r.sshPassword.empty() ? sqlite3_bind_null(stmt, 14)
+      : sqlite3_bind_text(stmt, 14, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 15, r.requireAccessJustification ? 1 : 0);
+    sqlite3_bind_int(stmt, 16, r.requireDualApproval ? 1 : 0);
+    sqlite3_bind_int(stmt, 17, r.enableCommandGuard ? 1 : 0);
+    sqlite3_bind_int(stmt, 18, r.adaptiveAccessPolicy ? 1 : 0);
+    sqlite3_bind_text(stmt, 19, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 20, std::max(0, r.tunnelTicketRateLimitMaxAttempts));
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite resource insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -701,12 +732,13 @@ bool AppContext::insert_resource(const Resource &r) {
 bool AppContext::update_resource_db(const Resource &r) {
   if (!sqlite.db) return true;
   std::lock_guard<std::mutex> lock(sqlite.mutex);
-  const char *sql =
+    const char *sql =
       "UPDATE resources SET name=?, target=?, protocol=?, port=?, "
-      "description=?, image_url=?, http_username=?, http_password=?, "
+      "description=?, image_url=?, image_data=?, http_username=?, http_password=?, "
       "updated_at=?, ssh_username=?, ssh_password=?, "
       "require_access_justification=?, require_dual_approval=?, "
-      "enable_command_guard=?, adaptive_access_policy=?, risk_level=? "
+      "enable_command_guard=?, adaptive_access_policy=?, risk_level=?, "
+      "tunnel_ticket_rate_limit_max_attempts=? "
       "WHERE id=?";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -717,25 +749,28 @@ bool AppContext::update_resource_db(const Resource &r) {
   sqlite3_bind_text(stmt, 2, r.target.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 3, r.protocol.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_int(stmt, 4, r.port);
-  r.description.empty() ? sqlite3_bind_null(stmt, 5)
+    r.description.empty() ? sqlite3_bind_null(stmt, 5)
       : sqlite3_bind_text(stmt, 5, r.description.c_str(), -1, SQLITE_TRANSIENT);
-  r.imageUrl.empty() ? sqlite3_bind_null(stmt, 6)
+    r.imageUrl.empty() ? sqlite3_bind_null(stmt, 6)
       : sqlite3_bind_text(stmt, 6, r.imageUrl.c_str(), -1, SQLITE_TRANSIENT);
-  r.httpUsername.empty() ? sqlite3_bind_null(stmt, 7)
-      : sqlite3_bind_text(stmt, 7, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
-  r.httpPassword.empty() ? sqlite3_bind_null(stmt, 8)
-      : sqlite3_bind_text(stmt, 8, r.httpPassword.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 9, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
-  r.sshUsername.empty() ? sqlite3_bind_null(stmt, 10)
-      : sqlite3_bind_text(stmt, 10, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
-  r.sshPassword.empty() ? sqlite3_bind_null(stmt, 11)
-      : sqlite3_bind_text(stmt, 11, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 12, r.requireAccessJustification ? 1 : 0);
-  sqlite3_bind_int(stmt, 13, r.requireDualApproval ? 1 : 0);
-  sqlite3_bind_int(stmt, 14, r.enableCommandGuard ? 1 : 0);
-  sqlite3_bind_int(stmt, 15, r.adaptiveAccessPolicy ? 1 : 0);
-  sqlite3_bind_text(stmt, 16, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 17, r.id);
+    r.imageData.empty() ? sqlite3_bind_null(stmt, 7)
+      : sqlite3_bind_text(stmt, 7, r.imageData.c_str(), -1, SQLITE_TRANSIENT);
+    r.httpUsername.empty() ? sqlite3_bind_null(stmt, 8)
+      : sqlite3_bind_text(stmt, 8, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
+    r.httpPassword.empty() ? sqlite3_bind_null(stmt, 9)
+      : sqlite3_bind_text(stmt, 9, r.httpPassword.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+    r.sshUsername.empty() ? sqlite3_bind_null(stmt, 11)
+      : sqlite3_bind_text(stmt, 11, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
+    r.sshPassword.empty() ? sqlite3_bind_null(stmt, 12)
+      : sqlite3_bind_text(stmt, 12, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 13, r.requireAccessJustification ? 1 : 0);
+    sqlite3_bind_int(stmt, 14, r.requireDualApproval ? 1 : 0);
+    sqlite3_bind_int(stmt, 15, r.enableCommandGuard ? 1 : 0);
+    sqlite3_bind_int(stmt, 16, r.adaptiveAccessPolicy ? 1 : 0);
+    sqlite3_bind_text(stmt, 17, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 18, std::max(0, r.tunnelTicketRateLimitMaxAttempts));
+    sqlite3_bind_int(stmt, 19, r.id);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite resource update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -765,7 +800,8 @@ void AppContext::load_users_from_db() {
   std::lock_guard<std::mutex> db_lock(sqlite.mutex);
   const char *sql =
       "SELECT id, username, password, role, created_at, updated_at, "
-      "totp_enabled, totp_secret FROM users";
+      "bootstrap_password_change_required, bootstrap_mfa_required, "
+      "totp_enabled, totp_secret, preferred_mfa_method FROM users";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite user select failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -782,9 +818,13 @@ void AppContext::load_users_from_db() {
       u.role     = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
       u.createdAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
       u.updatedAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
-      u.totpEnabled = sqlite3_column_int(stmt, 6) != 0;
-      auto secret = sqlite3_column_text(stmt, 7);
+      u.bootstrapPasswordChangeRequired = sqlite3_column_int(stmt, 6) != 0;
+      u.bootstrapMfaRequired = sqlite3_column_int(stmt, 7) != 0;
+      u.totpEnabled = sqlite3_column_int(stmt, 8) != 0;
+      auto secret = sqlite3_column_text(stmt, 9);
       if (secret) u.totpSecret = reinterpret_cast<const char *>(secret);
+      auto preferred = sqlite3_column_text(stmt, 10);
+      if (preferred) u.preferredMfaMethod = reinterpret_cast<const char *>(preferred);
       users[u.id] = u;
       if (u.id > max_id) max_id = u.id;
     }
@@ -798,7 +838,9 @@ bool AppContext::insert_user(const UserAccount &u) {
   std::lock_guard<std::mutex> lock(sqlite.mutex);
   const char *sql =
       "INSERT INTO users (id, username, password, role, created_at, "
-      "updated_at) VALUES (?, ?, ?, ?, ?, ?)";
+      "updated_at, bootstrap_password_change_required, "
+      "bootstrap_mfa_required, totp_enabled, totp_secret, preferred_mfa_method) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite user insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -810,6 +852,14 @@ bool AppContext::insert_user(const UserAccount &u) {
   sqlite3_bind_text(stmt, 4, u.role.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 5, u.createdAt.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 6, u.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 7, u.bootstrapPasswordChangeRequired ? 1 : 0);
+  sqlite3_bind_int(stmt, 8, u.bootstrapMfaRequired ? 1 : 0);
+  sqlite3_bind_int(stmt, 9, u.totpEnabled ? 1 : 0);
+  u.totpSecret.empty()
+      ? sqlite3_bind_null(stmt, 10)
+      : sqlite3_bind_text(stmt, 10, u.totpSecret.c_str(), -1,
+                          SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 11, u.preferredMfaMethod.c_str(), -1, SQLITE_TRANSIENT);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite user insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -819,7 +869,10 @@ bool AppContext::insert_user(const UserAccount &u) {
 bool AppContext::update_user_db(const UserAccount &u) {
   if (!sqlite.db) return true;
   std::lock_guard<std::mutex> lock(sqlite.mutex);
-  const char *sql = "UPDATE users SET password=?, role=?, updated_at=? WHERE id=?";
+  const char *sql =
+      "UPDATE users SET password=?, role=?, updated_at=?, "
+      "bootstrap_password_change_required=?, bootstrap_mfa_required=?, "
+      "totp_enabled=?, totp_secret=?, preferred_mfa_method=? WHERE id=?";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite user update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -828,7 +881,15 @@ bool AppContext::update_user_db(const UserAccount &u) {
   sqlite3_bind_text(stmt, 1, u.password.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 2, u.role.c_str(), -1, SQLITE_TRANSIENT);
   sqlite3_bind_text(stmt, 3, u.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 4, u.id);
+  sqlite3_bind_int(stmt, 4, u.bootstrapPasswordChangeRequired ? 1 : 0);
+  sqlite3_bind_int(stmt, 5, u.bootstrapMfaRequired ? 1 : 0);
+  sqlite3_bind_int(stmt, 6, u.totpEnabled ? 1 : 0);
+  u.totpSecret.empty()
+      ? sqlite3_bind_null(stmt, 7)
+      : sqlite3_bind_text(stmt, 7, u.totpSecret.c_str(), -1,
+                          SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 8, u.preferredMfaMethod.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 9, u.id);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite user update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -838,6 +899,15 @@ bool AppContext::update_user_db(const UserAccount &u) {
 bool AppContext::delete_user_db(int user_id) {
   if (!sqlite.db) return true;
   std::lock_guard<std::mutex> lock(sqlite.mutex);
+  sqlite3_stmt *cleanup_stmt = nullptr;
+  const char *cleanup_sql =
+      "DELETE FROM user_webauthn_credentials WHERE user_id = ?";
+  if (sqlite3_prepare_v2(sqlite.db, cleanup_sql, -1, &cleanup_stmt, nullptr) ==
+      SQLITE_OK) {
+    sqlite3_bind_int(cleanup_stmt, 1, user_id);
+    sqlite3_step(cleanup_stmt);
+  }
+  sqlite3_finalize(cleanup_stmt);
   const char *sql = "DELETE FROM users WHERE id = ?";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -909,46 +979,13 @@ bool AppContext::revoke_resource_permission(int user_id, int resource_id) {
   return ok;
 }
 
-std::unordered_map<std::string, bool> AppContext::get_user_permission_overrides(
-    int user_id) {
-  std::unordered_map<std::string, bool> overrides;
-  if (!sqlite.db) return overrides;
-
-  std::lock_guard<std::mutex> lock(sqlite.mutex);
-  const char *sql =
-      "SELECT permission, effect FROM user_permission_overrides WHERE user_id = ?";
-  sqlite3_stmt *stmt = nullptr;
-  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    std::cerr << "SQLite permission override select failed: "
-              << sqlite3_errmsg(sqlite.db) << '\n';
-    return overrides;
-  }
-  sqlite3_bind_int(stmt, 1, user_id);
-  while (sqlite3_step(stmt) == SQLITE_ROW) {
-    const auto *perm = sqlite3_column_text(stmt, 0);
-    const auto *effect = sqlite3_column_text(stmt, 1);
-    if (!perm || !effect) continue;
-    std::string permission = reinterpret_cast<const char *>(perm);
-    std::string effect_str = reinterpret_cast<const char *>(effect);
-    overrides[permission] = effect_str == "allow";
-  }
-  sqlite3_finalize(stmt);
-  return overrides;
-}
-
 std::unordered_set<std::string> AppContext::get_effective_permissions(
     int user_id, const std::string &role) {
-  auto effective = default_permissions_for_role(role);
-  const auto overrides = get_user_permission_overrides(user_id);
-  for (const auto &entry : overrides) {
-    if (entry.second) {
-      effective.insert(entry.first);
-    } else {
-      effective.erase(entry.first);
-      if (entry.first == "*") effective.erase("*");
-    }
-  }
-  return effective;
+  (void)user_id;
+  // Access decisions now follow a simpler role-policy model:
+  // global capabilities come from the role, while concrete access scope is
+  // enforced through per-resource assignments and resource-level controls.
+  return default_permissions_for_role(role);
 }
 
 bool AppContext::has_permission(int user_id, const std::string &role,
@@ -956,59 +993,6 @@ bool AppContext::has_permission(int user_id, const std::string &role,
   if (!is_known_permission(permission)) return false;
   const auto effective = get_effective_permissions(user_id, role);
   return permissions_contain(effective, permission);
-}
-
-bool AppContext::set_user_permission_override(
-    int user_id, const std::string &permission,
-    std::optional<bool> allow_effect) {
-  if (!is_known_permission(permission) && permission != "*") return false;
-  if (!sqlite.db) return true;
-
-  std::lock_guard<std::mutex> lock(sqlite.mutex);
-  if (!allow_effect.has_value()) {
-    const char *sql =
-        "DELETE FROM user_permission_overrides WHERE user_id=? AND permission=?";
-    sqlite3_stmt *stmt = nullptr;
-    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-      std::cerr << "SQLite permission override delete failed: "
-                << sqlite3_errmsg(sqlite.db) << '\n';
-      return false;
-    }
-    sqlite3_bind_int(stmt, 1, user_id);
-    sqlite3_bind_text(stmt, 2, permission.c_str(), -1, SQLITE_TRANSIENT);
-    const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
-    if (!ok)
-      std::cerr << "SQLite permission override delete failed: "
-                << sqlite3_errmsg(sqlite.db) << '\n';
-    sqlite3_finalize(stmt);
-    return ok;
-  }
-
-  const char *sql =
-      "INSERT INTO user_permission_overrides "
-      "(user_id, permission, effect, created_at, updated_at) "
-      "VALUES (?, ?, ?, ?, ?) "
-      "ON CONFLICT(user_id, permission) DO UPDATE SET "
-      "effect=excluded.effect, updated_at=excluded.updated_at";
-  sqlite3_stmt *stmt = nullptr;
-  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    std::cerr << "SQLite permission override upsert failed: "
-              << sqlite3_errmsg(sqlite.db) << '\n';
-    return false;
-  }
-  const std::string now = now_utc();
-  const std::string effect = *allow_effect ? "allow" : "deny";
-  sqlite3_bind_int(stmt, 1, user_id);
-  sqlite3_bind_text(stmt, 2, permission.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 3, effect.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 4, now.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 5, now.c_str(), -1, SQLITE_TRANSIENT);
-  const bool ok = sqlite3_step(stmt) == SQLITE_DONE;
-  if (!ok)
-    std::cerr << "SQLite permission override upsert failed: "
-              << sqlite3_errmsg(sqlite.db) << '\n';
-  sqlite3_finalize(stmt);
-  return ok;
 }
 
 // ── 2FA / TOTP ─────────────────────────────────────────────────────────
@@ -1047,6 +1031,298 @@ bool AppContext::update_user_totp(int user_id, bool enabled,
   return ok;
 }
 
+bool AppContext::update_user_mfa_preference(int user_id,
+                                            const std::string &method) {
+  {
+    std::lock_guard<std::mutex> lock(user_mutex);
+    auto it = users.find(user_id);
+    if (it == users.end()) return false;
+    it->second.preferredMfaMethod = method;
+    it->second.updatedAt = now_utc();
+  }
+  if (!sqlite.db) return true;
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  const char *sql =
+      "UPDATE users SET preferred_mfa_method=?, updated_at=? WHERE id=?";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite MFA preference update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return false;
+  }
+  std::string ts = now_utc();
+  sqlite3_bind_text(stmt, 1, method.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 2, ts.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 3, user_id);
+  bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+  if (!ok)
+    std::cerr << "SQLite MFA preference update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+  sqlite3_finalize(stmt);
+  return ok;
+}
+
+void AppContext::load_webauthn_credentials_from_db() {
+  if (!sqlite.db) return;
+  std::lock_guard<std::mutex> db_lock(sqlite.mutex);
+  const char *sql =
+      "SELECT id, user_id, credential_id, public_key_spki, sign_count, label, "
+      "transports_csv, created_at, last_used_at "
+      "FROM user_webauthn_credentials";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite WebAuthn select failed: " << sqlite3_errmsg(sqlite.db)
+              << '\n';
+    return;
+  }
+  int max_id = 0;
+  std::lock_guard<std::mutex> webauthn_lock(webauthn_mutex);
+  std::lock_guard<std::mutex> user_lock(user_mutex);
+  while (sqlite3_step(stmt) == SQLITE_ROW) {
+    WebAuthnCredential credential;
+    credential.id = sqlite3_column_int(stmt, 0);
+    credential.userId = sqlite3_column_int(stmt, 1);
+    credential.credentialId =
+        reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+    credential.publicKeySpki =
+        reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+    credential.signCount = sqlite3_column_int(stmt, 4);
+    if (auto value = sqlite3_column_text(stmt, 5))
+      credential.label = reinterpret_cast<const char *>(value);
+    if (auto value = sqlite3_column_text(stmt, 6))
+      credential.transportsCsv = reinterpret_cast<const char *>(value);
+    if (auto value = sqlite3_column_text(stmt, 7))
+      credential.createdAt = reinterpret_cast<const char *>(value);
+    if (auto value = sqlite3_column_text(stmt, 8))
+      credential.lastUsedAt = reinterpret_cast<const char *>(value);
+
+    webauthn_credentials[credential.id] = credential;
+    webauthn_credential_by_external_id[credential.credentialId] = credential.id;
+    auto user_it = users.find(credential.userId);
+    if (user_it != users.end()) {
+      user_it->second.webauthnCredentialCount += 1;
+    }
+    if (credential.id > max_id) max_id = credential.id;
+  }
+  sqlite3_finalize(stmt);
+  if (max_id > 0) next_webauthn_credential_id.store(max_id + 1);
+}
+
+bool AppContext::insert_webauthn_credential(const WebAuthnCredential &credential) {
+  {
+    std::lock_guard<std::mutex> webauthn_lock(webauthn_mutex);
+    if (webauthn_credential_by_external_id.count(credential.credentialId)) {
+      return false;
+    }
+  }
+  if (sqlite.db) {
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "INSERT INTO user_webauthn_credentials "
+        "(id, user_id, credential_id, public_key_spki, sign_count, label, "
+        "transports_csv, created_at, last_used_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite WebAuthn insert failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, credential.id);
+    sqlite3_bind_int(stmt, 2, credential.userId);
+    sqlite3_bind_text(stmt, 3, credential.credentialId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, credential.publicKeySpki.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 5, credential.signCount);
+    credential.label.empty()
+        ? sqlite3_bind_null(stmt, 6)
+        : sqlite3_bind_text(stmt, 6, credential.label.c_str(), -1, SQLITE_TRANSIENT);
+    credential.transportsCsv.empty()
+        ? sqlite3_bind_null(stmt, 7)
+        : sqlite3_bind_text(stmt, 7, credential.transportsCsv.c_str(), -1,
+                            SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, credential.createdAt.c_str(), -1, SQLITE_TRANSIENT);
+    credential.lastUsedAt.empty()
+        ? sqlite3_bind_null(stmt, 9)
+        : sqlite3_bind_text(stmt, 9, credential.lastUsedAt.c_str(), -1,
+                            SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok)
+      std::cerr << "SQLite WebAuthn insert failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+    sqlite3_finalize(stmt);
+    if (!ok) return false;
+  }
+
+  std::lock_guard<std::mutex> webauthn_lock(webauthn_mutex);
+  std::lock_guard<std::mutex> user_lock(user_mutex);
+  webauthn_credentials[credential.id] = credential;
+  webauthn_credential_by_external_id[credential.credentialId] = credential.id;
+  auto user_it = users.find(credential.userId);
+  if (user_it != users.end()) {
+    user_it->second.webauthnCredentialCount += 1;
+  }
+  return true;
+}
+
+bool AppContext::update_webauthn_credential(const WebAuthnCredential &credential) {
+  if (sqlite.db) {
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "UPDATE user_webauthn_credentials SET sign_count=?, label=?, "
+        "transports_csv=?, last_used_at=? WHERE id=?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite WebAuthn update failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, credential.signCount);
+    credential.label.empty()
+        ? sqlite3_bind_null(stmt, 2)
+        : sqlite3_bind_text(stmt, 2, credential.label.c_str(), -1, SQLITE_TRANSIENT);
+    credential.transportsCsv.empty()
+        ? sqlite3_bind_null(stmt, 3)
+        : sqlite3_bind_text(stmt, 3, credential.transportsCsv.c_str(), -1,
+                            SQLITE_TRANSIENT);
+    credential.lastUsedAt.empty()
+        ? sqlite3_bind_null(stmt, 4)
+        : sqlite3_bind_text(stmt, 4, credential.lastUsedAt.c_str(), -1,
+                            SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 5, credential.id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok)
+      std::cerr << "SQLite WebAuthn update failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+    sqlite3_finalize(stmt);
+    if (!ok) return false;
+  }
+
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  auto it = webauthn_credentials.find(credential.id);
+  if (it == webauthn_credentials.end()) return false;
+  it->second = credential;
+  return true;
+}
+
+bool AppContext::delete_webauthn_credential(int credential_id) {
+  WebAuthnCredential existing;
+  {
+    std::lock_guard<std::mutex> lock(webauthn_mutex);
+    auto it = webauthn_credentials.find(credential_id);
+    if (it == webauthn_credentials.end()) return false;
+    existing = it->second;
+  }
+
+  if (sqlite.db) {
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql = "DELETE FROM user_webauthn_credentials WHERE id=?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite WebAuthn delete failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+      return false;
+    }
+    sqlite3_bind_int(stmt, 1, credential_id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok)
+      std::cerr << "SQLite WebAuthn delete failed: " << sqlite3_errmsg(sqlite.db)
+                << '\n';
+    sqlite3_finalize(stmt);
+    if (!ok) return false;
+  }
+
+  std::lock_guard<std::mutex> webauthn_lock(webauthn_mutex);
+  std::lock_guard<std::mutex> user_lock(user_mutex);
+  webauthn_credentials.erase(credential_id);
+  webauthn_credential_by_external_id.erase(existing.credentialId);
+  auto user_it = users.find(existing.userId);
+  if (user_it != users.end() && user_it->second.webauthnCredentialCount > 0) {
+    user_it->second.webauthnCredentialCount -= 1;
+  }
+  return true;
+}
+
+std::vector<WebAuthnCredential> AppContext::get_user_webauthn_credentials(
+    int user_id) {
+  std::vector<WebAuthnCredential> result;
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  for (const auto &entry : webauthn_credentials) {
+    if (entry.second.userId == user_id) {
+      result.push_back(entry.second);
+    }
+  }
+  std::sort(result.begin(), result.end(),
+            [](const WebAuthnCredential &a, const WebAuthnCredential &b) {
+              return a.createdAt < b.createdAt;
+            });
+  return result;
+}
+
+std::optional<WebAuthnCredential>
+AppContext::find_webauthn_credential_by_external_id(
+    const std::string &credential_id) {
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  auto map_it = webauthn_credential_by_external_id.find(credential_id);
+  if (map_it == webauthn_credential_by_external_id.end()) return std::nullopt;
+  auto cred_it = webauthn_credentials.find(map_it->second);
+  if (cred_it == webauthn_credentials.end()) return std::nullopt;
+  return cred_it->second;
+}
+
+bool AppContext::user_has_webauthn(int user_id) {
+  std::lock_guard<std::mutex> lock(user_mutex);
+  auto it = users.find(user_id);
+  return it != users.end() && it->second.webauthnCredentialCount > 0;
+}
+
+WebAuthnChallenge AppContext::create_webauthn_challenge(
+    int user_id, const std::string &username, const std::string &purpose,
+    const std::string &rp_id, const std::string &origin) {
+  cleanup_expired_webauthn_challenges();
+  WebAuthnChallenge challenge;
+  challenge.requestId = generate_token();
+  challenge.userId = user_id;
+  challenge.username = username;
+  challenge.purpose = purpose;
+  challenge.challenge = generate_token();
+  challenge.rpId = rp_id;
+  challenge.origin = origin;
+  challenge.createdAt = now_utc();
+  challenge.expiresAtEpoch = now_epoch_seconds() + webauthn_challenge_ttl_seconds;
+  challenge.expiresAt = utc_from_epoch_seconds(challenge.expiresAtEpoch);
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  webauthn_challenges[challenge.requestId] = challenge;
+  return challenge;
+}
+
+std::optional<WebAuthnChallenge> AppContext::consume_webauthn_challenge(
+    const std::string &request_id, int user_id, const std::string &purpose) {
+  cleanup_expired_webauthn_challenges();
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  auto it = webauthn_challenges.find(request_id);
+  if (it == webauthn_challenges.end()) return std::nullopt;
+  if (it->second.userId != user_id || it->second.purpose != purpose ||
+      it->second.expiresAtEpoch < now_epoch_seconds()) {
+    webauthn_challenges.erase(it);
+    return std::nullopt;
+  }
+  auto challenge = it->second;
+  webauthn_challenges.erase(it);
+  return challenge;
+}
+
+void AppContext::cleanup_expired_webauthn_challenges() {
+  const int64_t now = now_epoch_seconds();
+  std::lock_guard<std::mutex> lock(webauthn_mutex);
+  for (auto it = webauthn_challenges.begin(); it != webauthn_challenges.end();) {
+    if (it->second.expiresAtEpoch < now) {
+      it = webauthn_challenges.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 // ── Password management ────────────────────────────────────────────────
 
 bool AppContext::update_user_password_hash(int user_id,
@@ -1074,6 +1350,41 @@ bool AppContext::update_user_password_hash(int user_id,
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok)
     std::cerr << "SQLite password update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+  sqlite3_finalize(stmt);
+  return ok;
+}
+
+bool AppContext::update_user_bootstrap_flags(int user_id,
+                                             bool password_change_required,
+                                             bool mfa_required) {
+  {
+    std::lock_guard<std::mutex> lock(user_mutex);
+    auto it = users.find(user_id);
+    if (it == users.end()) return false;
+    it->second.bootstrapPasswordChangeRequired = password_change_required;
+    it->second.bootstrapMfaRequired = mfa_required;
+    it->second.updatedAt = now_utc();
+  }
+  if (!sqlite.db) return true;
+  std::lock_guard<std::mutex> lock(sqlite.mutex);
+  const char *sql =
+      "UPDATE users SET bootstrap_password_change_required=?, "
+      "bootstrap_mfa_required=?, updated_at=? WHERE id=?";
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    std::cerr << "SQLite bootstrap flag update failed: "
+              << sqlite3_errmsg(sqlite.db) << '\n';
+    return false;
+  }
+  std::string ts = now_utc();
+  sqlite3_bind_int(stmt, 1, password_change_required ? 1 : 0);
+  sqlite3_bind_int(stmt, 2, mfa_required ? 1 : 0);
+  sqlite3_bind_text(stmt, 3, ts.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 4, user_id);
+  bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+  if (!ok)
+    std::cerr << "SQLite bootstrap flag update failed: "
               << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
   return ok;

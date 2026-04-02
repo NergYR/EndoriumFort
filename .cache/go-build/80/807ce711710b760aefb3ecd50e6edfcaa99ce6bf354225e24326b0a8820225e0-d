@@ -1,0 +1,9 @@
+# test log
+getenv TMPDIR
+getenv HOME
+getenv HOME
+open /tmp/TestTokenFileRoundtripWithStrictPermissions2576843673/001/.endoriumfort_token
+getenv HOME
+stat /tmp/TestTokenFileRoundtripWithStrictPermissions2576843673/001/.endoriumfort_token
+open /tmp/TestTokenFileRoundtripWithStrictPermissions2576843673/001/.endoriumfort_token
+open /tmp

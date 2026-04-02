@@ -1,7 +1,8 @@
 #pragma once
 // ─── EndoriumFort — Cryptographic utilities ─────────────────────────────
-// Self-contained SHA-256, password hashing with salt, and password policy.
-// No external crypto dependency required.
+// SHA-256 helpers, password hashing with migration support, and password policy.
+
+#include <openssl/evp.h>
 
 #include <array>
 #include <cstdint>
@@ -210,13 +211,42 @@ inline std::string generate_salt() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Password hashing: SHA-256 with salt, 10000 iterations (PBKDF2-like)
+//  Password hashing: scrypt (primary), legacy SHA-256 migration support
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Hash a password with the given salt using iterated SHA-256.
-/// Returns: "sha256:10000:<salt>:<hex_hash>"
-inline std::string hash_password(const std::string &password,
-                                 const std::string &salt) {
+inline std::string hex_encode(const unsigned char *data, size_t len) {
+  static const char hex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(len * 2);
+  for (size_t i = 0; i < len; ++i) {
+    const unsigned char byte = data[i];
+    out += hex[byte >> 4];
+    out += hex[byte & 0x0F];
+  }
+  return out;
+}
+
+inline bool hex_decode(const std::string &hex_value, std::string &out) {
+  if (hex_value.size() % 2 != 0) return false;
+  auto decode_nibble = [](char ch) -> int {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return 10 + (ch - 'a');
+    if (ch >= 'A' && ch <= 'F') return 10 + (ch - 'A');
+    return -1;
+  };
+  out.clear();
+  out.reserve(hex_value.size() / 2);
+  for (size_t i = 0; i < hex_value.size(); i += 2) {
+    const int hi = decode_nibble(hex_value[i]);
+    const int lo = decode_nibble(hex_value[i + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out.push_back(static_cast<char>((hi << 4) | lo));
+  }
+  return true;
+}
+
+inline std::string hash_password_legacy_sha256(const std::string &password,
+                                               const std::string &salt) {
   const int iterations = 10000;
   std::string current = salt + ":" + password;
   for (int i = 0; i < iterations; ++i) {
@@ -225,34 +255,116 @@ inline std::string hash_password(const std::string &password,
   return "sha256:10000:" + salt + ":" + current;
 }
 
-/// Hash a password with a new random salt.
+inline std::string hash_password_legacy_sha256(const std::string &password) {
+  return hash_password_legacy_sha256(password, generate_salt());
+}
+
+inline std::string hash_password_scrypt(const std::string &password,
+                                        const std::string &salt_hex) {
+  constexpr uint64_t n = 1ULL << 15;
+  constexpr uint64_t r = 8;
+  constexpr uint64_t p = 1;
+  constexpr size_t derived_key_len = 32;
+  constexpr uint64_t maxmem = 64ULL * 1024ULL * 1024ULL;
+  std::string salt_bytes;
+  if (!hex_decode(salt_hex, salt_bytes)) return {};
+  unsigned char derived_key[derived_key_len];
+  if (EVP_PBE_scrypt(password.c_str(), password.size(),
+                     reinterpret_cast<const unsigned char *>(salt_bytes.data()),
+                     salt_bytes.size(), n, r, p, maxmem, derived_key,
+                     sizeof(derived_key)) != 1) {
+    return {};
+  }
+  return "scrypt:32768:8:1:" + salt_hex + ":" +
+         hex_encode(derived_key, sizeof(derived_key));
+}
+
+inline std::string hash_password(const std::string &password,
+                                 const std::string &salt_hex) {
+  return hash_password_scrypt(password, salt_hex);
+}
+
 inline std::string hash_password(const std::string &password) {
   return hash_password(password, generate_salt());
 }
 
+inline bool verify_password_legacy_sha256(const std::string &password,
+                                          const std::string &stored) {
+  size_t p1 = stored.find(':', 7);
+  if (p1 == std::string::npos) return false;
+  size_t p2 = stored.find(':', p1 + 1);
+  if (p2 == std::string::npos) return false;
+  const std::string salt = stored.substr(p1 + 1, p2 - p1 - 1);
+  const std::string expected_hash = stored.substr(p2 + 1);
+  int iterations = 10000;
+  try {
+    iterations = std::stoi(stored.substr(7, p1 - 7));
+  } catch (...) {}
+
+  std::string current = salt + ":" + password;
+  for (int i = 0; i < iterations; ++i) {
+    current = sha256_hex(current);
+  }
+  return current == expected_hash;
+}
+
+inline bool verify_password_scrypt(const std::string &password,
+                                   const std::string &stored) {
+  const std::string prefix = "scrypt:";
+  constexpr uint64_t maxmem = 64ULL * 1024ULL * 1024ULL;
+  if (stored.rfind(prefix, 0) != 0) return false;
+  const size_t p1 = stored.find(':', prefix.size());
+  const size_t p2 = stored.find(':', p1 == std::string::npos ? p1 : p1 + 1);
+  const size_t p3 = stored.find(':', p2 == std::string::npos ? p2 : p2 + 1);
+  const size_t p4 = stored.find(':', p3 == std::string::npos ? p3 : p3 + 1);
+  if (p1 == std::string::npos || p2 == std::string::npos ||
+      p3 == std::string::npos || p4 == std::string::npos) {
+    return false;
+  }
+
+  uint64_t n = 0;
+  uint64_t r = 0;
+  uint64_t p = 0;
+  try {
+    n = static_cast<uint64_t>(std::stoull(stored.substr(prefix.size(), p1 - prefix.size())));
+    r = static_cast<uint64_t>(std::stoull(stored.substr(p1 + 1, p2 - p1 - 1)));
+    p = static_cast<uint64_t>(std::stoull(stored.substr(p2 + 1, p3 - p2 - 1)));
+  } catch (...) {
+    return false;
+  }
+  const std::string salt_hex = stored.substr(p3 + 1, p4 - p3 - 1);
+  const std::string expected_hex = stored.substr(p4 + 1);
+  std::string salt_bytes;
+  if (!hex_decode(salt_hex, salt_bytes)) return false;
+  std::string expected_bytes;
+  if (!hex_decode(expected_hex, expected_bytes)) return false;
+  std::vector<unsigned char> derived_key(expected_bytes.size(), 0);
+  if (EVP_PBE_scrypt(password.c_str(), password.size(),
+                     reinterpret_cast<const unsigned char *>(salt_bytes.data()),
+                     salt_bytes.size(), n, r, p, maxmem, derived_key.data(),
+                     derived_key.size()) != 1) {
+    return false;
+  }
+  return constant_time_equals(
+      std::string(reinterpret_cast<const char *>(derived_key.data()),
+                  derived_key.size()),
+      expected_bytes);
+}
+
+inline bool password_hash_needs_rehash(const std::string &stored) {
+  return stored.rfind("scrypt:", 0) != 0;
+}
+
 /// Verify a password against a stored hash string.
-/// Supports both new format "sha256:10000:<salt>:<hash>" and legacy plaintext.
+/// Supports scrypt, legacy SHA-256, and legacy plaintext.
 inline bool verify_password(const std::string &password,
                             const std::string &stored) {
-  // New format: sha256:iterations:salt:hash
-  if (stored.rfind("sha256:", 0) == 0) {
-    // Parse: sha256:10000:salt:hash
-    size_t p1 = stored.find(':', 7);   // after "sha256:"
-    if (p1 == std::string::npos) return false;
-    size_t p2 = stored.find(':', p1 + 1);
-    if (p2 == std::string::npos) return false;
-    std::string salt = stored.substr(p1 + 1, p2 - p1 - 1);
-    std::string expected_hash = stored.substr(p2 + 1);
-    int iterations = 10000;
-    try {
-      iterations = std::stoi(stored.substr(7, p1 - 7));
-    } catch (...) {}
+  if (stored.rfind("scrypt:", 0) == 0) {
+    return verify_password_scrypt(password, stored);
+  }
 
-    std::string current = salt + ":" + password;
-    for (int i = 0; i < iterations; ++i) {
-      current = sha256_hex(current);
-    }
-    return current == expected_hash;
+  if (stored.rfind("sha256:", 0) == 0) {
+    return verify_password_legacy_sha256(password, stored);
   }
 
   // Legacy: plaintext comparison (for migration)

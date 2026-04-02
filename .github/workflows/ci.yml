@@ -28,7 +28,7 @@ jobs:
 
       - name: Build backend
         working-directory: backend
-        run: cmake --build build --target endoriumfort_backend endoriumfort_backend_tests -j"$(nproc)"
+        run: cmake --build build -j"$(nproc)"
 
       - name: Run backend tests
         working-directory: backend/build
@@ -59,6 +59,10 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm run build
+
+      - name: Check Playwright scenarios load
+        working-directory: frontend
+        run: npm run test:e2e -- --list
 
   agent-build-test:
     name: Agent Build & Test

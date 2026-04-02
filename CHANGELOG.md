@@ -1,6 +1,12 @@
 # Changelog
 
 ## v1.1.0-dev - 2026-03-11
+### Agent Tunnel UX (RDP/VNC)
+- Frontend now routes `rdp` and `vnc` resources through the same agent deep-link tunnel flow as `agent` resources, avoiding SSH-terminal startup attempts for non-SSH protocols.
+- Added protocol-aware agent modal guidance: browser auto-redirect remains for web-style usage, while RDP/VNC now show direct local endpoint instructions for native clients.
+- Added deep-link `no-browser=1` support in the Go agent to keep the tunnel running without auto-opening a browser (useful for RDP/SSH/VNC workflows).
+- Added unit test coverage for deep-link `no-browser` flag parsing in `agent/main_test.go`.
+
 ### Agent Distribution & Packaging
 - Added native packaging scripts for the agent:
   - Linux `.deb` / `.rpm` (`agent/packaging/linux/build-packages.sh`)
@@ -8,6 +14,8 @@
   - Windows `.msi` (`agent/packaging/windows/build-msi.ps1`)
 - Added cross-platform packaging helper script `agent/packaging/build-installers.sh`.
 - Extended GitHub release workflow `.github/workflows/release-agent.yml` to publish installer artifacts on tag pushes (`v*`) in the same pipeline as agent binaries.
+- Fixed APT repository publishing to index both `amd64` and `all` package architectures, ensuring `endoriumfort-web-bastion` is installable via `apt`.
+- Fixed APT package index `Filename` entries to use repository-relative paths (no `release/apt-repo/` prefix), preventing `404 Not Found` during `apt install`.
 - Added optional installer signing hooks in release workflow:
   - macOS notarization/stapling when Apple Notary secrets are provided
   - Windows Authenticode signing when PFX secrets are provided
@@ -40,6 +48,7 @@
   - relay fleet visibility (status, metadata, managed resource count)
   - per-resource relay assignment controls with direct fallback option
   - online-only relay assignment toggle to reduce accidental selection of stale/offline relays
+  - agent-first relay bootstrap section, with manual curl enrollment collapsed behind an advanced toggle
   - relay certificate generation and copy workflow for secure relay bootstrap
   - direct relay enrollment token generation with copy-ready bootstrap command
   - runtime relay configuration visibility (certificate policy, enrollment enabled, TTL, stale threshold)
