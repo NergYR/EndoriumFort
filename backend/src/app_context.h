@@ -208,7 +208,7 @@ struct AppContext {
   // ── Tunnel ticket issuance throttle ──
   std::mutex tunnel_ticket_issue_limit_mutex;
   std::unordered_map<int, RateLimitEntry> tunnel_ticket_issue_by_user;
-  int tunnel_ticket_issue_max_attempts = 20;
+  int tunnel_ticket_issue_max_attempts = 120;
   std::chrono::seconds tunnel_ticket_issue_window{60};
 
   // ── Relay control-plane state ──

@@ -515,19 +515,6 @@ func runTunnelListener(manager *TunnelManager, rt *tunnelRuntime, wg *sync.WaitG
 	localPort := rt.binding.LocalPort
 
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", localPort)
-
-	// Preflight: validate auth + resource access by issuing a one-time tunnel ticket.
-	if _, _, _, _, _, _, _, err := apiIssueTunnelTicket(manager.serverURL, manager.currentToken(), resource.ID, manager.insecureTLS); err != nil {
-		rt.stats.state.Store("degraded")
-		rt.stats.lastError.Store(err.Error())
-		if strings.Contains(err.Error(), "HTTP 401") && manager.refreshTokenFromSources() {
-			_, _, _, _, _, _, _, err = apiIssueTunnelTicket(manager.serverURL, manager.currentToken(), resource.ID, manager.insecureTLS)
-		}
-		if err != nil {
-			logEvent("error", "tunnel.preflight.failed", map[string]interface{}{"resourceId": resource.ID, "localPort": localPort, "error": err.Error()})
-			return
-		}
-	}
 	rt.stats.state.Store("healthy")
 	rt.stats.lastError.Store("")
 
@@ -1296,6 +1283,9 @@ func handleTunnelConnection(tcpConn net.Conn, manager *TunnelManager, rt *tunnel
 			err = ticketErr
 			rt.stats.state.Store("degraded")
 			rt.stats.lastError.Store(ticketErr.Error())
+			if strings.Contains(ticketErr.Error(), "HTTP 429") {
+				break
+			}
 		} else {
 			wsURL := buildWSURL(manager.serverURL, resourceID, ticket)
 			timestamp := strconv.FormatInt(time.Now().Unix(), 10)

@@ -13,6 +13,8 @@ struct RuntimeConfig {
   int port = 8080;
   int tokenTtlSeconds = 3600;
   int webauthnChallengeTtlSeconds = 180;
+  int tunnelTicketIssueMaxAttempts = 120;
+  int tunnelTicketIssueWindowSeconds = 60;
   std::string webauthnRpIdOverride;
   std::string webauthnOriginOverride;
   bool relayEnrollmentEnabled = false;
@@ -63,6 +65,12 @@ inline RuntimeConfig load_runtime_config(const AppContext &ctx) {
   config.webauthnChallengeTtlSeconds = parse_positive_int_env(
       "ENDORIUMFORT_WEBAUTHN_CHALLENGE_TTL_SECONDS",
       ctx.webauthn_challenge_ttl_seconds);
+  config.tunnelTicketIssueMaxAttempts = parse_positive_int_env(
+      "ENDORIUMFORT_TUNNEL_TICKET_RATE_LIMIT_MAX_ATTEMPTS",
+      ctx.tunnel_ticket_issue_max_attempts);
+  config.tunnelTicketIssueWindowSeconds = parse_positive_int_env(
+      "ENDORIUMFORT_TUNNEL_TICKET_RATE_LIMIT_WINDOW_SECONDS",
+      static_cast<int>(ctx.tunnel_ticket_issue_window.count()));
   config.webauthnRpIdOverride = parse_string_env("ENDORIUMFORT_WEBAUTHN_RP_ID");
   config.webauthnOriginOverride = parse_string_env("ENDORIUMFORT_WEBAUTHN_ORIGIN");
   config.relayCertificateRequired = parse_bool_env(
@@ -86,6 +94,9 @@ inline void apply_runtime_config(AppContext &ctx, const RuntimeConfig &config) {
   ctx.listen_port = config.port;
   ctx.token_ttl_seconds = config.tokenTtlSeconds;
   ctx.webauthn_challenge_ttl_seconds = config.webauthnChallengeTtlSeconds;
+  ctx.tunnel_ticket_issue_max_attempts = config.tunnelTicketIssueMaxAttempts;
+  ctx.tunnel_ticket_issue_window =
+      std::chrono::seconds(config.tunnelTicketIssueWindowSeconds);
   ctx.webauthn_rp_id_override = config.webauthnRpIdOverride;
   ctx.webauthn_origin_override = config.webauthnOriginOverride;
   ctx.relay_certificate_required = config.relayCertificateRequired;
@@ -105,6 +116,10 @@ inline void log_runtime_config(const RuntimeConfig &config) {
   summary << "[config] port=" << config.port
           << " token_ttl_seconds=" << config.tokenTtlSeconds
           << " webauthn_challenge_ttl_seconds=" << config.webauthnChallengeTtlSeconds
+          << " tunnel_ticket_rate_limit_max_attempts="
+          << config.tunnelTicketIssueMaxAttempts
+          << " tunnel_ticket_rate_limit_window_seconds="
+          << config.tunnelTicketIssueWindowSeconds
           << " relay_enrollment=" << (config.relayEnrollmentEnabled ? "enabled" : "disabled")
           << " relay_cert_required=" << (config.relayCertificateRequired ? "true" : "false")
           << " relay_cert_ttl_seconds=" << config.relayCertificateTtlSeconds
