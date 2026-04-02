@@ -2,10 +2,12 @@
 
 #include "routes.h"
 #include "app_context.h"
+#include "auth_mfa.h"
 #include "crypto.h"
 #include "totp.h"
 #include "utils.h"
 #include "version.h"
+#include "webauthn.h"
 
 #include <algorithm>
 #include <fstream>
@@ -57,6 +59,42 @@ bool can_access_any_resource(AppContext &ctx, const AuthSession &auth) {
   if (has_permission(ctx, auth, "resources.manage")) return true;
   if (has_permission(ctx, auth, "resources.read")) return true;
   return false;
+}
+
+crow::json::wvalue build_webauthn_assertion_options(
+    const WebAuthnChallenge &challenge,
+    const std::vector<WebAuthnCredential> &credentials) {
+  crow::json::wvalue payload;
+  payload["requestId"] = challenge.requestId;
+  payload["challenge"] = webauthn::base64url_encode(challenge.challenge);
+  payload["rpId"] = challenge.rpId;
+  payload["timeout"] = challenge.expiresAtEpoch > now_epoch_seconds()
+                           ? static_cast<int>((challenge.expiresAtEpoch -
+                                               now_epoch_seconds()) *
+                                              1000)
+                           : 0;
+  payload["userVerification"] = "preferred";
+  payload["allowCredentials"] = crow::json::wvalue::list();
+  int index = 0;
+  for (const auto &credential : credentials) {
+    crow::json::wvalue item;
+    item["type"] = "public-key";
+    item["id"] = credential.credentialId;
+    payload["allowCredentials"][index++] = std::move(item);
+  }
+  return payload;
+}
+
+std::string build_webauthn_audit_payload(const WebAuthnCredential &credential) {
+  std::ostringstream oss;
+  oss << "{\"userId\":" << credential.userId
+      << ",\"credentialRecordId\":" << credential.id
+      << ",\"label\":\"" << json_escape(credential.label) << "\"";
+  if (!credential.transportsCsv.empty()) {
+    oss << ",\"transports\":\"" << json_escape(credential.transportsCsv) << "\"";
+  }
+  oss << '}';
+  return oss.str();
 }
 
 struct SecurityAlertTemplate {
@@ -156,10 +194,25 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
           return crow::response(429, "Too many login attempts. Try again later.");
         }
 
-        // Optional TOTP code for 2FA
+        // Optional MFA payloads for 2FA
         std::string totp_code;
         if (body.has("totpCode"))
           totp_code = body["totpCode"].s();
+        std::string webauthn_request_id;
+        std::string webauthn_credential_id;
+        std::string webauthn_client_data;
+        std::string webauthn_authenticator_data;
+        std::string webauthn_signature;
+        if (body.has("webauthnRequestId"))
+          webauthn_request_id = body["webauthnRequestId"].s();
+        if (body.has("webauthnCredentialId"))
+          webauthn_credential_id = body["webauthnCredentialId"].s();
+        if (body.has("webauthnClientDataJSON"))
+          webauthn_client_data = body["webauthnClientDataJSON"].s();
+        if (body.has("webauthnAuthenticatorData"))
+          webauthn_authenticator_data = body["webauthnAuthenticatorData"].s();
+        if (body.has("webauthnSignature"))
+          webauthn_signature = body["webauthnSignature"].s();
 
         std::optional<UserAccount> matched;
         {
@@ -188,33 +241,108 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
           return crow::response(401, "Invalid credentials");
         }
 
-        // Auto-migrate plaintext password to hashed
-        if (matched->password.rfind("sha256:", 0) != 0) {
+        // Auto-migrate legacy password formats to the current scrypt scheme.
+        if (crypto::password_hash_needs_rehash(matched->password)) {
           std::string hashed = crypto::hash_password(password);
           ctx.update_user_password_hash(matched->id, hashed);
+          matched->password = hashed;
         }
 
-        // Check 2FA if enabled for this user
-        if (matched->totpEnabled) {
-          if (totp_code.empty()) {
-            crow::json::wvalue payload;
-            payload["status"] = "2fa_required";
-            payload["message"] = "TOTP code required";
-            payload["user"] = matched->username;
-            return crow::response{payload};
+        const bool has_webauthn = user_has_webauthn_enabled(*matched);
+        if (matched->totpEnabled || has_webauthn) {
+          bool mfa_ok = false;
+
+          if (matched->totpEnabled && !totp_code.empty() &&
+              totp::verify_code(matched->totpSecret, totp_code)) {
+            mfa_ok = true;
           }
-          if (!totp::verify_code(matched->totpSecret, totp_code)) {
-            // Audit: 2FA failure
-            AuditEvent evt;
-            evt.id = ctx.next_audit_id.fetch_add(1);
-            evt.type = "auth.login.2fa_failure";
-            evt.actor = user;
-            evt.role = matched->role;
-            evt.createdAt = now_utc();
-            evt.payloadJson = "{\"userId\":" + std::to_string(matched->id) + "}";
-            evt.payloadIsJson = true;
-            ctx.append_audit(evt);
-            return crow::response(401, "Invalid TOTP code");
+
+          if (!mfa_ok && has_webauthn && !webauthn_request_id.empty() &&
+              !webauthn_credential_id.empty() && !webauthn_client_data.empty() &&
+              !webauthn_authenticator_data.empty() && !webauthn_signature.empty()) {
+            const auto challenge = ctx.consume_webauthn_challenge(
+                webauthn_request_id, matched->id, "login");
+            const auto credential =
+                ctx.find_webauthn_credential_by_external_id(webauthn_credential_id);
+            const auto client_data =
+                webauthn::parse_client_data(webauthn_client_data);
+            const auto authenticator_data = challenge
+                                                ? webauthn::parse_authenticator_data(
+                                                      webauthn_authenticator_data,
+                                                      challenge->rpId)
+                                                : std::nullopt;
+
+            if (challenge && credential && client_data && authenticator_data &&
+                credential->userId == matched->id &&
+                client_data->type == "webauthn.get" &&
+                client_data->challenge ==
+                    webauthn::base64url_encode(challenge->challenge) &&
+                client_data->origin == challenge->origin &&
+                (authenticator_data->flags & 0x01) != 0 &&
+                webauthn::verify_assertion_signature(
+                    credential->publicKeySpki, authenticator_data->raw,
+                    client_data->rawJson, webauthn_signature)) {
+              if (!(credential->signCount > 0 &&
+                    authenticator_data->signCount <=
+                        static_cast<uint32_t>(credential->signCount) &&
+                    authenticator_data->signCount != 0)) {
+                WebAuthnCredential updated = *credential;
+                updated.signCount =
+                    static_cast<int>(authenticator_data->signCount);
+                updated.lastUsedAt = now_utc();
+                ctx.update_webauthn_credential(updated);
+                mfa_ok = true;
+              }
+            }
+          }
+
+          if (!mfa_ok) {
+            if (matched->totpEnabled && !totp_code.empty() && !has_webauthn) {
+              AuditEvent evt;
+              evt.id = ctx.next_audit_id.fetch_add(1);
+              evt.type = "auth.login.2fa_failure";
+              evt.actor = user;
+              evt.role = matched->role;
+              evt.createdAt = now_utc();
+              evt.payloadJson = "{\"userId\":" + std::to_string(matched->id) + "}";
+              evt.payloadIsJson = true;
+              ctx.append_audit(evt);
+              return crow::response(401, "Invalid TOTP code");
+            }
+
+            crow::json::wvalue payload;
+            payload["status"] = "mfa_required";
+            payload["message"] =
+                "A second factor is required to complete this login";
+            payload["user"] = matched->username;
+            apply_auth_mfa_payload(payload, *matched);
+            payload["mfaMethods"] = crow::json::wvalue::list();
+            int method_index = 0;
+            const auto ordered_methods = ordered_mfa_methods_for_login(*matched);
+            bool needs_webauthn_options = false;
+            for (const auto &method : ordered_methods) {
+              payload["mfaMethods"][method_index++] = method;
+              if (method == "webauthn") needs_webauthn_options = true;
+            }
+            if (needs_webauthn_options) {
+              const std::string rp_id = webauthn::expected_rp_id(
+                  request, ctx.webauthn_rp_id_override);
+              const std::string origin = webauthn::expected_origin(
+                  request, ctx.webauthn_origin_override);
+              if (!webauthn::is_valid_rp_id(rp_id) ||
+                  !webauthn::is_valid_origin(origin)) {
+                return crow::response(
+                    400,
+                    "WebAuthn requires a valid domain. Configure "
+                    "ENDORIUMFORT_WEBAUTHN_RP_ID and ENDORIUMFORT_WEBAUTHN_ORIGIN "
+                    "(example: app.example.com / https://app.example.com), or use localhost in dev.");
+              }
+              const auto challenge = ctx.create_webauthn_challenge(
+                  matched->id, matched->username, "login", rp_id, origin);
+              payload["webauthn"] = build_webauthn_assertion_options(
+                  challenge, ctx.get_user_webauthn_credentials(matched->id));
+            }
+            return crow::response{payload};
           }
         }
 
@@ -259,7 +387,7 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
         }
         payload["issuedAt"] = auth.issuedAt;
         payload["expiresAt"] = auth.expiresAt;
-        payload["totpEnabled"] = matched->totpEnabled;
+        apply_auth_mfa_payload(payload, *matched);
         crow::response response{payload};
         response.add_header(
             "Set-Cookie",
@@ -308,6 +436,8 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
         if (!body) return crow::response(400, "Invalid JSON body");
         std::string current_password = body["currentPassword"].s();
         std::string new_password = body["newPassword"].s();
+        bool keep_current_session = body.has("keepCurrentSession") &&
+                                    body["keepCurrentSession"].b();
         if (current_password.empty() || new_password.empty())
           return crow::response(400, "Missing currentPassword or newPassword");
 
@@ -332,10 +462,23 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
         std::string hashed = crypto::hash_password(new_password);
         if (!ctx.update_user_password_hash(auth->userId, hashed))
           return crow::response(500, "Failed to update password");
+        bool mfa_required = false;
+        {
+          std::lock_guard<std::mutex> lock(ctx.user_mutex);
+          auto it = ctx.users.find(auth->userId);
+          if (it == ctx.users.end())
+            return crow::response(404, "User not found");
+          mfa_required = it->second.bootstrapMfaRequired;
+        }
+        if (!ctx.update_user_bootstrap_flags(auth->userId, false, mfa_required))
+          return crow::response(500, "Failed to update bootstrap security status");
 
-        // Invalidate all existing tokens for this user (force re-login)
-        std::string current_token = auth->token;
-        ctx.invalidate_user_tokens(auth->userId);
+        // Invalidate sessions, optionally preserving the current bootstrap flow.
+        if (keep_current_session) {
+          ctx.invalidate_user_tokens_except(auth->userId, auth->token);
+        } else {
+          ctx.invalidate_user_tokens(auth->userId);
+        }
 
         // Audit
         AuditEvent evt;
@@ -350,12 +493,42 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
 
         crow::json::wvalue payload;
         payload["status"] = "ok";
-        payload["message"] = "Password changed. All sessions invalidated — please log in again.";
+        {
+          std::lock_guard<std::mutex> lock(ctx.user_mutex);
+          auto it = ctx.users.find(auth->userId);
+          if (it != ctx.users.end()) {
+            apply_auth_mfa_payload(payload, it->second);
+          }
+        }
+        payload["message"] = keep_current_session
+                                 ? "Password changed successfully."
+                                 : "Password changed. All sessions invalidated — please log in again.";
         crow::response response{payload};
-        response.add_header("Set-Cookie",
-                            build_cleared_auth_cookie(request_uses_https(request)));
+        response.add_header(
+            "Set-Cookie",
+            keep_current_session
+                ? build_auth_cookie(auth->token, request_uses_https(request),
+                                    ctx.token_ttl_seconds)
+                : build_cleared_auth_cookie(request_uses_https(request)));
         response.add_header("Cache-Control", "no-store");
         return response;
+      });
+
+  // GET /api/auth/bootstrap-status
+  CROW_ROUTE(app, "/api/auth/bootstrap-status").methods(crow::HTTPMethod::Get)(
+      [&ctx](const crow::request &request) {
+        auto auth = ctx.find_auth(request);
+        if (!auth) return crow::response(401, "Unauthorized");
+
+        std::lock_guard<std::mutex> lock(ctx.user_mutex);
+        auto it = ctx.users.find(auth->userId);
+        if (it == ctx.users.end())
+          return crow::response(404, "User not found");
+
+        crow::json::wvalue payload;
+        payload["status"] = "ok";
+        apply_auth_mfa_payload(payload, it->second);
+        return crow::response{payload};
       });
 }
 
@@ -404,6 +577,10 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
         std::string username = body["username"].s();
         std::string password = body["password"].s();
         std::string role = body["role"].s();
+        bool force_password_rotation =
+            body.has("forcePasswordRotation")
+                ? body["forcePasswordRotation"].b()
+                : normalize_user_role(role) == "admin";
         if (username.empty() || password.empty() || role.empty())
           return crow::response(400, "Missing username, password, or role");
         if (!is_allowed_user_role(role, {"operator", "admin", "auditor"}))
@@ -429,6 +606,8 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
         user.role = normalize_user_role(role);
         user.createdAt = now_utc();
         user.updatedAt = user.createdAt;
+        user.bootstrapPasswordChangeRequired = force_password_rotation;
+        user.bootstrapMfaRequired = user.role == "admin";
 
         {
           std::lock_guard<std::mutex> lock(ctx.user_mutex);
@@ -464,6 +643,11 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
 
             std::string password = body["password"].s();
             std::string role = body["role"].s();
+            std::string normalized_role = normalize_user_role(role);
+            bool force_password_rotation =
+                body.has("forcePasswordRotation")
+                    ? body["forcePasswordRotation"].b()
+                    : normalized_role == "admin";
             if (password.empty() || role.empty())
               return crow::response(400, "Missing password or role");
             if (!is_allowed_user_role(role, {"operator", "admin", "auditor"}))
@@ -482,8 +666,12 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
                 return crow::response(404, "User not found");
               user = it->second;
               user.password = crypto::hash_password(password);
-              user.role = normalize_user_role(role);
+              user.role = normalized_role;
               user.updatedAt = now_utc();
+              user.bootstrapPasswordChangeRequired = force_password_rotation;
+              user.bootstrapMfaRequired =
+                  user.role == "admin" && !user.totpEnabled &&
+                  user.webauthnCredentialCount == 0;
               it->second = user;
             }
             if (!ctx.update_user_db(user))
@@ -596,94 +784,6 @@ void register_user_routes(CrowApp &app, AppContext &ctx) {
             payload["resourceId"] = resource_id;
             return crow::response{payload};
           });
-  // GET /api/users/<int>/permissions
-  CROW_ROUTE(app, "/api/users/<int>/permissions")
-      .methods(crow::HTTPMethod::Get)(
-          [&ctx](const crow::request &request, int user_id) {
-            auto auth = ctx.find_auth(request);
-            if (!auth) return crow::response(401, "Unauthorized");
-            if (!has_permission(ctx, *auth, "users.permissions.manage"))
-              return crow::response(403, "Forbidden");
-
-            UserAccount target_user;
-            {
-              std::lock_guard<std::mutex> lock(ctx.user_mutex);
-              auto it = ctx.users.find(user_id);
-              if (it == ctx.users.end()) return crow::response(404, "User not found");
-              target_user = it->second;
-            }
-
-            auto overrides = ctx.get_user_permission_overrides(user_id);
-            auto effective = ctx.get_effective_permissions(user_id, target_user.role);
-
-            crow::json::wvalue payload;
-            payload["status"] = "ok";
-            payload["userId"] = user_id;
-            payload["role"] = target_user.role;
-            payload["permissions"] = crow::json::wvalue::list();
-
-            int idx = 0;
-            for (const auto &permission : permission_catalog()) {
-              payload["permissions"][idx]["name"] = permission;
-              payload["permissions"][idx]["effective"] =
-                  permissions_contain(effective, permission);
-              if (overrides.find(permission) == overrides.end()) {
-                payload["permissions"][idx]["override"] = "inherit";
-              } else {
-                payload["permissions"][idx]["override"] =
-                    overrides[permission] ? "allow" : "deny";
-              }
-              idx++;
-            }
-            return crow::response{payload};
-          });
-
-  // PUT /api/users/<int>/permissions/<string>
-  CROW_ROUTE(app, "/api/users/<int>/permissions/<string>")
-      .methods(crow::HTTPMethod::Put)(
-          [&ctx](const crow::request &request, int user_id,
-                 const std::string &permission) {
-            auto auth = ctx.find_auth(request);
-            if (!auth) return crow::response(401, "Unauthorized");
-            if (!has_permission(ctx, *auth, "users.permissions.manage"))
-              return crow::response(403, "Forbidden");
-
-            auto body = crow::json::load(request.body);
-            if (!body || !body.has("override")) {
-              return crow::response(400, "Missing override (allow|deny|inherit)");
-            }
-            const std::string override = to_lower(std::string(body["override"].s()));
-            std::optional<bool> effect;
-            if (override == "allow") effect = true;
-            else if (override == "deny") effect = false;
-            else if (override == "inherit") effect = std::nullopt;
-            else return crow::response(400, "Invalid override value");
-
-            if (!ctx.set_user_permission_override(user_id, permission, effect)) {
-              return crow::response(500, "Failed to update permission override");
-            }
-
-            AuditEvent event;
-            event.id = ctx.next_audit_id.fetch_add(1);
-            event.type = "user.permission.override";
-            event.actor = auth->user;
-            event.role = auth->role;
-            event.createdAt = now_utc();
-            event.payloadJson = "{\"userId\":" + std::to_string(user_id) +
-                                ",\"permission\":\"" +
-                                json_escape(permission) +
-                                "\",\"override\":\"" +
-                                json_escape(override) + "\"}";
-            event.payloadIsJson = true;
-            ctx.append_audit(event);
-
-            crow::json::wvalue payload;
-            payload["status"] = "ok";
-            payload["userId"] = user_id;
-            payload["permission"] = permission;
-            payload["override"] = override;
-            return crow::response{payload};
-          });
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -743,10 +843,17 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
         std::string protocol = body["protocol"].s();
         int port = 22;
         if (body.has("port")) port = body["port"].i();
+        int tunnel_ticket_rate_limit_max_attempts = 0;
+        if (body.has("tunnelTicketRateLimitMaxAttempts")) {
+          tunnel_ticket_rate_limit_max_attempts =
+              body["tunnelTicketRateLimitMaxAttempts"].i();
+        }
         std::string description;
         if (body.has("description")) description = body["description"].s();
         std::string image_url;
         if (body.has("imageUrl")) image_url = body["imageUrl"].s();
+        std::string image_data;
+        if (body.has("imageData")) image_data = body["imageData"].s();
         std::string http_username;
         if (body.has("httpUsername")) http_username = body["httpUsername"].s();
         std::string http_password;
@@ -781,6 +888,8 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
           return crow::response(400, "Missing name, target, or protocol");
         if (port <= 0 || port > 65535)
           return crow::response(400, "Invalid port");
+        if (tunnel_ticket_rate_limit_max_attempts < 0)
+          return crow::response(400, "Invalid tunnelTicketRateLimitMaxAttempts");
 
         // Validate protocol whitelist
         if (!is_allowed_role(protocol, {"ssh", "rdp", "vnc", "http", "https", "agent"}))
@@ -804,8 +913,11 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
         resource.target = target;
         resource.protocol = protocol;
         resource.port = port;
+        resource.tunnelTicketRateLimitMaxAttempts =
+            tunnel_ticket_rate_limit_max_attempts;
         resource.description = description;
         resource.imageUrl = image_url;
+        resource.imageData = image_data;
         resource.httpUsername = http_username;
         resource.httpPassword = http_password;
         resource.sshUsername = ssh_username;
@@ -855,10 +967,17 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
             std::string protocol = body["protocol"].s();
             int port = 22;
             if (body.has("port")) port = body["port"].i();
+            int tunnel_ticket_rate_limit_max_attempts = 0;
+            if (body.has("tunnelTicketRateLimitMaxAttempts")) {
+              tunnel_ticket_rate_limit_max_attempts =
+                  body["tunnelTicketRateLimitMaxAttempts"].i();
+            }
             std::string description;
             if (body.has("description")) description = body["description"].s();
             std::string image_url;
             if (body.has("imageUrl")) image_url = body["imageUrl"].s();
+            std::string image_data;
+            if (body.has("imageData")) image_data = body["imageData"].s();
             std::string http_username;
             if (body.has("httpUsername")) http_username = body["httpUsername"].s();
             std::string http_password;
@@ -893,6 +1012,8 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
               return crow::response(400, "Missing name, target, or protocol");
             if (port <= 0 || port > 65535)
               return crow::response(400, "Invalid port");
+            if (tunnel_ticket_rate_limit_max_attempts < 0)
+              return crow::response(400, "Invalid tunnelTicketRateLimitMaxAttempts");
 
             // Validate protocol whitelist
             if (!is_allowed_role(protocol, {"ssh", "rdp", "vnc", "http", "https", "agent"}))
@@ -917,8 +1038,11 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
               resource.target = target;
               resource.protocol = protocol;
               resource.port = port;
+              resource.tunnelTicketRateLimitMaxAttempts =
+                  tunnel_ticket_rate_limit_max_attempts;
               resource.description = description;
               resource.imageUrl = image_url;
+              resource.imageData = image_data;
               resource.httpUsername = http_username;
               resource.httpPassword = http_password;
               resource.sshUsername = ssh_username;
@@ -2232,9 +2356,17 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
             payload["status"] = "ok";
             payload["secret"] = secret;
             payload["otpauthUri"] = uri;
+            payload["webauthnCompatible"] = true;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              if (it != ctx.users.end()) {
+                apply_auth_mfa_payload(payload, it->second);
+              }
+            }
             payload["message"] =
-                "Scan the QR code with your authenticator app, then call "
-                "/api/auth/verify-2fa with a code to enable.";
+                "Import the secret or otpauth URI into your authenticator app, "
+                "then call /api/auth/verify-2fa with a code to enable.";
             return crow::response{payload};
           });
 
@@ -2268,6 +2400,15 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
 
             // Enable 2FA
             ctx.update_user_totp(auth->userId, true, secret);
+            bool password_required = false;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              if (it != ctx.users.end()) {
+                password_required = it->second.bootstrapPasswordChangeRequired;
+              }
+            }
+            ctx.update_user_bootstrap_flags(auth->userId, password_required, false);
 
             AuditEvent event;
             event.id = ctx.next_audit_id.fetch_add(1);
@@ -2282,7 +2423,13 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
             crow::json::wvalue payload;
             payload["status"] = "ok";
             payload["message"] = "2FA has been enabled successfully";
-            payload["totpEnabled"] = true;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              if (it != ctx.users.end()) {
+                apply_auth_mfa_payload(payload, it->second);
+              }
+            }
             return crow::response{payload};
           });
 
@@ -2302,21 +2449,43 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
 
             std::string secret;
             bool enabled = false;
+            std::string role;
+            bool has_webauthn = false;
+            UserAccount current_user;
             {
               std::lock_guard<std::mutex> lock(ctx.user_mutex);
               auto it = ctx.users.find(auth->userId);
               if (it == ctx.users.end())
                 return crow::response(404, "User not found");
+              current_user = it->second;
               secret = it->second.totpSecret;
               enabled = it->second.totpEnabled;
+              role = it->second.role;
+              has_webauthn = user_has_webauthn_enabled(it->second);
             }
             if (!enabled)
               return crow::response(400, "2FA is not enabled");
+            if (normalize_user_role(role) == "admin" &&
+                !admin_can_disable_totp(current_user))
+              return crow::response(
+                  403,
+                  "Admin accounts need at least one MFA method before TOTP can be disabled");
 
             if (!totp::verify_code(secret, code))
               return crow::response(401, "Invalid TOTP code");
 
             ctx.update_user_totp(auth->userId, false, "");
+            bool prefer_totp = false;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              prefer_totp = it != ctx.users.end() &&
+                            it->second.preferredMfaMethod == "totp";
+            }
+            if (prefer_totp) {
+              ctx.update_user_mfa_preference(auth->userId,
+                                             has_webauthn ? "webauthn" : "any");
+            }
 
             AuditEvent event;
             event.id = ctx.next_audit_id.fetch_add(1);
@@ -2331,7 +2500,13 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
             crow::json::wvalue payload;
             payload["status"] = "ok";
             payload["message"] = "2FA has been disabled";
-            payload["totpEnabled"] = false;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              if (it != ctx.users.end()) {
+                apply_auth_mfa_payload(payload, it->second);
+              }
+            }
             return crow::response{payload};
           });
 
@@ -2342,17 +2517,338 @@ void register_totp_routes(CrowApp &app, AppContext &ctx) {
         if (!auth) return crow::response(401, "Unauthorized");
 
         bool enabled = false;
+        bool webauthn_enabled = false;
+        std::string preferred_mfa_method = "any";
         {
           std::lock_guard<std::mutex> lock(ctx.user_mutex);
           auto it = ctx.users.find(auth->userId);
-          if (it != ctx.users.end()) enabled = it->second.totpEnabled;
+          if (it != ctx.users.end()) {
+            enabled = it->second.totpEnabled;
+            webauthn_enabled = it->second.webauthnCredentialCount > 0;
+            preferred_mfa_method = it->second.preferredMfaMethod;
+          }
         }
 
         crow::json::wvalue payload;
         payload["status"] = "ok";
-        payload["totpEnabled"] = enabled;
+        {
+          std::lock_guard<std::mutex> lock(ctx.user_mutex);
+          auto it = ctx.users.find(auth->userId);
+          if (it != ctx.users.end()) {
+            apply_auth_mfa_payload(payload, it->second);
+          } else {
+            payload["totpEnabled"] = enabled;
+            payload["webauthnEnabled"] = webauthn_enabled;
+            payload["preferredMfaMethod"] = normalize_mfa_preference(preferred_mfa_method);
+          }
+        }
+        payload["credentials"] = crow::json::wvalue::list();
+        int idx = 0;
+        for (const auto &credential : ctx.get_user_webauthn_credentials(auth->userId)) {
+          payload["credentials"][idx++] = webauthn::credential_to_json(credential);
+        }
         return crow::response{payload};
       });
+
+  // POST /api/auth/mfa-preference
+  CROW_ROUTE(app, "/api/auth/mfa-preference")
+      .methods(crow::HTTPMethod::Post)(
+          [&ctx](const crow::request &request) {
+            auto auth = ctx.find_auth(request);
+            if (!auth) return crow::response(401, "Unauthorized");
+
+            auto body = crow::json::load(request.body);
+            if (!body) return crow::response(400, "Invalid JSON body");
+
+            const std::string method =
+                body.has("method") ? std::string(body["method"].s()) : std::string();
+            const std::string normalized_method = normalize_mfa_preference(method);
+            if (normalized_method != method && method != "ANY" && method != "TOTP" &&
+                method != "WEBAUTHN") {
+              return crow::response(400, "Invalid MFA preference");
+            }
+
+            bool totp_enabled = false;
+            bool webauthn_enabled = false;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              if (it == ctx.users.end()) return crow::response(404, "User not found");
+              totp_enabled = it->second.totpEnabled;
+              webauthn_enabled = it->second.webauthnCredentialCount > 0;
+            }
+            if (normalized_method == "totp" && !totp_enabled) {
+              return crow::response(400, "TOTP is not enabled for this account");
+            }
+            if (normalized_method == "webauthn" && !webauthn_enabled) {
+              return crow::response(400, "No passkey is registered for this account");
+            }
+            if (!ctx.update_user_mfa_preference(auth->userId, normalized_method)) {
+              return crow::response(500, "Failed to save MFA preference");
+            }
+
+            crow::json::wvalue payload;
+            payload["status"] = "ok";
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              if (it != ctx.users.end()) {
+                apply_auth_mfa_payload(payload, it->second);
+              } else {
+                payload["totpEnabled"] = totp_enabled;
+                payload["webauthnEnabled"] = webauthn_enabled;
+                payload["preferredMfaMethod"] = normalized_method;
+              }
+            }
+            return crow::response{payload};
+          });
+
+  // POST /api/auth/webauthn/register/options
+  CROW_ROUTE(app, "/api/auth/webauthn/register/options")
+      .methods(crow::HTTPMethod::Post)(
+          [&ctx](const crow::request &request) {
+            auto auth = ctx.find_auth(request);
+            if (!auth) return crow::response(401, "Unauthorized");
+
+            auto body = crow::json::load(request.body);
+            std::string label =
+                body && body.has("label") ? std::string(body["label"].s()) : std::string();
+
+            const std::string rp_id = webauthn::expected_rp_id(
+                request, ctx.webauthn_rp_id_override);
+            const std::string origin = webauthn::expected_origin(
+                request, ctx.webauthn_origin_override);
+            if (!webauthn::is_valid_rp_id(rp_id) ||
+                !webauthn::is_valid_origin(origin)) {
+              return crow::response(
+                  400,
+                  "WebAuthn requires a valid domain. Configure "
+                  "ENDORIUMFORT_WEBAUTHN_RP_ID and ENDORIUMFORT_WEBAUTHN_ORIGIN "
+                  "(example: app.example.com / https://app.example.com), or use localhost in dev.");
+            }
+
+            auto challenge = ctx.create_webauthn_challenge(
+                auth->userId, auth->user, "register", rp_id, origin);
+
+            crow::json::wvalue payload;
+            payload["status"] = "ok";
+            payload["requestId"] = challenge.requestId;
+            payload["publicKey"]["rp"]["name"] = "EndoriumFort";
+            payload["publicKey"]["rp"]["id"] = challenge.rpId;
+            payload["publicKey"]["user"]["id"] =
+                webauthn::base64url_encode(std::to_string(auth->userId));
+            payload["publicKey"]["user"]["name"] = auth->user;
+            payload["publicKey"]["user"]["displayName"] = auth->user;
+            payload["publicKey"]["challenge"] =
+                webauthn::base64url_encode(challenge.challenge);
+            payload["publicKey"]["timeout"] = ctx.webauthn_challenge_ttl_seconds * 1000;
+            payload["publicKey"]["attestation"] = "none";
+            payload["publicKey"]["userVerification"] = "preferred";
+            payload["publicKey"]["authenticatorSelection"]["userVerification"] =
+                "preferred";
+            payload["publicKey"]["pubKeyCredParams"] = crow::json::wvalue::list();
+            payload["publicKey"]["pubKeyCredParams"][0]["type"] = "public-key";
+            payload["publicKey"]["pubKeyCredParams"][0]["alg"] = -7;
+            payload["publicKey"]["pubKeyCredParams"][1]["type"] = "public-key";
+            payload["publicKey"]["pubKeyCredParams"][1]["alg"] = -257;
+            payload["publicKey"]["excludeCredentials"] = crow::json::wvalue::list();
+            int index = 0;
+            for (const auto &credential :
+                 ctx.get_user_webauthn_credentials(auth->userId)) {
+              payload["publicKey"]["excludeCredentials"][index]["type"] =
+                  "public-key";
+              payload["publicKey"]["excludeCredentials"][index]["id"] =
+                  credential.credentialId;
+              ++index;
+            }
+            payload["labelHint"] = label;
+            return crow::response{payload};
+          });
+
+  // POST /api/auth/webauthn/register/verify
+  CROW_ROUTE(app, "/api/auth/webauthn/register/verify")
+      .methods(crow::HTTPMethod::Post)(
+          [&ctx](const crow::request &request) {
+            auto auth = ctx.find_auth(request);
+            if (!auth) return crow::response(401, "Unauthorized");
+
+            auto body = crow::json::load(request.body);
+            if (!body) return crow::response(400, "Invalid JSON body");
+
+            const std::string request_id = body.has("requestId")
+                                               ? std::string(body["requestId"].s())
+                                               : std::string();
+            const std::string credential_id = body.has("credentialId")
+                                                  ? std::string(body["credentialId"].s())
+                                                  : std::string();
+            const std::string public_key = body.has("publicKey")
+                                               ? std::string(body["publicKey"].s())
+                                               : std::string();
+            const std::string client_data_json = body.has("clientDataJSON")
+                                                     ? std::string(body["clientDataJSON"].s())
+                                                     : std::string();
+            const std::string authenticator_data =
+                body.has("authenticatorData")
+                    ? std::string(body["authenticatorData"].s())
+                    : std::string();
+            const std::string label =
+                body.has("label") ? std::string(body["label"].s()) : std::string();
+            const int algorithm = body.has("algorithm") ? body["algorithm"].i() : 0;
+            if (request_id.empty() || credential_id.empty() || public_key.empty() ||
+                client_data_json.empty() || authenticator_data.empty()) {
+              return crow::response(400, "Missing WebAuthn registration payload");
+            }
+            if (algorithm != -7 && algorithm != -257)
+              return crow::response(400, "Only ES256 and RS256 passkeys are supported currently");
+
+            const auto challenge =
+                ctx.consume_webauthn_challenge(request_id, auth->userId, "register");
+            const auto client_data = webauthn::parse_client_data(client_data_json);
+            const auto parsed_auth_data = challenge
+                                              ? webauthn::parse_authenticator_data(
+                                                    authenticator_data,
+                                                    challenge->rpId)
+                                              : std::nullopt;
+            if (!challenge || !client_data || !parsed_auth_data ||
+                client_data->type != "webauthn.create" ||
+                client_data->challenge !=
+                    webauthn::base64url_encode(challenge->challenge) ||
+                client_data->origin != challenge->origin ||
+                (parsed_auth_data->flags & 0x01) == 0) {
+              return crow::response(401, "WebAuthn registration validation failed");
+            }
+
+            WebAuthnCredential credential;
+            credential.id = ctx.next_webauthn_credential_id.fetch_add(1);
+            credential.userId = auth->userId;
+            credential.credentialId = credential_id;
+            credential.publicKeySpki = public_key;
+            credential.signCount = static_cast<int>(parsed_auth_data->signCount);
+            credential.label = label.empty() ? "Security key" : label;
+            credential.transportsCsv =
+                body.has("transports")
+                    ? webauthn::transports_to_csv(body["transports"])
+                    : "";
+            credential.createdAt = now_utc();
+
+            if (!ctx.insert_webauthn_credential(credential))
+              return crow::response(409, "This passkey is already registered");
+
+            bool password_required = false;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              if (it != ctx.users.end()) {
+                password_required = it->second.bootstrapPasswordChangeRequired;
+              }
+            }
+            ctx.update_user_bootstrap_flags(auth->userId, password_required, false);
+
+            AuditEvent event;
+            event.id = ctx.next_audit_id.fetch_add(1);
+            event.type = "user.webauthn.register";
+            event.actor = auth->user;
+            event.role = auth->role;
+            event.createdAt = now_utc();
+            event.payloadJson = build_webauthn_audit_payload(credential);
+            event.payloadIsJson = true;
+            ctx.append_audit(event);
+
+            crow::json::wvalue payload;
+            payload["status"] = "ok";
+            payload["message"] = "Passkey registered successfully";
+            payload["credential"] = webauthn::credential_to_json(credential);
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto it = ctx.users.find(auth->userId);
+              if (it != ctx.users.end()) {
+                apply_auth_mfa_payload(payload, it->second);
+              }
+            }
+            return crow::response{payload};
+          });
+
+  // DELETE /api/auth/webauthn/credentials/<int>
+  CROW_ROUTE(app, "/api/auth/webauthn/credentials/<int>")
+      .methods(crow::HTTPMethod::Delete)(
+          [&ctx](const crow::request &request, int credential_id) {
+            auto auth = ctx.find_auth(request);
+            if (!auth) return crow::response(401, "Unauthorized");
+
+            auto credentials = ctx.get_user_webauthn_credentials(auth->userId);
+            auto it = std::find_if(credentials.begin(), credentials.end(),
+                                   [credential_id](const WebAuthnCredential &item) {
+                                     return item.id == credential_id;
+                                   });
+            if (it == credentials.end())
+              return crow::response(404, "Passkey not found");
+
+            bool totp_enabled = false;
+            std::string role;
+            UserAccount current_user;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto user_it = ctx.users.find(auth->userId);
+              if (user_it == ctx.users.end())
+                return crow::response(404, "User not found");
+              current_user = user_it->second;
+              totp_enabled = user_it->second.totpEnabled;
+              role = user_it->second.role;
+            }
+            if (normalize_user_role(role) == "admin" &&
+                !admin_can_remove_webauthn_credential(
+                    current_user, static_cast<int>(credentials.size()) - 1)) {
+              return crow::response(
+                  403,
+                  "Admin accounts must keep at least one MFA method enabled");
+            }
+            if (!ctx.delete_webauthn_credential(credential_id))
+              return crow::response(500, "Failed to remove passkey");
+
+            const bool has_webauthn = ctx.user_has_webauthn(auth->userId);
+            if (!totp_enabled) {
+              ctx.update_user_bootstrap_flags(auth->userId, false, !has_webauthn);
+            }
+            bool prefer_webauthn = false;
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto user_it = ctx.users.find(auth->userId);
+              prefer_webauthn = user_it != ctx.users.end() &&
+                                user_it->second.preferredMfaMethod == "webauthn" &&
+                                !has_webauthn;
+            }
+            if (prefer_webauthn) {
+              ctx.update_user_mfa_preference(auth->userId,
+                                             totp_enabled ? "totp" : "any");
+            }
+
+            AuditEvent event;
+            event.id = ctx.next_audit_id.fetch_add(1);
+            event.type = "user.webauthn.delete";
+            event.actor = auth->user;
+            event.role = auth->role;
+            event.createdAt = now_utc();
+            event.payloadJson = build_webauthn_audit_payload(*it);
+            event.payloadIsJson = true;
+            ctx.append_audit(event);
+
+            crow::json::wvalue payload;
+            payload["status"] = "ok";
+            payload["message"] = "Passkey removed";
+            {
+              std::lock_guard<std::mutex> lock(ctx.user_mutex);
+              auto user_it = ctx.users.find(auth->userId);
+              if (user_it != ctx.users.end()) {
+                apply_auth_mfa_payload(payload, user_it->second);
+              }
+            }
+            payload["credentials"] = crow::json::wvalue::list();
+            int idx = 0;
+            for (const auto &credential : ctx.get_user_webauthn_credentials(auth->userId)) {
+              payload["credentials"][idx++] = webauthn::credential_to_json(credential);
+            }
+            return crow::response{payload};
+          });
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -2498,12 +2994,20 @@ void register_stats_routes(CrowApp &app, AppContext &ctx) {
           }
         }
 
-        int total_users = 0, admin_users = 0;
+        int total_users = 0, admin_users = 0, admins_without_mfa = 0,
+            admins_pending_bootstrap = 0;
         {
           std::lock_guard<std::mutex> lock(ctx.user_mutex);
           total_users = static_cast<int>(ctx.users.size());
-          for (const auto &entry : ctx.users)
-            if (is_user_role(entry.second.role, "admin")) ++admin_users;
+          for (const auto &entry : ctx.users) {
+            if (!is_user_role(entry.second.role, "admin")) continue;
+            ++admin_users;
+            if (!user_has_any_mfa_enabled(entry.second)) ++admins_without_mfa;
+            if (entry.second.bootstrapPasswordChangeRequired ||
+                entry.second.bootstrapMfaRequired) {
+              ++admins_pending_bootstrap;
+            }
+          }
         }
 
         int total_recordings = 0;
@@ -2524,6 +3028,13 @@ void register_stats_routes(CrowApp &app, AppContext &ctx) {
           active_tokens = static_cast<int>(ctx.auth_sessions.size());
         }
 
+        const std::string effective_rp_id =
+            webauthn::expected_rp_id(request, ctx.webauthn_rp_id_override);
+        const std::string effective_origin =
+            webauthn::expected_origin(request, ctx.webauthn_origin_override);
+        const bool rp_id_valid = webauthn::is_valid_rp_id(effective_rp_id);
+        const bool origin_valid = webauthn::is_valid_origin(effective_origin);
+
         crow::json::wvalue payload;
         payload["status"] = "ok";
         payload["sessions"]["total"] = total_sessions;
@@ -2535,9 +3046,36 @@ void register_stats_routes(CrowApp &app, AppContext &ctx) {
         payload["resources"]["rdp"] = rdp_resources;
         payload["users"]["total"] = total_users;
         payload["users"]["admins"] = admin_users;
+        payload["users"]["adminsWithoutMfa"] = admins_without_mfa;
+        payload["users"]["adminsPendingBootstrap"] = admins_pending_bootstrap;
         payload["recordings"]["total"] = total_recordings;
         payload["audit"]["total"] = total_audit;
         payload["auth"]["activeTokens"] = active_tokens;
+        payload["auth"]["runtime"]["port"] = ctx.listen_port;
+        payload["auth"]["runtime"]["tokenTtlSeconds"] = ctx.token_ttl_seconds;
+        payload["auth"]["runtime"]["webauthnChallengeTtlSeconds"] =
+            ctx.webauthn_challenge_ttl_seconds;
+        payload["auth"]["runtime"]["webauthnRpIdOverrideConfigured"] =
+            !ctx.webauthn_rp_id_override.empty();
+        payload["auth"]["runtime"]["webauthnOriginOverrideConfigured"] =
+            !ctx.webauthn_origin_override.empty();
+        payload["auth"]["webauthn"]["rpId"] = effective_rp_id;
+        payload["auth"]["webauthn"]["origin"] = effective_origin;
+        payload["auth"]["webauthn"]["rpIdValid"] = rp_id_valid;
+        payload["auth"]["webauthn"]["originValid"] = origin_valid;
+        payload["auth"]["webauthn"]["configured"] = rp_id_valid && origin_valid;
+        payload["relay"]["runtime"]["enrollmentEnabled"] =
+            !ctx.relay_enroll_secret.empty();
+        payload["relay"]["runtime"]["certificateRequired"] =
+            ctx.relay_certificate_required;
+        payload["relay"]["runtime"]["certificateTtlSeconds"] =
+            ctx.relay_certificate_ttl_seconds;
+        payload["relay"]["runtime"]["enrollmentTokenTtlSeconds"] =
+            ctx.relay_enrollment_token_ttl_seconds;
+        payload["relay"]["runtime"]["tokenTtlSeconds"] =
+            ctx.relay_token_ttl_seconds;
+        payload["relay"]["runtime"]["heartbeatStaleSeconds"] =
+            ctx.relay_heartbeat_stale_seconds;
         return crow::response{payload};
       });
 

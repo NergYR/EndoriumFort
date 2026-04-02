@@ -50,18 +50,25 @@ std::string request_user_agent(const crow::request &request) {
   return user_agent;
 }
 
-bool check_tunnel_ticket_issue_limit(AppContext &ctx, int user_id) {
+std::string tunnel_ticket_issue_subject_key(int user_id, int resource_id) {
+  return std::to_string(user_id) + ":" + std::to_string(resource_id);
+}
+
+bool check_tunnel_ticket_issue_limit(AppContext &ctx, int user_id,
+                                     int resource_id, int max_attempts) {
+  if (max_attempts <= 0) return true;
   const auto now = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(ctx.tunnel_ticket_issue_limit_mutex);
-  auto &entry = ctx.tunnel_ticket_issue_by_user[user_id];
+  auto &entry =
+      ctx.tunnel_ticket_issue_by_subject[tunnel_ticket_issue_subject_key(
+          user_id, resource_id)];
 
   while (!entry.attempts.empty() &&
          (now - entry.attempts.front()) > ctx.tunnel_ticket_issue_window) {
     entry.attempts.pop();
   }
 
-  if (static_cast<int>(entry.attempts.size()) >=
-      ctx.tunnel_ticket_issue_max_attempts) {
+  if (static_cast<int>(entry.attempts.size()) >= max_attempts) {
     return false;
   }
 
@@ -277,19 +284,6 @@ void register_tunnel_routes(CrowApp &app, AppContext &ctx) {
         if (!ctx.has_permission(auth->userId, auth->role, "tunnel.connect")) {
           return crow::response(403, "Forbidden");
         }
-        if (!check_tunnel_ticket_issue_limit(ctx, auth->userId)) {
-          AuditEvent event;
-          event.id = ctx.next_audit_id.fetch_add(1);
-          event.type = "security.tunnel.ticket.rate_limited";
-          event.actor = auth->user;
-          event.role = auth->role;
-          event.createdAt = now_utc();
-          event.payloadJson =
-              "{\"userId\":" + std::to_string(auth->userId) + "}";
-          event.payloadIsJson = true;
-          ctx.append_audit(event);
-          return crow::response(429, "Tunnel ticket rate limit exceeded");
-        }
 
         auto body = crow::json::load(request.body);
         if (!body || !body.has("resourceId")) {
@@ -301,11 +295,33 @@ void register_tunnel_routes(CrowApp &app, AppContext &ctx) {
           return crow::response(400, "Invalid resourceId");
         }
 
+        Resource resource;
         {
           std::lock_guard<std::mutex> lock(ctx.resource_mutex);
-          if (ctx.resources.find(resource_id) == ctx.resources.end()) {
+          auto it = ctx.resources.find(resource_id);
+          if (it == ctx.resources.end()) {
             return crow::response(404, "Resource not found");
           }
+          resource = it->second;
+        }
+
+        if (!check_tunnel_ticket_issue_limit(ctx, auth->userId, resource_id,
+                                             resource.tunnelTicketRateLimitMaxAttempts)) {
+          AuditEvent event;
+          event.id = ctx.next_audit_id.fetch_add(1);
+          event.type = "security.tunnel.ticket.rate_limited";
+          event.actor = auth->user;
+          event.role = auth->role;
+          event.createdAt = now_utc();
+          event.payloadJson =
+              "{\"userId\":" + std::to_string(auth->userId) +
+              ",\"resourceId\":" + std::to_string(resource_id) +
+              ",\"resourceName\":\"" + json_escape(resource.name) +
+              "\",\"maxAttempts\":" +
+              std::to_string(resource.tunnelTicketRateLimitMaxAttempts) + "}";
+          event.payloadIsJson = true;
+          ctx.append_audit(event);
+          return crow::response(429, "Tunnel ticket rate limit exceeded");
         }
 
         std::vector<int> allowed_ids;

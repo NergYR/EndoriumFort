@@ -58,6 +58,19 @@ struct RelayCertificate {
   bool revoked = false;
 };
 
+struct WebAuthnChallenge {
+  std::string requestId;
+  int userId = 0;
+  std::string username;
+  std::string purpose;
+  std::string challenge;
+  std::string rpId;
+  std::string origin;
+  std::string createdAt;
+  std::string expiresAt;
+  int64_t expiresAtEpoch = 0;
+};
+
 struct AppContext {
   // ── Session state ──
   std::mutex session_mutex;
@@ -67,6 +80,7 @@ struct AppContext {
   // ── Auth state ──
   std::mutex auth_mutex;
   std::unordered_map<std::string, AuthSession> auth_sessions;
+  int listen_port = 8080;
   int token_ttl_seconds = 3600;  // 1 hour default
 
   // ── Resource state ──
@@ -78,6 +92,16 @@ struct AppContext {
   std::mutex user_mutex;
   std::unordered_map<int, UserAccount> users;
   std::atomic<int> next_user_id{1};
+
+  // ── WebAuthn / passkeys ──
+  std::mutex webauthn_mutex;
+  std::unordered_map<int, WebAuthnCredential> webauthn_credentials;
+  std::unordered_map<std::string, int> webauthn_credential_by_external_id;
+  std::unordered_map<std::string, WebAuthnChallenge> webauthn_challenges;
+  std::atomic<int> next_webauthn_credential_id{1};
+  int webauthn_challenge_ttl_seconds = 180;
+  std::string webauthn_rp_id_override;
+  std::string webauthn_origin_override;
 
   // ── Audit state ──
   std::mutex audit_mutex;
@@ -183,8 +207,8 @@ struct AppContext {
 
   // ── Tunnel ticket issuance throttle ──
   std::mutex tunnel_ticket_issue_limit_mutex;
-  std::unordered_map<int, RateLimitEntry> tunnel_ticket_issue_by_user;
-  int tunnel_ticket_issue_max_attempts = 20;
+  std::unordered_map<std::string, RateLimitEntry> tunnel_ticket_issue_by_subject;
+  int tunnel_ticket_issue_max_attempts = 120;
   std::chrono::seconds tunnel_ticket_issue_window{60};
 
   // ── Relay control-plane state ──
@@ -223,6 +247,7 @@ struct AppContext {
   void append_session_event(const std::string &type, const Session &session);
   bool invalidate_token(const std::string &token);
   void invalidate_user_tokens(int user_id);
+  void invalidate_user_tokens_except(int user_id, const std::string &token);
   void cleanup_expired_tokens();
   std::string compute_expiry();
 
@@ -255,9 +280,28 @@ struct AppContext {
 
   // ── 2FA / TOTP ──
   bool update_user_totp(int user_id, bool enabled, const std::string &secret);
+  bool update_user_mfa_preference(int user_id, const std::string &method);
+  void load_webauthn_credentials_from_db();
+  bool insert_webauthn_credential(const WebAuthnCredential &credential);
+  bool update_webauthn_credential(const WebAuthnCredential &credential);
+  bool delete_webauthn_credential(int credential_id);
+  std::vector<WebAuthnCredential> get_user_webauthn_credentials(int user_id);
+  std::optional<WebAuthnCredential> find_webauthn_credential_by_external_id(
+      const std::string &credential_id);
+  bool user_has_webauthn(int user_id);
+  WebAuthnChallenge create_webauthn_challenge(int user_id,
+                                              const std::string &username,
+                                              const std::string &purpose,
+                                              const std::string &rp_id,
+                                              const std::string &origin);
+  std::optional<WebAuthnChallenge> consume_webauthn_challenge(
+      const std::string &request_id, int user_id, const std::string &purpose);
+  void cleanup_expired_webauthn_challenges();
 
   // ── Password management ──
   bool update_user_password_hash(int user_id, const std::string &hash);
+  bool update_user_bootstrap_flags(int user_id, bool password_change_required,
+                                   bool mfa_required);
 
   // ── Session recordings ──
   void init_recordings_dir();
@@ -291,13 +335,8 @@ struct AppContext {
   bool grant_resource_permission(int user_id, int resource_id);
   bool revoke_resource_permission(int user_id, int resource_id);
 
-  // ── Granular permission overrides ──
-  std::unordered_map<std::string, bool> get_user_permission_overrides(
-      int user_id);
   std::unordered_set<std::string> get_effective_permissions(
       int user_id, const std::string &role);
   bool has_permission(int user_id, const std::string &role,
                       const std::string &permission);
-  bool set_user_permission_override(int user_id, const std::string &permission,
-                                    std::optional<bool> allow_effect);
 };

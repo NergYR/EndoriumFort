@@ -32,6 +32,17 @@ func TestParseDeepLinkRejectsInvalidScheme(t *testing.T) {
 	}
 }
 
+func TestParseDeepLinkNoBrowserFlag(t *testing.T) {
+	raw := "endoriumfort://connect?server=https%3A%2F%2Fendorium.space&resource=7&local-port=3390&no-browser=1"
+	cfg, err := parseDeepLink(raw)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !cfg.NoBrowser {
+		t.Fatal("expected NoBrowser=true")
+	}
+}
+
 func TestBuildRedirectURLTemplate(t *testing.T) {
 	cfg := DeepLinkConfig{
 		ServerURL:   "https://endorium.space",

@@ -6,6 +6,8 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 struct Session {
   int id = 0;
@@ -24,8 +26,10 @@ struct Resource {
   std::string target;
   std::string protocol;
   int port = 22;
+  int tunnelTicketRateLimitMaxAttempts = 0;
   std::string description;
   std::string imageUrl;
+  std::string imageData; // base64
   std::string httpUsername;
   std::string httpPassword;
   std::string sshUsername;
@@ -79,9 +83,25 @@ struct UserAccount {
   std::string role;
   std::string createdAt;
   std::string updatedAt;
+  bool bootstrapPasswordChangeRequired = false;
+  bool bootstrapMfaRequired = false;
   // 2FA / TOTP
   bool totpEnabled = false;
   std::string totpSecret;  // Base32-encoded secret
+  int webauthnCredentialCount = 0;
+  std::string preferredMfaMethod = "any";
+};
+
+struct WebAuthnCredential {
+  int id = 0;
+  int userId = 0;
+  std::string credentialId;
+  std::string publicKeySpki;
+  int signCount = 0;
+  std::string label;
+  std::string transportsCsv;
+  std::string createdAt;
+  std::string lastUsedAt;
 };
 
 struct AuthSession {

@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import QRCode from 'qrcode';
 import {
   changePassword,
   createResource,
@@ -8,6 +9,7 @@ import {
   deleteResource,
   deleteUser,
   disable2FA,
+  fetchBootstrapStatus,
   fetchAudit,
   fetchHealth,
   fetchRecordingCast,
@@ -39,8 +41,6 @@ import {
   getUserResourcePermissions,
   grantResourcePermission,
   revokeResourcePermission,
-  getUserPermissions,
-  setUserPermissionOverride,
   verify2FA,
   fetchAccessRequests,
   createAccessRequest,
@@ -53,8 +53,17 @@ import {
   createRelayCertificate,
   assignRelayToResource,
   clearRelayForResource,
-  fetchRelayResolution
+  fetchRelayResolution,
+  beginWebAuthnRegistration,
+  verifyWebAuthnRegistration,
+  deleteWebAuthnCredential,
+  setMfaPreference
 } from './api.js';
+import { describeAccessOutcome, describeResourcePolicy, normalizeRiskLevel } from './accessPolicy.js';
+import AdminSectionNav from './components/admin/AdminSectionNav.jsx';
+import { EmptyState, InlineAlert, MetricTile, SectionCard, StatusBadge } from './components/ui/primitives.jsx';
+
+const RecordingsPanel = lazy(() => import('./components/operator/RecordingsPanel.jsx'));
 
 const ROLE_BLUEPRINTS = [
   {
@@ -89,6 +98,102 @@ const roleLabel = (role) => {
   const mapped = normalizeRole(role);
   const found = ROLE_BLUEPRINTS.find((item) => item.id === mapped);
   return found ? found.label : mapped;
+};
+
+const isWebAuthnSupported = () =>
+  typeof window !== 'undefined' &&
+  typeof window.PublicKeyCredential !== 'undefined' &&
+  typeof navigator !== 'undefined' &&
+  !!navigator.credentials?.create &&
+  !!navigator.credentials?.get;
+
+const decodeBase64Url = (value) => {
+  const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
+  const binary = window.atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+};
+
+const encodeBase64Url = (value) => {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value || []);
+  let binary = '';
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return window.btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+};
+
+const serializeAuthenticatorTransports = (response) => {
+  if (!response || typeof response.getTransports !== 'function') return [];
+  try {
+    const transports = response.getTransports();
+    return Array.isArray(transports) ? transports : [];
+  } catch (_) {
+    return [];
+  }
+};
+
+const createBrowserPasskey = async (options) => {
+  if (!isWebAuthnSupported()) {
+    throw new Error('WebAuthn is not available in this browser.');
+  }
+  const publicKey = {
+    ...options.publicKey,
+    challenge: decodeBase64Url(options.publicKey.challenge),
+    user: {
+      ...options.publicKey.user,
+      id: decodeBase64Url(options.publicKey.user.id)
+    },
+    excludeCredentials: (options.publicKey.excludeCredentials || []).map((item) => ({
+      ...item,
+      id: decodeBase64Url(item.id)
+    }))
+  };
+  const credential = await navigator.credentials.create({ publicKey });
+  if (!credential || !credential.response || typeof credential.response.getPublicKey !== 'function') {
+    throw new Error('This browser did not return a usable WebAuthn public key.');
+  }
+  const publicKeyBuffer = credential.response.getPublicKey();
+  const authenticatorData = credential.response.getAuthenticatorData?.();
+  if (!publicKeyBuffer || !authenticatorData) {
+    throw new Error('Unable to extract WebAuthn registration data from this browser.');
+  }
+  return {
+    credentialId: credential.id,
+    publicKey: encodeBase64Url(new Uint8Array(publicKeyBuffer)),
+    algorithm: credential.response.getPublicKeyAlgorithm?.() || 0,
+    authenticatorData: encodeBase64Url(new Uint8Array(authenticatorData)),
+    clientDataJSON: encodeBase64Url(new Uint8Array(credential.response.clientDataJSON)),
+    transports: serializeAuthenticatorTransports(credential.response)
+  };
+};
+
+const getBrowserPasskeyAssertion = async (options) => {
+  if (!isWebAuthnSupported()) {
+    throw new Error('WebAuthn is not available in this browser.');
+  }
+  const publicKey = {
+    ...options,
+    challenge: decodeBase64Url(options.challenge),
+    allowCredentials: (options.allowCredentials || []).map((item) => ({
+      ...item,
+      id: decodeBase64Url(item.id)
+    }))
+  };
+  const credential = await navigator.credentials.get({ publicKey });
+  if (!credential || !credential.response) {
+    throw new Error('No passkey assertion was returned by the browser.');
+  }
+  return {
+    credentialId: credential.id,
+    authenticatorData: encodeBase64Url(new Uint8Array(credential.response.authenticatorData)),
+    clientDataJSON: encodeBase64Url(new Uint8Array(credential.response.clientDataJSON)),
+    signature: encodeBase64Url(new Uint8Array(credential.response.signature))
+  };
 };
 
 const CAPABILITY_PERMISSION_MAP = {
@@ -261,8 +366,10 @@ export default function App() {
     target: '',
     protocol: 'ssh',
     port: '22',
+    tunnelTicketRateLimitMaxAttempts: '0',
     description: '',
     imageUrl: '',
+    imageData: '', // base64 locale
     httpUsername: '',
     httpPassword: '',
     sshUsername: '',
@@ -280,18 +387,18 @@ export default function App() {
   const [userForm, setUserForm] = useState({
     username: '',
     password: '',
-    role: 'operator'
+    role: 'operator',
+    forcePasswordRotation: false
   });
   const [editingUserId, setEditingUserId] = useState(null);
-  const [selectedUserForPermissions, setSelectedUserForPermissions] = useState(null);
-  const [userPermissions, setUserPermissions] = useState([]);
-  const [loadingPermissions, setLoadingPermissions] = useState(false);
-  const [permissionsError, setPermissionsError] = useState('');
-  const [granularPermissions, setGranularPermissions] = useState([]);
-  const [updatingPermissionKey, setUpdatingPermissionKey] = useState('');
+  const [selectedUserForAccessScope, setSelectedUserForAccessScope] = useState(null);
+  const [userResourceScope, setUserResourceScope] = useState([]);
+  const [loadingAccessScope, setLoadingAccessScope] = useState(false);
+  const [accessScopeError, setAccessScopeError] = useState('');
   const [route, setRoute] = useState(() =>
     window.location.pathname ? window.location.pathname : '/'
   );
+  const [adminSection, setAdminSection] = useState('resources');
   const [mainTab, setMainTab] = useState('sessions');
   const [inlineWebResource, setInlineWebResource] = useState(null);
   const [accessPromptResource, setAccessPromptResource] = useState(null);
@@ -355,12 +462,21 @@ export default function App() {
   const [relayAssignOnlineOnly, setRelayAssignOnlineOnly] = useState(true);
   // 2FA state
   const [twoFARequired, setTwoFARequired] = useState(false);
+  const [availableMfaMethods, setAvailableMfaMethods] = useState([]);
   const [totpCode, setTotpCode] = useState('');
   const [totpEnabled, setTotpEnabled] = useState(false);
   const [totpSetupData, setTotpSetupData] = useState(null);
   const [totpSetupCode, setTotpSetupCode] = useState('');
   const [totpError, setTotpError] = useState('');
   const [totpDisableCode, setTotpDisableCode] = useState('');
+  const [totpCopyStatus, setTotpCopyStatus] = useState('');
+  const [totpQrDataUrl, setTotpQrDataUrl] = useState('');
+  const [webauthnEnabled, setWebauthnEnabled] = useState(false);
+  const [webauthnCredentials, setWebauthnCredentials] = useState([]);
+  const [webauthnLoginOptions, setWebauthnLoginOptions] = useState(null);
+  const [webauthnBusy, setWebauthnBusy] = useState(false);
+  const [webauthnLabel, setWebauthnLabel] = useState('');
+  const [preferredMfaMethod, setPreferredMfaMethod] = useState('any');
   // Recordings state
   const [recordings, setRecordings] = useState([]);
   const [loadingRecordings, setLoadingRecordings] = useState(false);
@@ -432,6 +548,13 @@ export default function App() {
   const [changePwConfirm, setChangePwConfirm] = useState('');
   const [changePwError, setChangePwError] = useState('');
   const [changePwSuccess, setChangePwSuccess] = useState('');
+  const [bootstrapState, setBootstrapState] = useState({
+    required: false,
+    passwordChangeRequired: false,
+    mfaSetupRequired: false,
+    totpEnabled: false,
+    webauthnEnabled: false
+  });
   // Token expiry
   const [tokenExpiresAt, setTokenExpiresAt] = useState('');
   const terminalRef = useRef(null);
@@ -453,6 +576,7 @@ export default function App() {
   const roleName = roleLabel(auth.role);
   const activeLiveAlertProfile = LIVE_ALERT_PROFILES[liveAlertProfile] || LIVE_ALERT_PROFILES.normal;
   const containmentEnabled = !!containmentStatus.enabled;
+  const bootstrapRequired = !!(auth.token && bootstrapState.required);
 
   useEffect(() => {
     try {
@@ -501,22 +625,22 @@ export default function App() {
     const base = {
       overview: {
         title: 'Overview',
-        hint: 'Use this page for global posture and rapid checks.',
+        hint: 'Fast health and posture checks.',
         focus: 'Review posture and recent sessions.'
       },
       sessions: {
         title: 'Sessions',
-        hint: 'Operate live access and intervene when needed.',
+        hint: 'Operate live access.',
         focus: 'Start, monitor, and terminate active sessions.'
       },
       audit: {
         title: 'Audit',
-        hint: 'Investigate events and validate user actions.',
+        hint: 'Investigate events.',
         focus: 'Filter and inspect traceability records.'
       },
       recordings: {
         title: 'Recordings',
-        hint: 'Replay session evidence for forensic analysis.',
+        hint: 'Replay captured evidence.',
         focus: 'Open SSH cast files and inspect timelines.'
       }
     };
@@ -530,21 +654,21 @@ export default function App() {
         stage: 'Operate',
         title: 'Live Access',
         shortcut: 'Alt+1',
-        hint: 'Run and supervise remote sessions in real time.'
+        hint: 'Open and supervise sessions.'
       },
       {
         id: 'audit',
         stage: 'Trace',
         title: 'Investigation',
         shortcut: 'Alt+2',
-        hint: 'Hunt activity trails and suspicious sequences.'
+        hint: 'Review events and trails.'
       },
       {
         id: 'recordings',
         stage: 'Evidence',
         title: 'Replay Vault',
         shortcut: 'Alt+3',
-        hint: 'Replay captured sessions and validate behavior.',
+        hint: 'Replay recorded SSH sessions.',
         hidden: !canViewRecordings
       }
     ];
@@ -572,6 +696,46 @@ export default function App() {
     };
   }, [relays]);
 
+  const adminSections = useMemo(() => {
+    const adminsWithoutMfa = stats?.users?.adminsWithoutMfa || 0;
+    const pendingRequests = accessRequests.filter((item) => item.status === 'pending').length;
+    return [
+      {
+        id: 'resources',
+        label: 'Resources',
+        hint: 'Inventory and policies',
+        badge: String(resources.length),
+        badgeTone: loadingResources ? 'loading' : 'ok'
+      },
+      {
+        id: 'users',
+        label: 'Users',
+        hint: 'Accounts and access scope',
+        badge: String(users.length),
+        badgeTone: loadingUsers ? 'loading' : 'ok'
+      },
+      {
+        id: 'routing',
+        label: 'Routing',
+        hint: 'Relays and approvals',
+        badge: pendingRequests ? `${pendingRequests} pending` : `${relayInventorySummary.online} online`,
+        badgeTone: pendingRequests ? 'active' : 'ok'
+      },
+      {
+        id: 'security',
+        label: 'Security',
+        hint: 'MFA and posture',
+        badge: adminsWithoutMfa ? `${adminsWithoutMfa} risk` : 'healthy',
+        badgeTone: adminsWithoutMfa ? 'loading' : 'ok'
+      }
+    ];
+  }, [accessRequests, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, users.length]);
+
+  const activeAdminSection = useMemo(
+    () => adminSections.find((section) => section.id === adminSection) || null,
+    [adminSection, adminSections]
+  );
+
   const isRelayOnline = (relay) => String(relay?.status || '').toLowerCase() === 'online';
 
   const navigate = (path) => {
@@ -594,6 +758,18 @@ export default function App() {
       setAuth((prev) => ({ ...prev, token: '', password: '', permissions: [] }));
       setAuthError('Session expirée. Veuillez vous reconnecter.');
       setTokenExpiresAt('');
+      setBootstrapState({
+        required: false,
+        passwordChangeRequired: false,
+        mfaSetupRequired: false,
+        totpEnabled: false,
+        webauthnEnabled: false
+      });
+      setWebauthnEnabled(false);
+      setWebauthnCredentials([]);
+      setWebauthnLoginOptions(null);
+      setAvailableMfaMethods([]);
+      setPreferredMfaMethod('any');
       setAuthToken('');
       navigate('/login');
     };
@@ -1305,8 +1481,8 @@ export default function App() {
   };
 
   const onUserFieldChange = (event) => {
-    const { name, value } = event.target;
-    setUserForm((prev) => ({ ...prev, [name]: value }));
+    const { name, value, type, checked } = event.target;
+    setUserForm((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
   };
 
   const onLogin = async (event) => {
@@ -1319,15 +1495,21 @@ export default function App() {
       });
 
       // Check if 2FA is required
-      if (payload.status === '2fa_required') {
+      if (payload.status === 'mfa_required' || payload.status === '2fa_required') {
         setTwoFARequired(true);
         setTotpCode('');
+        setAvailableMfaMethods(Array.isArray(payload.mfaMethods) ? payload.mfaMethods : (payload.totpEnabled ? ['totp'] : []));
+        setWebauthnLoginOptions(payload.webauthn || null);
+        setPreferredMfaMethod(String(payload.preferredMfaMethod || 'any'));
         setAuthError('');
         return;
       }
 
       setTwoFARequired(false);
+      setAvailableMfaMethods([]);
+      setWebauthnLoginOptions(null);
       setTotpCode('');
+      const bootstrap = payload.bootstrap || {};
       setAuth((prev) => ({
         ...prev,
         token: payload.token,
@@ -1338,6 +1520,21 @@ export default function App() {
       }));
       setAuthToken(payload.token);
       setTotpEnabled(!!payload.totpEnabled);
+      setWebauthnEnabled(!!payload.webauthnEnabled);
+      setPreferredMfaMethod(String(payload.preferredMfaMethod || 'any'));
+      setBootstrapState({
+        required: !!bootstrap.required,
+        passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+        mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+        totpEnabled: !!payload.totpEnabled,
+        webauthnEnabled: !!payload.webauthnEnabled
+      });
+      setChangePwCurrent(bootstrap.passwordChangeRequired ? auth.password : '');
+      setTotpSetupData(null);
+      setTotpQrDataUrl('');
+      setTotpSetupCode('');
+      setTotpError('');
+      setTotpCopyStatus('');
       setTokenExpiresAt(payload.expiresAt || '');
       localStorage.setItem('endoriumfort_auth', JSON.stringify({
         token: payload.token,
@@ -1352,11 +1549,87 @@ export default function App() {
     }
   };
 
+  const onLoginWithPasskey = async () => {
+    if (!webauthnLoginOptions) {
+      setAuthError('No passkey challenge is available for this login.');
+      return;
+    }
+    setWebauthnBusy(true);
+    setAuthError('');
+    try {
+      const assertion = await getBrowserPasskeyAssertion(webauthnLoginOptions);
+      const payload = await login({
+        user: auth.user,
+        password: auth.password,
+        webauthnRequestId: webauthnLoginOptions.requestId,
+        webauthnCredentialId: assertion.credentialId,
+        webauthnAuthenticatorData: assertion.authenticatorData,
+        webauthnClientDataJSON: assertion.clientDataJSON,
+        webauthnSignature: assertion.signature
+      });
+      if (payload.status === 'mfa_required') {
+        setWebauthnLoginOptions(payload.webauthn || null);
+        throw new Error(payload.message || 'Passkey verification is still required.');
+      }
+      const bootstrap = payload.bootstrap || {};
+      setTwoFARequired(false);
+      setAvailableMfaMethods([]);
+      setWebauthnLoginOptions(null);
+      setTotpCode('');
+      setAuth((prev) => ({
+        ...prev,
+        token: payload.token,
+        role: normalizeRole(payload.role),
+        user: payload.user,
+        permissions: Array.isArray(payload.permissions) ? payload.permissions : [],
+        password: ''
+      }));
+      setAuthToken(payload.token);
+      setTotpEnabled(!!payload.totpEnabled);
+      setWebauthnEnabled(!!payload.webauthnEnabled);
+      setPreferredMfaMethod(String(payload.preferredMfaMethod || 'any'));
+      setBootstrapState({
+        required: !!bootstrap.required,
+        passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+        mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+        totpEnabled: !!payload.totpEnabled,
+        webauthnEnabled: !!payload.webauthnEnabled
+      });
+      setTokenExpiresAt(payload.expiresAt || '');
+      localStorage.setItem('endoriumfort_auth', JSON.stringify({
+        token: payload.token,
+        user: payload.user,
+        role: normalizeRole(payload.role),
+        permissions: Array.isArray(payload.permissions) ? payload.permissions : []
+      }));
+      navigate('/');
+    } catch (error) {
+      setAuthError(error.message || 'Passkey sign-in failed');
+    } finally {
+      setWebauthnBusy(false);
+    }
+  };
+
   const onLogout = async () => {
     try { await logout(); } catch (_) {}
     setAuth((prev) => ({ ...prev, token: '', password: '', permissions: [] }));
     setAuthToken('');
     setTokenExpiresAt('');
+    setBootstrapState({
+      required: false,
+      passwordChangeRequired: false,
+      mfaSetupRequired: false,
+      totpEnabled: false,
+      webauthnEnabled: false
+    });
+    setWebauthnEnabled(false);
+    setWebauthnCredentials([]);
+    setWebauthnLoginOptions(null);
+    setAvailableMfaMethods([]);
+    setPreferredMfaMethod('any');
+    setTotpSetupData(null);
+    setTotpQrDataUrl('');
+    setTotpCopyStatus('');
     localStorage.removeItem('endoriumfort_auth');
     navigate('/login');
   };
@@ -1861,6 +2134,11 @@ export default function App() {
     }
   };
 
+  const isAgentTunnelProtocol = (protocol) => {
+    const normalized = String(protocol || '').toLowerCase();
+    return normalized === 'agent' || normalized === 'rdp' || normalized === 'vnc';
+  };
+
   const resolveAgentInstallGuide = () => {
     const ua = String(navigator.userAgent || '').toLowerCase();
     if (ua.includes('windows')) {
@@ -1883,18 +2161,27 @@ export default function App() {
 
   const buildAgentLaunchPayload = (resource, localPort) => {
     const normalizedOrigin = String(window.location.origin || '').replace(/\/$/, '');
+    const resourceProtocol = String(resource?.protocol || '').toLowerCase();
+    const openInBrowser = resourceProtocol === 'agent' || resourceProtocol === 'http' || resourceProtocol === 'https';
+    const localEndpoint = `127.0.0.1:${localPort}`;
     const localUrl = `http://127.0.0.1:${localPort}`;
     const params = new URLSearchParams();
     params.set('server', normalizedOrigin);
     params.set('resource', String(resource.id));
     params.set('local-port', String(localPort));
-    params.set('redirect-url', localUrl);
+    if (openInBrowser) {
+      params.set('redirect-url', localUrl);
+    } else {
+      params.set('no-browser', '1');
+    }
     if (auth.token) {
       params.set('token', auth.token);
     }
 
     return {
       localUrl,
+      localEndpoint,
+      openInBrowser,
       installGuide: resolveAgentInstallGuide(),
       command: `endoriumfort-agent connect --server ${normalizedOrigin} --token ${auth.token} --resource ${resource.id} --local-port ${localPort}`,
       deepLink: `endoriumfort://connect?${params.toString()}`
@@ -1952,8 +2239,8 @@ export default function App() {
       return true;
     }
 
-    // Handle agent resources — open agent launch modal with random port
-    if (resource.protocol === 'agent') {
+    // Handle protocols that should use local TCP tunnel through the agent
+    if (isAgentTunnelProtocol(resource.protocol)) {
       const randomPort = 10000 + Math.floor(Math.random() * 50000);
       const launchPayload = buildAgentLaunchPayload(resource, randomPort);
       setAgentModal({ resource, port: randomPort, copied: 'idle', linkCopied: 'idle', installCopied: 'idle', launchState: 'opening', ...launchPayload });
@@ -2025,7 +2312,7 @@ export default function App() {
 
   const onConnectResource = async (resource) => {
     const protocol = String(resource?.protocol || '').toLowerCase();
-    const sessionBackedProtocol = protocol !== 'http' && protocol !== 'https' && protocol !== 'agent';
+    const sessionBackedProtocol = protocol !== 'http' && protocol !== 'https' && !isAgentTunnelProtocol(protocol);
 
     if (resource.requireDualApproval && !canManagePlatform) {
       const existingPlaybook =
@@ -2256,8 +2543,13 @@ export default function App() {
       target: trimmedTarget,
       protocol: selectedProtocol,
       port: Number.parseInt(resourceForm.port, 10) || 22,
+      tunnelTicketRateLimitMaxAttempts: Math.max(
+        0,
+        Number.parseInt(resourceForm.tunnelTicketRateLimitMaxAttempts, 10) || 0
+      ),
       description: resourceForm.description.trim(),
       imageUrl: resourceForm.imageUrl.trim(),
+      imageData: resourceForm.imageData || '',
       httpUsername: resourceForm.httpUsername.trim(),
       httpPassword: resourceForm.httpPassword,
       sshUsername: resourceForm.sshUsername.trim(),
@@ -2285,6 +2577,7 @@ export default function App() {
         target: '',
         protocol: 'ssh',
         port: '22',
+        tunnelTicketRateLimitMaxAttempts: '0',
         description: '',
         imageUrl: '',
         httpUsername: '',
@@ -2311,8 +2604,12 @@ export default function App() {
       target: resource.target || '',
       protocol: resource.protocol || 'ssh',
       port: String(resource.port || 22),
+      tunnelTicketRateLimitMaxAttempts: String(
+        Math.max(0, Number(resource.tunnelTicketRateLimitMaxAttempts) || 0)
+      ),
       description: resource.description || '',
       imageUrl: resource.imageUrl || '',
+      imageData: resource.imageData || '',
       httpUsername: resource.httpUsername || '',
       httpPassword: '',
       sshUsername: resource.sshUsername || '',
@@ -2340,13 +2637,15 @@ export default function App() {
     const payload = {
       username: userForm.username.trim(),
       password: userForm.password,
-      role: userForm.role
+      role: userForm.role,
+      forcePasswordRotation: !!userForm.forcePasswordRotation
     };
     try {
       if (editingUserId) {
         const updated = await updateUser(editingUserId, {
           password: payload.password,
-          role: payload.role
+          role: payload.role,
+          forcePasswordRotation: payload.forcePasswordRotation
         });
         setUsers((prev) =>
           prev.map((item) => (item.id === editingUserId ? updated : item))
@@ -2359,7 +2658,8 @@ export default function App() {
       setUserForm({
         username: '',
         password: '',
-        role: 'operator'
+        role: 'operator',
+        forcePasswordRotation: false
       });
     } catch (error) {
       setUserError(error.message || 'Unable to save user');
@@ -2371,7 +2671,8 @@ export default function App() {
     setUserForm({
       username: user.username || '',
       password: '',
-      role: user.role || 'operator'
+      role: user.role || 'operator',
+      forcePasswordRotation: !!user.bootstrapPasswordChangeRequired
     });
   };
 
@@ -2386,37 +2687,33 @@ export default function App() {
 
   const onLoadUserPermissions = async (user) => {
     try {
-      setLoadingPermissions(true);
-      setSelectedUserForPermissions(user);
-      const [resourceResponse, granularResponse] = await Promise.all([
-        getUserResourcePermissions(user.id),
-        getUserPermissions(user.id)
-      ]);
-      setUserPermissions(resourceResponse.resourceIds || []);
-      setGranularPermissions(granularResponse.permissions || []);
-      setPermissionsError('');
+      setLoadingAccessScope(true);
+      setSelectedUserForAccessScope(user);
+      const resourceResponse = await getUserResourcePermissions(user.id);
+      setUserResourceScope(resourceResponse.resourceIds || []);
+      setAccessScopeError('');
     } catch (error) {
-      setPermissionsError(error.message || 'Unable to load permissions');
+      setAccessScopeError(error.message || 'Unable to load access scope');
     } finally {
-      setLoadingPermissions(false);
+      setLoadingAccessScope(false);
     }
   };
 
   const onToggleResourcePermission = async (resourceId) => {
-    if (!selectedUserForPermissions) return;
+    if (!selectedUserForAccessScope) return;
     
-    const hasPermission = userPermissions.includes(resourceId);
+    const hasPermission = userResourceScope.includes(resourceId);
     try {
       if (hasPermission) {
-        await revokeResourcePermission(selectedUserForPermissions.id, resourceId);
-        setUserPermissions((prev) => prev.filter((id) => id !== resourceId));
+        await revokeResourcePermission(selectedUserForAccessScope.id, resourceId);
+        setUserResourceScope((prev) => prev.filter((id) => id !== resourceId));
       } else {
-        await grantResourcePermission(selectedUserForPermissions.id, resourceId);
-        setUserPermissions((prev) => [...prev, resourceId]);
+        await grantResourcePermission(selectedUserForAccessScope.id, resourceId);
+        setUserResourceScope((prev) => [...prev, resourceId]);
       }
-      setPermissionsError('');
+      setAccessScopeError('');
     } catch (error) {
-      setPermissionsError(error.message || 'Unable to modify permission');
+      setAccessScopeError(error.message || 'Unable to modify resource scope');
     }
   };
 
@@ -2514,26 +2811,11 @@ export default function App() {
     }
   };
 
-  const onChangeGranularPermissionOverride = async (permission, override) => {
-    if (!selectedUserForPermissions) return;
-    const key = `${selectedUserForPermissions.id}:${permission}`;
-    try {
-      setUpdatingPermissionKey(key);
-      await setUserPermissionOverride(selectedUserForPermissions.id, permission, override);
-      const refreshed = await getUserPermissions(selectedUserForPermissions.id);
-      setGranularPermissions(refreshed.permissions || []);
-      setPermissionsError('');
-    } catch (error) {
-      setPermissionsError(error.message || 'Unable to update permission override');
-    } finally {
-      setUpdatingPermissionKey('');
-    }
-  };
-
   // ── 2FA handlers ──
 
   const onSetup2FA = async () => {
     setTotpError('');
+    setTotpCopyStatus('');
     try {
       const data = await setup2FA();
       setTotpSetupData(data);
@@ -2545,11 +2827,23 @@ export default function App() {
   const onVerify2FA = async () => {
     setTotpError('');
     try {
-      await verify2FA(totpSetupCode);
+      const data = await verify2FA(totpSetupCode);
       setTotpEnabled(true);
+      setWebauthnEnabled(!!data.webauthnEnabled);
+      if (data.preferredMfaMethod) setPreferredMfaMethod(String(data.preferredMfaMethod));
       setTotpSetupData(null);
+      setTotpQrDataUrl('');
       setTotpSetupCode('');
       setTotpError('');
+      setTotpCopyStatus('');
+      const bootstrap = data.bootstrap || {};
+      setBootstrapState({
+        required: !!bootstrap.required,
+        passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+        mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+        totpEnabled: true,
+        webauthnEnabled: !!data.webauthnEnabled
+      });
     } catch (error) {
       setTotpError(error.message || 'Invalid code');
     }
@@ -2558,10 +2852,18 @@ export default function App() {
   const onDisable2FA = async () => {
     setTotpError('');
     try {
-      await disable2FA(totpDisableCode);
+      const data = await disable2FA(totpDisableCode);
       setTotpEnabled(false);
+      setWebauthnEnabled(!!data.webauthnEnabled);
+      if (data.preferredMfaMethod) setPreferredMfaMethod(String(data.preferredMfaMethod));
       setTotpDisableCode('');
       setTotpError('');
+      setBootstrapState((prev) => ({
+        ...prev,
+        mfaSetupRequired: !data.webauthnEnabled,
+        totpEnabled: false,
+        webauthnEnabled: !!data.webauthnEnabled
+      }));
     } catch (error) {
       setTotpError(error.message || 'Invalid code');
     }
@@ -2571,12 +2873,170 @@ export default function App() {
     try {
       const data = await get2FAStatus();
       setTotpEnabled(!!data.totpEnabled);
+      setWebauthnEnabled(!!data.webauthnEnabled);
+      setWebauthnCredentials(Array.isArray(data.credentials) ? data.credentials : []);
+      setPreferredMfaMethod(String(data.preferredMfaMethod || 'any'));
+      setBootstrapState((prev) => ({
+        ...prev,
+        totpEnabled: !!data.totpEnabled,
+        webauthnEnabled: !!data.webauthnEnabled
+      }));
     } catch (_) {}
   };
 
   useEffect(() => {
     if (auth.token) onLoad2FAStatus();
   }, [auth.token]);
+
+  const onCopyTotpValue = async (value, label) => {
+    try {
+      await navigator.clipboard.writeText(value || '');
+      setTotpCopyStatus(`${label} copied`);
+    } catch (_) {
+      setTotpCopyStatus(`Unable to copy ${label.toLowerCase()}`);
+    }
+  };
+
+  const onRegisterPasskey = async (label = '') => {
+    setTotpError('');
+    setWebauthnBusy(true);
+    try {
+      const options = await beginWebAuthnRegistration({ label });
+      const registration = await createBrowserPasskey(options);
+      const data = await verifyWebAuthnRegistration({
+        requestId: options.requestId,
+        label,
+        ...registration
+      });
+      setWebauthnEnabled(!!data.webauthnEnabled);
+      setTotpEnabled(!!data.totpEnabled);
+      if (data.preferredMfaMethod) setPreferredMfaMethod(String(data.preferredMfaMethod));
+      await onLoad2FAStatus();
+      const bootstrap = data.bootstrap || {};
+      setBootstrapState({
+        required: !!bootstrap.required,
+        passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+        mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+        totpEnabled: !!data.totpEnabled,
+        webauthnEnabled: !!data.webauthnEnabled
+      });
+      setWebauthnLabel('');
+    } catch (error) {
+      const message = error.message || 'Failed to register passkey';
+      if (message.toLowerCase().includes('valid domain')) {
+        setTotpError(`${message} Current origin: ${window.location.origin}`);
+      } else {
+        setTotpError(message);
+      }
+    } finally {
+      setWebauthnBusy(false);
+    }
+  };
+
+  const onDeletePasskey = async (credentialId) => {
+    setTotpError('');
+    setWebauthnBusy(true);
+    try {
+      const data = await deleteWebAuthnCredential(credentialId);
+      setWebauthnEnabled(!!data.webauthnEnabled);
+      setTotpEnabled(!!data.totpEnabled);
+      setWebauthnCredentials(Array.isArray(data.credentials) ? data.credentials : []);
+      if (data.preferredMfaMethod) setPreferredMfaMethod(String(data.preferredMfaMethod));
+      setBootstrapState((prev) => ({
+        ...prev,
+        mfaSetupRequired: !data.totpEnabled && !data.webauthnEnabled,
+        totpEnabled: !!data.totpEnabled,
+        webauthnEnabled: !!data.webauthnEnabled
+      }));
+    } catch (error) {
+      setTotpError(error.message || 'Failed to remove passkey');
+    } finally {
+      setWebauthnBusy(false);
+    }
+  };
+
+  const onUpdateMfaPreference = async (method) => {
+    setTotpError('');
+    try {
+      const data = await setMfaPreference(method);
+      setPreferredMfaMethod(String(data.preferredMfaMethod || method || 'any'));
+    } catch (error) {
+      setTotpError(error.message || 'Failed to save MFA preference');
+    }
+  };
+
+  useEffect(() => {
+    if (!auth.token) {
+      setBootstrapState({
+        required: false,
+        passwordChangeRequired: false,
+        mfaSetupRequired: false,
+        totpEnabled: false,
+        webauthnEnabled: false
+      });
+      setWebauthnEnabled(false);
+      setWebauthnCredentials([]);
+      return;
+    }
+    let active = true;
+    fetchBootstrapStatus()
+      .then((data) => {
+        if (!active) return;
+        const bootstrap = data.bootstrap || {};
+        setBootstrapState({
+          required: !!bootstrap.required,
+          passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+          mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+          totpEnabled: !!bootstrap.totpEnabled,
+          webauthnEnabled: !!bootstrap.webauthnEnabled
+        });
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [auth.token]);
+
+  useEffect(() => {
+    if (!editingUserId) {
+      setUserForm((prev) => {
+        const nextValue = prev.role === 'admin' ? true : prev.forcePasswordRotation;
+        if (nextValue === prev.forcePasswordRotation) {
+          return prev;
+        }
+        return {
+          ...prev,
+          forcePasswordRotation: nextValue
+        };
+      });
+    }
+  }, [editingUserId, userForm.role]);
+
+  useEffect(() => {
+    let active = true;
+    if (!totpSetupData?.otpauthUri) {
+      setTotpQrDataUrl('');
+      return;
+    }
+    QRCode.toDataURL(totpSetupData.otpauthUri, {
+      errorCorrectionLevel: 'M',
+      margin: 1,
+      width: 220
+    })
+      .then((url) => {
+        if (active) {
+          setTotpQrDataUrl(url);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setTotpQrDataUrl('');
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [totpSetupData]);
 
   useEffect(() => {
     if (!auth.token || !canManagePlatform || !resources.length) {
@@ -2798,11 +3258,34 @@ export default function App() {
       return;
     }
     try {
-      await changePassword(changePwCurrent, changePwNew);
-      setChangePwSuccess('Password changed successfully');
+      const data = await changePassword(changePwCurrent, changePwNew, {
+        keepCurrentSession: bootstrapRequired
+      });
+      setChangePwSuccess(
+        bootstrapRequired
+          ? 'Password updated. Let us finish MFA setup to secure the admin account.'
+          : 'Password changed successfully'
+      );
       setChangePwCurrent('');
       setChangePwNew('');
       setChangePwConfirm('');
+      const bootstrap = data.bootstrap || {};
+      setBootstrapState({
+        required: !!bootstrap.required,
+        passwordChangeRequired: !!bootstrap.passwordChangeRequired,
+        mfaSetupRequired: !!bootstrap.mfaSetupRequired,
+        totpEnabled,
+        webauthnEnabled
+      });
+      if (!bootstrapRequired) {
+        setBootstrapState({
+          required: false,
+          passwordChangeRequired: false,
+          mfaSetupRequired: false,
+          totpEnabled,
+          webauthnEnabled
+        });
+      }
     } catch (error) {
       setChangePwError(error.message || 'Failed to change password');
     }
@@ -2946,13 +3429,17 @@ export default function App() {
       },
       {
         key: '2fa',
-        severity: totpEnabled ? 'ok' : 'warning',
+        severity: (totpEnabled || webauthnEnabled) ? 'ok' : 'warning',
         title: 'MFA posture',
-        value: totpEnabled ? 'enabled' : 'disabled',
-        hint: totpEnabled ? 'Your account is protected with TOTP.' : 'Enable TOTP to strengthen operator authentication.'
+        value: (totpEnabled || webauthnEnabled) ? 'enabled' : 'disabled',
+        hint: webauthnEnabled
+          ? 'Your account is protected with a passkey or hardware security key.'
+          : totpEnabled
+            ? 'Your account is protected with TOTP.'
+            : 'Enable TOTP or a passkey to strengthen operator authentication.'
       }
     ];
-  }, [securityAuditItems, activeSessions, totpEnabled]);
+  }, [securityAuditItems, activeSessions, totpEnabled, webauthnEnabled]);
 
   const filteredAuditItems = useMemo(() => {
     let items = auditItems;
@@ -3048,6 +3535,147 @@ export default function App() {
     return `${Math.floor(diffSec / 86400)}d ago`;
   };
 
+  const renderBootstrapOverlay = () => {
+    if (!bootstrapRequired) return null;
+    const currentStep = bootstrapState.passwordChangeRequired
+      ? 'Change the default admin password'
+      : 'Enable MFA for the admin account';
+    return (
+      <div className="modal-overlay bootstrap-overlay">
+        <div className="modal-content bootstrap-modal" onClick={(event) => event.stopPropagation()}>
+          <p className="workflow-kicker">Initial Security Setup</p>
+          <h3>Secure the default admin account</h3>
+          <p className="muted">
+            This first-run checkpoint is mandatory before using the platform. We need a private
+            admin password and at least one MFA factor bound to the account: TOTP or a passkey.
+          </p>
+          <div className="bootstrap-checklist">
+            <div className={`bootstrap-step ${bootstrapState.passwordChangeRequired ? 'active' : 'done'}`}>
+              <strong>1. Change the default password</strong>
+              <span>{bootstrapState.passwordChangeRequired ? 'Required now' : 'Done'}</span>
+            </div>
+            <div className={`bootstrap-step ${!bootstrapState.passwordChangeRequired && bootstrapState.mfaSetupRequired ? 'active' : ''} ${!bootstrapState.mfaSetupRequired ? 'done' : ''}`}>
+              <strong>2. Enable MFA with TOTP or passkey</strong>
+              <span>{bootstrapState.mfaSetupRequired ? 'Pending' : 'Done'}</span>
+            </div>
+          </div>
+          <p className="bootstrap-status">Current step: {currentStep}</p>
+          {bootstrapState.passwordChangeRequired ? (
+            <form onSubmit={onChangePassword}>
+              <label>
+                Current password
+                <input
+                  type="password"
+                  value={changePwCurrent}
+                  onChange={(e) => setChangePwCurrent(e.target.value)}
+                  required
+                  autoComplete="current-password"
+                />
+              </label>
+              <label>
+                New admin password
+                <input
+                  type="password"
+                  value={changePwNew}
+                  onChange={(e) => setChangePwNew(e.target.value)}
+                  required
+                  autoComplete="new-password"
+                  placeholder="Min 8 chars, upper + lower + digit"
+                />
+              </label>
+              <label>
+                Confirm new password
+                <input
+                  type="password"
+                  value={changePwConfirm}
+                  onChange={(e) => setChangePwConfirm(e.target.value)}
+                  required
+                  autoComplete="new-password"
+                />
+              </label>
+              {changePwError && <p className="error">{changePwError}</p>}
+              {changePwSuccess && <p className="success">{changePwSuccess}</p>}
+              <div className="bootstrap-actions">
+                <button type="submit">Save new password</button>
+              </div>
+            </form>
+          ) : (
+            <div className="bootstrap-mfa-block">
+              {totpError && <p className="error">{totpError}</p>}
+              {!totpEnabled && !totpSetupData && (
+                <>
+                  <p className="muted">
+                    Finish admin hardening with either a TOTP authenticator or a WebAuthn passkey
+                    such as a physical security key.
+                  </p>
+                  <div className="bootstrap-actions">
+                    <button type="button" onClick={onSetup2FA}>Start MFA setup</button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => onRegisterPasskey('Admin security key')}
+                      disabled={webauthnBusy || !isWebAuthnSupported()}
+                    >
+                      {webauthnBusy ? 'Registering...' : 'Use passkey / security key'}
+                    </button>
+                  </div>
+                  {!isWebAuthnSupported() && (
+                    <p className="muted">
+                      Passkeys require a compatible browser in a secure context (HTTPS or localhost).
+                    </p>
+                  )}
+                </>
+              )}
+              {totpSetupData && (
+                <div className="bootstrap-totp-panel">
+                  <p>
+                    Use the secret below in your authenticator app or OATH-TOTP hardware token,
+                    or copy the full `otpauth://` enrollment URI for compatible devices.
+                  </p>
+                  {totpQrDataUrl && (
+                    <div className="bootstrap-qr-image-card">
+                      <img src={totpQrDataUrl} alt="Local TOTP QR Code" width={220} height={220} />
+                    </div>
+                  )}
+                  <div className="bootstrap-qr-card">
+                    <strong>Manual secret</strong>
+                    <code className="inline-secret">{totpSetupData.secret}</code>
+                    <div className="bootstrap-actions">
+                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.secret, 'Secret')}>
+                        Copy secret
+                      </button>
+                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.otpauthUri, 'Enrollment URI')}>
+                        Copy URI
+                      </button>
+                    </div>
+                  </div>
+                  {totpCopyStatus && <p className="muted">{totpCopyStatus}</p>}
+                  <label>
+                    Authenticator code
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={totpSetupCode}
+                      onChange={(e) => setTotpSetupCode(e.target.value)}
+                      placeholder="123456"
+                    />
+                  </label>
+                  <div className="bootstrap-actions">
+                    <button type="button" onClick={onVerify2FA}>Verify and enable MFA</button>
+                  </div>
+                </div>
+              )}
+              {(totpEnabled || webauthnEnabled) && !bootstrapState.mfaSetupRequired && (
+                <p className="success">MFA enabled. The admin account is now secured.</p>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderLogin = () => (
     <div className="login-page">
       <div className="login-card">
@@ -3086,19 +3714,38 @@ export default function App() {
             />
           </label>
           {twoFARequired && (
-            <label>
-              Authenticator Code (6 digits)
-              <input
-                type="text"
-                inputMode="numeric"
-                maxLength={6}
-                value={totpCode}
-                onChange={(e) => setTotpCode(e.target.value)}
-                placeholder="123456"
-                autoFocus
-                style={{ letterSpacing: '0.3em', textAlign: 'center', fontSize: '1.2em' }}
-              />
-            </label>
+            <div className="login-mfa-block">
+              {availableMfaMethods.includes('totp') && (
+                <label>
+                  Authenticator Code (6 digits)
+                  <input
+                    className="mfa-code-input login-mfa-code"
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={totpCode}
+                    onChange={(e) => setTotpCode(e.target.value)}
+                    placeholder="123456"
+                    autoFocus
+                  />
+                </label>
+              )}
+              {availableMfaMethods.includes('webauthn') && (
+                <div className="mfa-panel-block login-passkey-card">
+                  <p className="muted">
+                    A registered passkey or physical security key can also complete this login.
+                  </p>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={onLoginWithPasskey}
+                    disabled={webauthnBusy || !webauthnLoginOptions}
+                  >
+                    {webauthnBusy ? 'Waiting for security key...' : 'Use passkey / security key'}
+                  </button>
+                </div>
+              )}
+            </div>
           )}
           <button type="submit">
             {twoFARequired ? 'Verify & Sign in' : 'Sign in'}
@@ -3107,7 +3754,13 @@ export default function App() {
             <button
               type="button"
               className="ghost"
-              onClick={() => { setTwoFARequired(false); setTotpCode(''); setAuthError(''); }}
+              onClick={() => {
+                setTwoFARequired(false);
+                setTotpCode('');
+                setAvailableMfaMethods([]);
+                setWebauthnLoginOptions(null);
+                setAuthError('');
+              }}
             >
               Back
             </button>
@@ -3125,7 +3778,6 @@ export default function App() {
           <img src="/assets/logo-icon-dark.png" alt="EndoriumFort" className="brand-logo" />
           <div>
             <h1>Admin Console</h1>
-            <p>Govern users, resources, and role-based permissions.</p>
           </div>
         </div>
         <div className="top-actions">
@@ -3142,244 +3794,332 @@ export default function App() {
         </div>
       </header>
 
-      {canManagePlatform && stats && (
-        <section className="stats-grid reveal" style={{ marginBottom: '1rem' }}>
-          <div className="stat-card">
-            <div className="stat-icon stat-sessions">⚡</div>
-            <div>
-              <h4>{stats.sessions?.active || 0}</h4>
-              <p className="muted">Active sessions</p>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-icon stat-total">📊</div>
-            <div>
-              <h4>{stats.sessions?.total || 0}</h4>
-              <p className="muted">Total sessions</p>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-icon stat-resources">🖥️</div>
-            <div>
-              <h4>{stats.resources?.total || 0}</h4>
-              <p className="muted">Resources</p>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-icon stat-users">👤</div>
-            <div>
-              <h4>{stats.users?.total || 0}</h4>
-              <p className="muted">Users</p>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-icon stat-recordings">🎬</div>
-            <div>
-              <h4>{stats.recordings?.total || 0}</h4>
-              <p className="muted">Recordings</p>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-icon stat-tokens">🔑</div>
-            <div>
-              <h4>{stats.auth?.activeTokens || 0}</h4>
-              <p className="muted">Active tokens</p>
-            </div>
-          </div>
-        </section>
+      {canManagePlatform && (
+        <>
+          {stats && (
+            <section className="metric-tile-grid reveal" style={{ marginBottom: '1rem' }}>
+              <MetricTile tone="sessions" label="Active sessions" value={stats.sessions?.active || 0} />
+              <MetricTile tone="total" label="Total sessions" value={stats.sessions?.total || 0} />
+              <MetricTile tone="resources" label="Resources" value={stats.resources?.total || 0} />
+              <MetricTile tone="users" label="Users" value={stats.users?.total || 0} />
+              <MetricTile tone="recordings" label="Recordings" value={stats.recordings?.total || 0} />
+              <MetricTile tone="tokens" label="Active tokens" value={stats.auth?.activeTokens || 0} />
+            </section>
+          )}
+
+          <section className="admin-shell-head reveal" style={{ marginBottom: '1rem' }}>
+            <AdminSectionNav sections={adminSections} current={adminSection} onChange={setAdminSection} />
+            {activeAdminSection ? (
+              <div className="admin-section-status">
+                <div className="admin-section-status-copy">
+                  <strong>{activeAdminSection.label}</strong>
+                  {activeAdminSection.hint ? <span>{activeAdminSection.hint}</span> : null}
+                </div>
+                {activeAdminSection.badge ? (
+                  <StatusBadge tone={activeAdminSection.badgeTone || 'ok'}>
+                    {activeAdminSection.badge}
+                  </StatusBadge>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+        </>
       )}
 
       {!canManagePlatform ? (
-        <div className="panel reveal">
-          <h3>Platform admin access required</h3>
-          <p className="muted">Sign in with the Platform Admin role to manage users and resources.</p>
-        </div>
+        <SectionCard title="Platform admin access required">
+          <EmptyState title="Admin access only" message="Sign in with a platform admin account to manage users, resources, routing, and security." />
+        </SectionCard>
       ) : (
         <div className="admin-grid">
-          <div className="panel reveal permissions-panel">
+          {adminSection === 'resources' && (
+          <div className="panel reveal access-scope-panel">
             <div className="panel-header">
               <div>
                 <h3>{editingResourceId ? 'Edit resource' : 'New resource'}</h3>
-                <p>Create tiles operators can connect to.</p>
               </div>
             </div>
             <form className="resource-form" onSubmit={onSubmitResource}>
-              <label>
-                Name
-                <input
-                  name="name"
-                  value={resourceForm.name}
-                  onChange={onResourceFieldChange}
-                  placeholder="Finance jump host"
-                />
-              </label>
-              <label>
-                Target
-                <input
-                  name="target"
-                  value={resourceForm.target}
-                  onChange={onResourceFieldChange}
-                  placeholder="10.0.0.12"
-                />
-              </label>
-              <label>
-                Protocol
-                <select
-                  name="protocol"
-                  value={resourceForm.protocol}
-                  onChange={onResourceFieldChange}
-                >
-                  <option value="ssh">ssh</option>
-                  <option value="rdp">rdp</option>
-                  <option value="vnc">vnc</option>
-                  <option value="http">http</option>
-                  <option value="agent">agent (tunnel)</option>
-                </select>
-              </label>
-              <label>
-                Port
-                <input
-                  name="port"
-                  type="number"
-                  min="1"
-                  max="65535"
-                  value={resourceForm.port}
-                  onChange={onResourceFieldChange}
-                />
-              </label>
-              <label className="full">
-                Description
-                <input
-                  name="description"
-                  value={resourceForm.description}
-                  onChange={onResourceFieldChange}
-                  placeholder="Short usage note"
-                />
-              </label>
-              <label className="full">
-                Image URL
-                <input
-                  name="imageUrl"
-                  value={resourceForm.imageUrl}
-                  onChange={onResourceFieldChange}
-                  placeholder="https://..."
-                />
-              </label>
-              {(resourceForm.protocol === 'http' || resourceForm.protocol === 'https') && (
-                <>
-                  <label className="full">
-                    HTTP Username (optional)
+              <div className="full resource-section">
+                <div className="resource-section-header">
+                  <div>
+                    <h4>Identity</h4>
+                  </div>
+                </div>
+                <div className="section-grid">
+                  <label>
+                    Name
                     <input
-                      name="httpUsername"
-                      value={resourceForm.httpUsername}
+                      name="name"
+                      value={resourceForm.name}
                       onChange={onResourceFieldChange}
-                      placeholder="admin"
-                      autoComplete="off"
+                      placeholder="Finance jump host"
+                    />
+                  </label>
+                  <label>
+                    Description
+                    <input
+                      name="description"
+                      value={resourceForm.description}
+                      onChange={onResourceFieldChange}
+                      placeholder="Short usage note"
                     />
                   </label>
                   <label className="full">
-                    HTTP Password (optional)
+                    Image URL
                     <input
-                      name="httpPassword"
-                      type="password"
-                      value={resourceForm.httpPassword}
+                      name="imageUrl"
+                      value={resourceForm.imageUrl}
                       onChange={onResourceFieldChange}
-                      placeholder="••••••••"
-                      autoComplete="new-password"
-                    />
-                  </label>
-                </>
-              )}
-              {resourceForm.protocol === 'ssh' && (
-                <>
-                  <label className="full">
-                    SSH Username (vault)
-                    <input
-                      name="sshUsername"
-                      value={resourceForm.sshUsername}
-                      onChange={onResourceFieldChange}
-                      placeholder="root"
-                      autoComplete="off"
+                      placeholder="https://..."
+                      disabled={!!resourceForm.imageData}
                     />
                   </label>
                   <label className="full">
-                    SSH Password (vault)
+                    Visual upload
                     <input
-                      name="sshPassword"
-                      type="password"
-                      value={resourceForm.sshPassword}
+                      type="file"
+                      accept="image/*"
+                      onChange={e => {
+                        const file = e.target.files[0];
+                        if (!file) return;
+                        const reader = new window.FileReader();
+                        reader.onload = (ev) => {
+                          setResourceForm(f => ({ ...f, imageData: ev.target.result, imageUrl: '' }));
+                        };
+                        reader.readAsDataURL(file);
+                      }}
+                    />
+                    {resourceForm.imageData && (
+                      <div className="resource-image-preview">
+                        <img src={resourceForm.imageData} alt="aperçu" />
+                        <button type="button" className="ghost" onClick={() => setResourceForm(f => ({ ...f, imageData: '' }))}>
+                          Remove
+                        </button>
+                      </div>
+                    )}
+                  </label>
+                </div>
+              </div>
+
+              <div className="full resource-section">
+                <div className="resource-section-header">
+                  <div>
+                    <h4>Connectivity</h4>
+                  </div>
+                </div>
+                <div className="section-grid">
+                  <label>
+                    Target
+                    <input
+                      name="target"
+                      value={resourceForm.target}
                       onChange={onResourceFieldChange}
-                      placeholder={editingResourceId ? 'Leave empty to keep current' : 'Stored securely, injected on connect'}
-                      autoComplete="new-password"
+                      placeholder="10.0.0.12"
                     />
                   </label>
-                </>
-              )}
-              <label
-                className="full"
-                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
-              >
-                <input
-                  name="requireAccessJustification"
-                  type="checkbox"
-                  checked={!!resourceForm.requireAccessJustification}
-                  onChange={onResourceFieldChange}
-                  style={{ width: 'auto' }}
-                />
-                Require reason popup before connect
-              </label>
-              <label
-                className="full"
-                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
-              >
-                <input
-                  name="requireDualApproval"
-                  type="checkbox"
-                  checked={!!resourceForm.requireDualApproval}
-                  onChange={onResourceFieldChange}
-                  style={{ width: 'auto' }}
-                />
-                Require dual approval before session start
-              </label>
-              <label
-                className="full"
-                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
-              >
-                <input
-                  name="enableCommandGuard"
-                  type="checkbox"
-                  checked={!!resourceForm.enableCommandGuard}
-                  onChange={onResourceFieldChange}
-                  style={{ width: 'auto' }}
-                />
-                Enable SSH command guard
-              </label>
-              <label
-                className="full"
-                style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
-              >
-                <input
-                  name="adaptiveAccessPolicy"
-                  type="checkbox"
-                  checked={!!resourceForm.adaptiveAccessPolicy}
-                  onChange={onResourceFieldChange}
-                  style={{ width: 'auto' }}
-                />
-                Adaptive policy (extra controls by risk)
-              </label>
-              <label className="full">
-                Risk level
-                <select
-                  name="riskLevel"
-                  value={resourceForm.riskLevel}
-                  onChange={onResourceFieldChange}
-                >
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="critical">critical</option>
-                </select>
-              </label>
+                  <label>
+                    Protocol
+                    <select
+                      name="protocol"
+                      value={resourceForm.protocol}
+                      onChange={onResourceFieldChange}
+                    >
+                      <option value="ssh">ssh</option>
+                      <option value="rdp">rdp</option>
+                      <option value="vnc">vnc</option>
+                      <option value="http">http</option>
+                      <option value="agent">agent (tunnel)</option>
+                    </select>
+                  </label>
+                  <label>
+                    Port
+                    <input
+                      name="port"
+                      type="number"
+                      min="1"
+                      max="65535"
+                      value={resourceForm.port}
+                      onChange={onResourceFieldChange}
+                    />
+                  </label>
+                  {(resourceForm.protocol === 'agent' || resourceForm.protocol === 'rdp' || resourceForm.protocol === 'vnc') && (
+                    <label>
+                      Tunnel ticket limit / min
+                      <input
+                        name="tunnelTicketRateLimitMaxAttempts"
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={resourceForm.tunnelTicketRateLimitMaxAttempts}
+                        onChange={onResourceFieldChange}
+                        placeholder="0 = unlimited"
+                      />
+                      <small className="muted">0 = unlimited. Applied per user and per resource.</small>
+                    </label>
+                  )}
+                  {(resourceForm.protocol === 'http' || resourceForm.protocol === 'https') && (
+                    <>
+                      <label>
+                        HTTP Username (optional)
+                        <input
+                          name="httpUsername"
+                          value={resourceForm.httpUsername}
+                          onChange={onResourceFieldChange}
+                          placeholder="admin"
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label>
+                        HTTP Password (optional)
+                        <input
+                          name="httpPassword"
+                          type="password"
+                          value={resourceForm.httpPassword}
+                          onChange={onResourceFieldChange}
+                          placeholder="••••••••"
+                          autoComplete="new-password"
+                        />
+                      </label>
+                    </>
+                  )}
+                  {resourceForm.protocol === 'ssh' && (
+                    <>
+                      <label>
+                        SSH Username (vault)
+                        <input
+                          name="sshUsername"
+                          value={resourceForm.sshUsername}
+                          onChange={onResourceFieldChange}
+                          placeholder="root"
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label>
+                        SSH Password (vault)
+                        <input
+                          name="sshPassword"
+                          type="password"
+                          value={resourceForm.sshPassword}
+                          onChange={onResourceFieldChange}
+                          placeholder={editingResourceId ? 'Leave empty to keep current' : 'Stored securely, injected on connect'}
+                          autoComplete="new-password"
+                        />
+                      </label>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className="full policy-editor">
+                <div className="policy-editor-header">
+                  <div>
+                    <h4>Access Policy</h4>
+                  </div>
+                  <span className={`pill ${normalizeRiskLevel(resourceForm.riskLevel) === 'critical' ? 'error' : normalizeRiskLevel(resourceForm.riskLevel) === 'high' ? 'warning' : 'ok'}`}>
+                    {normalizeRiskLevel(resourceForm.riskLevel)}
+                  </span>
+                </div>
+                <div className="policy-grid">
+                  <label className={`policy-option ${resourceForm.requireAccessJustification ? 'selected' : ''}`}>
+                    <input
+                      name="requireAccessJustification"
+                      type="checkbox"
+                      checked={!!resourceForm.requireAccessJustification}
+                      onChange={onResourceFieldChange}
+                    />
+                    <span className="policy-option-indicator" aria-hidden="true" />
+                    <div className="policy-option-copy">
+                      <strong>Justification</strong>
+                      <span>Prompt for access reason before connect.</span>
+                      <em>{resourceForm.requireAccessJustification ? 'Enabled' : 'Optional'}</em>
+                    </div>
+                  </label>
+                  <label className={`policy-option ${resourceForm.requireDualApproval ? 'selected' : ''}`}>
+                    <input
+                      name="requireDualApproval"
+                      type="checkbox"
+                      checked={!!resourceForm.requireDualApproval}
+                      onChange={onResourceFieldChange}
+                    />
+                    <span className="policy-option-indicator" aria-hidden="true" />
+                    <div className="policy-option-copy">
+                      <strong>Dual approval</strong>
+                      <span>Require review before session start.</span>
+                      <em>{resourceForm.requireDualApproval ? 'Required' : 'Disabled'}</em>
+                    </div>
+                  </label>
+                  <label className={`policy-option ${resourceForm.enableCommandGuard ? 'selected' : ''}`}>
+                    <input
+                      name="enableCommandGuard"
+                      type="checkbox"
+                      checked={!!resourceForm.enableCommandGuard}
+                      onChange={onResourceFieldChange}
+                    />
+                    <span className="policy-option-indicator" aria-hidden="true" />
+                    <div className="policy-option-copy">
+                      <strong>SSH command guard</strong>
+                      <span>Block dangerous commands server-side.</span>
+                      <em>{resourceForm.enableCommandGuard ? 'Protected' : 'Not enforced'}</em>
+                    </div>
+                  </label>
+                  <label className={`policy-option ${resourceForm.adaptiveAccessPolicy ? 'selected' : ''}`}>
+                    <input
+                      name="adaptiveAccessPolicy"
+                      type="checkbox"
+                      checked={!!resourceForm.adaptiveAccessPolicy}
+                      onChange={onResourceFieldChange}
+                    />
+                    <span className="policy-option-indicator" aria-hidden="true" />
+                    <div className="policy-option-copy">
+                      <strong>Adaptive controls</strong>
+                      <span>Raise requirements automatically based on risk.</span>
+                      <em>{resourceForm.adaptiveAccessPolicy ? 'Dynamic' : 'Static'}</em>
+                    </div>
+                  </label>
+                </div>
+                <label className="full">
+                  Risk level
+                  <select
+                    name="riskLevel"
+                    value={resourceForm.riskLevel}
+                    onChange={onResourceFieldChange}
+                  >
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="critical">critical</option>
+                  </select>
+                </label>
+                <div className="policy-preview">
+                  {describeResourcePolicy(resourceForm).map((item) => (
+                    <span className="policy-chip" key={`preview-${item}`}>{item}</span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="full resource-section routing-section">
+                <div className="resource-section-header">
+                  <div>
+                    <h4>Routing</h4>
+                  </div>
+                </div>
+                <div className="routing-summary">
+                  <article>
+                    <strong>Direct</strong>
+                    <span>Backend to target.</span>
+                  </article>
+                  <article>
+                    <strong>Relay</strong>
+                    <span>Through assigned relay.</span>
+                  </article>
+                  <article>
+                    <strong>Agent</strong>
+                    <span>Local tunnel path.</span>
+                  </article>
+                </div>
+              </div>
+
               <div className="resource-actions">
                 <button type="submit">
                   {savingResource
@@ -3397,6 +4137,7 @@ export default function App() {
                         target: '',
                         protocol: 'ssh',
                         port: '22',
+                        tunnelTicketRateLimitMaxAttempts: '0',
                         description: '',
                         imageUrl: '',
                         httpUsername: '',
@@ -3418,7 +4159,9 @@ export default function App() {
             </form>
             {resourceError && <p className="error">{resourceError}</p>}
           </div>
+          )}
 
+          {adminSection === 'resources' && (
           <div className="panel reveal">
             <div className="panel-header">
               <div>
@@ -3439,18 +4182,11 @@ export default function App() {
                       {resource.description && (
                         <p className="muted">{resource.description}</p>
                       )}
-                      {resource.requireAccessJustification && (
-                        <p className="muted">Reason popup required</p>
-                      )}
-                      {resource.requireDualApproval && (
-                        <p className="muted">Dual approval required</p>
-                      )}
-                      {resource.enableCommandGuard && (
-                        <p className="muted">Command guard enabled</p>
-                      )}
-                      {resource.adaptiveAccessPolicy && (
-                        <p className="muted">Adaptive policy ({resource.riskLevel || 'low'})</p>
-                      )}
+                      <div className="policy-chip-row">
+                        {describeResourcePolicy(resource).map((item) => (
+                          <span className="policy-chip" key={`${resource.id}-${item}`}>{item}</span>
+                        ))}
+                      </div>
                     </div>
                     <div className="resource-actions">
                       <button
@@ -3475,12 +4211,13 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
+          {adminSection === 'routing' && (
           <div className="panel reveal relay-panel">
             <div className="panel-header">
               <div>
                 <h3>Relay Fabric</h3>
-                <p>Distributed bastion control-plane: fleet health and per-resource routing.</p>
               </div>
               {loadingRelays && <span className="pill loading">syncing</span>}
             </div>
@@ -3504,25 +4241,13 @@ export default function App() {
               </article>
             </div>
 
-            <p className="muted">
-              Cert required: {relayConfig.certificateRequired ? 'yes' : 'no'} • Cert TTL: {relayConfig.certificateTtlSeconds}s • Token TTL: {relayConfig.tokenTtlSeconds}s • Offline threshold: {relayConfig.heartbeatStaleSeconds}s
-            </p>
-
             <div className="relay-enroll-panel">
               <div>
-                <h4>Relay Agent Bootstrap (recommended)</h4>
-                <p className="muted">
-                  Use the EndoriumFort agent path first. Manual API bootstrap is available as advanced fallback.
-                </p>
+                <h4>Relay Bootstrap</h4>
               </div>
               <div className="relay-enroll-token-box">
-                <p>
-                  <strong>Install helper ({resolveAgentInstallGuide().platform})</strong>
-                </p>
+                <p><strong>Install helper ({resolveAgentInstallGuide().platform})</strong></p>
                 <code className="relay-enroll-command">{resolveAgentInstallGuide().command}</code>
-                <p className="muted">
-                  After install, use the built-in agent launch flow from the resource access workflow.
-                </p>
               </div>
               <div className="resource-actions">
                 <button
@@ -3536,12 +4261,7 @@ export default function App() {
 
               {showRelayManualBootstrap && (
                 <>
-                  <div>
-                    <h4>Manual bootstrap (optional)</h4>
-                    <p className="muted">
-                      Generate certificate + short-lived token, then enroll relay manually through API.
-                    </p>
-                  </div>
+                  <div><h4>Manual</h4></div>
                   <div className="resource-actions">
                     <button
                       type="button"
@@ -3585,9 +4305,7 @@ export default function App() {
                     </div>
                   )}
                   {!relayConfig.enrollmentEnabled && (
-                    <p className="muted">
-                      Enrollment secret is not configured on backend. Set `ENDORIUMFORT_RELAY_ENROLL_SECRET` first.
-                    </p>
+                    <p className="muted">Enrollment secret missing on backend.</p>
                   )}
                   {relayEnrollmentToken && (
                     <div className="relay-enroll-token-box">
@@ -3621,14 +4339,13 @@ export default function App() {
                   </article>
                 ))
               ) : (
-                <p className="muted">No relay enrolled yet. Configure `ENDORIUMFORT_RELAY_ENROLL_SECRET` and enroll a relay node.</p>
+                <p className="muted">No relay enrolled yet.</p>
               )}
             </div>
 
             <div className="panel-header" style={{ marginTop: '0.9rem' }}>
               <div>
                 <h3>Resource Routing Assignments</h3>
-                <p>Bind each resource to one relay, or keep direct routing fallback.</p>
               </div>
               <label className="relay-filter-toggle">
                 <input
@@ -3675,12 +4392,13 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
+          {adminSection === 'routing' && (
           <div className="panel reveal">
             <div className="panel-header">
               <div>
                 <h3>Access Requests</h3>
-                <p>Dual-control queue and user requests.</p>
               </div>
               {loadingAccessRequests && <span className="pill loading">loading</span>}
             </div>
@@ -3728,12 +4446,13 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
+          {adminSection === 'users' && (
           <div className="panel reveal">
             <div className="panel-header">
               <div>
                 <h3>{editingUserId ? 'Edit user' : 'New user'}</h3>
-                <p>Create login accounts for the console.</p>
               </div>
               {loadingUsers && <span className="pill loading">loading</span>}
             </div>
@@ -3770,6 +4489,15 @@ export default function App() {
                   <option value="auditor">Security Auditor</option>
                 </select>
               </label>
+              <label className="checkbox-row">
+                <input
+                  name="forcePasswordRotation"
+                  type="checkbox"
+                  checked={!!userForm.forcePasswordRotation}
+                  onChange={onUserFieldChange}
+                />
+                <span>Require password rotation on next sign-in</span>
+              </label>
               <div className="resource-actions">
                 <button type="submit">
                   {editingUserId ? 'Update' : 'Create'} user
@@ -3783,7 +4511,8 @@ export default function App() {
                       setUserForm({
                         username: '',
                         password: '',
-                        role: 'operator'
+                        role: 'operator',
+                        forcePasswordRotation: false
                       });
                     }}
                   >
@@ -3800,6 +4529,14 @@ export default function App() {
                     <div>
                       <h4>{user.username}</h4>
                       <p className="muted">Role: {roleLabel(user.role)}</p>
+                      {user.bootstrapPasswordChangeRequired && (
+                        <p className="muted">Password rotation required at next sign-in.</p>
+                      )}
+                      {user.role === 'admin' && (
+                        <p className="muted">
+                          MFA {(user.totpEnabled || user.webauthnEnabled) ? 'enabled' : 'required before platform use'}.
+                        </p>
+                      )}
                     </div>
                     <div className="resource-actions">
                       <button
@@ -3814,7 +4551,7 @@ export default function App() {
                         className="secondary"
                         onClick={() => onLoadUserPermissions(user)}
                       >
-                        Permissions
+                        Access Scope
                       </button>
                       <button
                         type="button"
@@ -3831,48 +4568,22 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
-          <div className="panel reveal">
+          {adminSection === 'users' && (
+          <div className="panel reveal access-scope-panel">
             <div className="panel-header">
               <div>
-                <h3>RBAC Blueprint</h3>
-                <p>Operational role model and expected permissions.</p>
+                <h3>Access Scope</h3>
               </div>
-            </div>
-            <div className="rbac-grid">
-              {ROLE_BLUEPRINTS.map((role) => (
-                <article className="rbac-card" key={role.id}>
-                  <h4>{role.label}</h4>
-                  <p className="muted">{role.description}</p>
-                  <ul>
-                    {role.permissions.map((permission) => (
-                      <li key={`${role.id}-${permission}`}>{permission}</li>
-                    ))}
-                  </ul>
-                </article>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel reveal permissions-panel">
-            <div className="panel-header">
-              <div>
-                <h3>Granular Permissions</h3>
-                <p>
-                  {selectedUserForPermissions
-                    ? `Manage access rights for ${selectedUserForPermissions.username}`
-                    : 'Select a user and click Permissions to manage granular rights.'}
-                </p>
-              </div>
-              {selectedUserForPermissions && (
+              {selectedUserForAccessScope && (
                 <button
                   type="button"
                   className="ghost"
                   onClick={() => {
-                    setSelectedUserForPermissions(null);
-                    setUserPermissions([]);
-                    setGranularPermissions([]);
-                    setPermissionsError('');
+                    setSelectedUserForAccessScope(null);
+                    setUserResourceScope([]);
+                    setAccessScopeError('');
                   }}
                 >
                   Close
@@ -3880,16 +4591,15 @@ export default function App() {
               )}
             </div>
 
-            {!selectedUserForPermissions ? (
+            {!selectedUserForAccessScope ? (
               <p className="muted">No user selected yet.</p>
             ) : (
               <>
-                {loadingPermissions && <p>Loading permissions...</p>}
-                {permissionsError && <p className="error">{permissionsError}</p>}
+                {loadingAccessScope && <p>Loading access scope...</p>}
+                {accessScopeError && <p className="error">{accessScopeError}</p>}
                 <div className="panel-header" style={{ marginTop: '0.5rem' }}>
                   <div>
-                    <h3>Resource Permissions</h3>
-                    <p>Assign resource scope.</p>
+                    <h3>Resource Scope</h3>
                   </div>
                 </div>
                 <div className="resource-list permissions-resources-list">
@@ -3906,7 +4616,7 @@ export default function App() {
                           >
                             <input
                               type="checkbox"
-                              checked={userPermissions.includes(resource.id)}
+                              checked={userResourceScope.includes(resource.id)}
                               onChange={() => onToggleResourcePermission(resource.id)}
                               style={{ cursor: 'pointer' }}
                             />
@@ -3927,103 +4637,153 @@ export default function App() {
 
                 <div className="panel-header" style={{ marginTop: '1rem' }}>
                   <div>
-                    <h3>Action-Level Overrides</h3>
-                    <p>Set per-action policy: inherit, allow, deny.</p>
+                    <h3>Role Policy</h3>
                   </div>
                 </div>
                 <div className="resource-list permissions-grid">
-                  {granularPermissions.length ? (
-                    granularPermissions.map((permission) => {
-                      const key = `${selectedUserForPermissions.id}:${permission.name}`;
-                      const isSaving = updatingPermissionKey === key;
-                      return (
-                        <article className="resource-row compact-perm-row" key={permission.name}>
-                          <div>
-                            <h4>{permission.name}</h4>
-                            <p className="muted">
-                              Effective: {permission.effective ? 'allowed' : 'denied'}
-                            </p>
-                          </div>
-                          <div className="resource-actions">
-                            <select
-                              value={permission.override || 'inherit'}
-                              disabled={isSaving}
-                              onChange={(event) =>
-                                onChangeGranularPermissionOverride(
-                                  permission.name,
-                                  event.target.value
-                                )
-                              }
-                            >
-                              <option value="inherit">inherit</option>
-                              <option value="allow">allow</option>
-                              <option value="deny">deny</option>
-                            </select>
-                          </div>
-                        </article>
-                      );
-                    })
-                  ) : (
-                    <p className="muted">No granular permissions loaded.</p>
-                  )}
+                  {(ROLE_BLUEPRINTS.find((role) => role.id === normalizeRole(selectedUserForAccessScope.role))?.permissions || [])
+                    .map((permission) => (
+                      <article className="resource-row compact-perm-row" key={permission}>
+                        <div>
+                          <h4>{permission}</h4>
+                          <p className="muted">
+                            Granted by role: {roleLabel(selectedUserForAccessScope.role)}
+                          </p>
+                        </div>
+                      </article>
+                    ))}
                 </div>
               </>
             )}
           </div>
+          )}
+
+          {adminSection === 'security' && stats && (
+            <SectionCard
+              title="Security Posture"
+              actions={
+                <div className="status-row">
+                  <StatusBadge tone={stats.auth?.webauthn?.configured ? 'ok' : 'loading'}>
+                    {stats.auth?.webauthn?.configured ? 'WebAuthn ready' : 'WebAuthn needs attention'}
+                  </StatusBadge>
+                </div>
+              }
+              className="security-posture-panel"
+            >
+              <div className="security-posture-grid">
+                <article className="security-posture-card">
+                  <StatusBadge tone={(stats.users?.adminsWithoutMfa || 0) === 0 ? 'ok' : 'loading'}>
+                    {(stats.users?.adminsWithoutMfa || 0) === 0 ? 'Protected' : 'Action needed'}
+                  </StatusBadge>
+                  <h4>{stats.users?.adminsWithoutMfa || 0}</h4>
+                </article>
+                <article className="security-posture-card">
+                  <StatusBadge tone={(stats.users?.adminsPendingBootstrap || 0) === 0 ? 'ok' : 'active'}>
+                    {(stats.users?.adminsPendingBootstrap || 0) === 0 ? 'Cleared' : 'Bootstrap pending'}
+                  </StatusBadge>
+                  <h4>{stats.users?.adminsPendingBootstrap || 0}</h4>
+                </article>
+                <article className="security-posture-card">
+                  <StatusBadge tone={stats.auth?.webauthn?.rpIdValid ? 'ok' : 'loading'}>
+                    {stats.auth?.webauthn?.rpIdValid ? 'RP ID valid' : 'RP ID invalid'}
+                  </StatusBadge>
+                  <h4>{stats.auth?.webauthn?.rpId || 'n/a'}</h4>
+                </article>
+                <article className="security-posture-card">
+                  <StatusBadge tone={stats.auth?.webauthn?.originValid ? 'ok' : 'loading'}>
+                    {stats.auth?.webauthn?.originValid ? 'Origin valid' : 'Origin invalid'}
+                  </StatusBadge>
+                  <h4>{stats.auth?.webauthn?.origin || 'n/a'}</h4>
+                </article>
+                <article className="security-posture-card">
+                  <StatusBadge tone={stats.relay?.runtime?.enrollmentEnabled ? 'ok' : 'loading'}>
+                    {stats.relay?.runtime?.enrollmentEnabled ? 'Relay enrollment on' : 'Relay enrollment off'}
+                  </StatusBadge>
+                  <h4>{stats.relay?.runtime?.heartbeatStaleSeconds || 0}s</h4>
+                </article>
+              </div>
+            </SectionCard>
+          )}
 
           {/* 2FA Management Panel */}
+          {adminSection === 'security' && (
           <div className="panel reveal">
             <div className="panel-header">
               <div>
                 <h3>Two-Factor Authentication</h3>
-                <p>Manage TOTP 2FA for your account.</p>
               </div>
-              <span className={`pill ${totpEnabled ? 'ok' : 'loading'}`}>
-                {totpEnabled ? 'enabled' : 'disabled'}
+              <span className={`pill ${(totpEnabled || webauthnEnabled) ? 'ok' : 'loading'}`}>
+                {(totpEnabled || webauthnEnabled) ? 'enabled' : 'disabled'}
               </span>
             </div>
-            {totpError && <p className="error">{totpError}</p>}
-            {!totpEnabled && !totpSetupData && (
-              <div style={{ padding: '12px 0' }}>
-                <p className="muted">2FA adds an extra layer of security to your account using an authenticator app (Google Authenticator, Authy, etc.).</p>
-                <button type="button" onClick={onSetup2FA} style={{ marginTop: '8px' }}>
-                  Setup 2FA
-                </button>
-              </div>
-            )}
-            {totpSetupData && (
-              <div style={{ padding: '12px 0' }}>
-                <p>Scan this QR code with your authenticator app, or manually enter the secret:</p>
-                <div style={{
-                  background: '#fff',
-                  display: 'inline-block',
-                  padding: '16px',
-                  borderRadius: '8px',
-                  margin: '12px 0'
-                }}>
-                  <img
-                    src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(totpSetupData.otpauthUri)}`}
-                    alt="TOTP QR Code"
-                    width={200}
-                    height={200}
-                  />
+              <div className="mfa-panel-block">
+                <div className="mfa-preference-grid">
+                  <button
+                    type="button"
+                    className={`ghost ${preferredMfaMethod === 'any' ? 'selected-pref' : ''}`}
+                    onClick={() => onUpdateMfaPreference('any')}
+                  >
+                    Flexible
+                  </button>
+                  <button
+                    type="button"
+                    className={`ghost ${preferredMfaMethod === 'totp' ? 'selected-pref' : ''}`}
+                    onClick={() => onUpdateMfaPreference('totp')}
+                    disabled={!totpEnabled}
+                  >
+                    Prefer TOTP
+                  </button>
+                  <button
+                    type="button"
+                    className={`ghost ${preferredMfaMethod === 'webauthn' ? 'selected-pref' : ''}`}
+                    onClick={() => onUpdateMfaPreference('webauthn')}
+                    disabled={!webauthnEnabled}
+                  >
+                    Prefer Passkey
+                  </button>
                 </div>
-                <p className="muted" style={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                  Secret: {totpSetupData.secret}
-                </p>
+              </div>
+              {totpError && <p className="error">{totpError}</p>}
+              {!totpEnabled && !totpSetupData && (
+                <div className="mfa-panel-block">
+                  <button type="button" onClick={onSetup2FA} className="mfa-inline-action">
+                    Setup TOTP MFA
+                  </button>
+                </div>
+              )}
+              {totpSetupData && (
+              <div className="mfa-panel-block">
+                {totpQrDataUrl && (
+                  <div className="bootstrap-qr-image-card mfa-qr-card">
+                    <img src={totpQrDataUrl} alt="Local TOTP QR Code" width={220} height={220} />
+                  </div>
+                )}
+                <div className="mfa-setup-card">
+                  <strong>Manual secret</strong>
+                  <code className="inline-secret">{totpSetupData.secret}</code>
+                  <div className="resource-actions">
+                    <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.secret, 'Secret')}>
+                      Copy secret
+                    </button>
+                    <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.otpauthUri, 'Enrollment URI')}>
+                      Copy URI
+                    </button>
+                  </div>
+                </div>
+                {totpCopyStatus && <p className="muted">{totpCopyStatus}</p>}
                 <label>
-                  Enter code from your authenticator
+                  Enter code from your authenticator or hardware token
                   <input
+                    className="mfa-code-input"
                     type="text"
                     inputMode="numeric"
                     maxLength={6}
                     value={totpSetupCode}
                     onChange={(e) => setTotpSetupCode(e.target.value)}
                     placeholder="123456"
-                    style={{ letterSpacing: '0.3em', textAlign: 'center' }}
                   />
                 </label>
-                <div className="resource-actions" style={{ marginTop: '8px' }}>
+                <div className="resource-actions mfa-inline-action">
                   <button type="button" onClick={onVerify2FA}>
                     Verify &amp; Enable
                   </button>
@@ -4037,32 +4797,85 @@ export default function App() {
                 </div>
               </div>
             )}
+            <div className="mfa-panel-block">
+              <label>
+                Passkey label
+                <input
+                  className="mfa-code-input"
+                  type="text"
+                  value={webauthnLabel}
+                  onChange={(e) => setWebauthnLabel(e.target.value)}
+                  placeholder="Primary security key"
+                />
+              </label>
+              <div className="resource-actions mfa-inline-action">
+                <button
+                  type="button"
+                  onClick={() => onRegisterPasskey(webauthnLabel)}
+                  disabled={webauthnBusy || !isWebAuthnSupported()}
+                >
+                  {webauthnBusy ? 'Registering...' : 'Register passkey'}
+                </button>
+              </div>
+              {!isWebAuthnSupported() && (
+                <p className="mfa-hint">WebAuthn unavailable in this browser.</p>
+              )}
+              {webauthnCredentials.length > 0 && (
+                <div className="mfa-passkey-list">
+                  {webauthnCredentials.map((credential) => (
+                    <article key={credential.id} className="mfa-passkey-item">
+                      <div>
+                        <strong>{credential.label || 'Passkey'}</strong>
+                        <p className="muted">
+                          Added {formatRelativeDate(credential.createdAt)}
+                          {credential.lastUsedAt ? ` · used ${formatRelativeDate(credential.lastUsedAt)}` : ''}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => onDeletePasskey(credential.id)}
+                        disabled={webauthnBusy || (auth.role === 'admin' && !totpEnabled && webauthnCredentials.length <= 1)}
+                      >
+                        Remove
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              )}
+              {auth.role === 'admin' && !totpEnabled && webauthnCredentials.length <= 1 && (
+                <p className="mfa-hint">Add another factor before removing the last passkey.</p>
+              )}
+            </div>
             {totpEnabled && (
-              <div style={{ padding: '12px 0' }}>
-                <p className="muted">2FA is currently active. Enter a code from your authenticator to disable it.</p>
+              <div className="mfa-panel-block">
                 <label>
                   Current TOTP code
                   <input
+                    className="mfa-code-input"
                     type="text"
                     inputMode="numeric"
                     maxLength={6}
                     value={totpDisableCode}
                     onChange={(e) => setTotpDisableCode(e.target.value)}
                     placeholder="123456"
-                    style={{ letterSpacing: '0.3em', textAlign: 'center' }}
                   />
                 </label>
                 <button
                   type="button"
-                  className="ghost"
                   onClick={onDisable2FA}
-                  style={{ marginTop: '8px' }}
+                  className="ghost mfa-inline-action"
+                  disabled={auth.role === 'admin' && !webauthnEnabled}
                 >
                   Disable 2FA
                 </button>
+                {auth.role === 'admin' && !webauthnEnabled && (
+                  <p className="mfa-hint">Register a passkey before disabling TOTP.</p>
+                )}
               </div>
             )}
           </div>
+          )}
         </div>
       )}
     </div>
@@ -4178,21 +4991,6 @@ export default function App() {
 
       {canViewAudit && (
         <div className="live-alert-stack" role="status" aria-live="polite">
-          <div className="live-alert-toolbar">
-            <strong>Alert Noise Filter</strong>
-            <div className="live-alert-profile-tabs" role="group" aria-label="Live alert filter mode">
-              {Object.keys(LIVE_ALERT_PROFILES).map((profileKey) => (
-                <button
-                  type="button"
-                  key={profileKey}
-                  className={`live-alert-profile-btn ${liveAlertProfile === profileKey ? 'active' : ''}`}
-                  onClick={() => setLiveAlertProfile(profileKey)}
-                >
-                  {LIVE_ALERT_PROFILE_LABEL[profileKey] || profileKey}
-                </button>
-              ))}
-            </div>
-          </div>
           {liveSecurityAlerts.map((alert) => (
             <article className={`live-alert ${alert.severity}`} key={alert.key}>
               <div className="live-alert-head">
@@ -4256,8 +5054,8 @@ export default function App() {
         <div className="mission-headline">
           <div>
             <p className="workflow-kicker">Access Workspace</p>
-            <h3>Operate Without Context Switching</h3>
-            <p>Open a resource and access it directly on this page. No dashboard detours.</p>
+            <h3>Choose a resource and act</h3>
+            <p>Risk, requirements, and launch path are visible before you connect.</p>
           </div>
           <div className="mission-headline-actions">
             <button type="button" className="ghost" onClick={onQuickRefresh} disabled={quickRefreshing}>
@@ -4284,6 +5082,27 @@ export default function App() {
 
         <p className="muted">{tabGuide.focus}</p>
       </section>
+
+      {canViewAudit && (
+        <section className="live-alert-settings reveal" aria-label="Alert noise filter">
+          <div className="live-alert-settings-copy">
+            <strong>Alert Noise Filter</strong>
+            <span>Adjust how aggressively live alerts are surfaced while you work.</span>
+          </div>
+          <div className="live-alert-profile-tabs" role="group" aria-label="Live alert filter mode">
+            {Object.keys(LIVE_ALERT_PROFILES).map((profileKey) => (
+              <button
+                type="button"
+                key={profileKey}
+                className={`live-alert-profile-btn ${liveAlertProfile === profileKey ? 'active' : ''}`}
+                onClick={() => setLiveAlertProfile(profileKey)}
+              >
+                {LIVE_ALERT_PROFILE_LABEL[profileKey] || profileKey}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* ── Dashboard Stats ── */}
       {false && mainTab === 'overview' && stats && (
@@ -4413,7 +5232,7 @@ export default function App() {
         <div className="panel-header">
           <div>
             <h3>Resources</h3>
-            <p>Select a resource tile to connect instantly.</p>
+            <p>Open a tile to see what the session will require.</p>
           </div>
           <div className="status-row">
             {loadingResources ? (
@@ -4423,7 +5242,7 @@ export default function App() {
             )}
           </div>
         </div>
-        {resourceError && <p className="error">{resourceError}</p>}
+        {resourceError && <InlineAlert tone="error">{resourceError}</InlineAlert>}
         <div className="resource-tiles">
           {resources.length ? (
             resources.map((resource) => (
@@ -4436,12 +5255,14 @@ export default function App() {
                 <div
                   className="resource-thumb"
                   style={
-                    resource.imageUrl
-                      ? { backgroundImage: `url(${resource.imageUrl})` }
-                      : undefined
+                    resource.imageData
+                      ? { backgroundImage: `url(${resource.imageData})` }
+                      : resource.imageUrl
+                        ? { backgroundImage: `url(${resource.imageUrl})` }
+                        : undefined
                   }
                 >
-                  {!resource.imageUrl && (
+                  {!(resource.imageData || resource.imageUrl) && (
                     <span className="resource-letter">
                       {resource.name ? resource.name[0] : 'R'}
                     </span>
@@ -4455,6 +5276,11 @@ export default function App() {
                   {resource.description && (
                     <p className="muted">{resource.description}</p>
                   )}
+                  <div className="policy-chip-row">
+                    {describeAccessOutcome(resource).map((item) => (
+                      <span className="policy-chip" key={`outcome-${resource.id}-${item}`}>{item}</span>
+                    ))}
+                  </div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   {resource.hasCredentials && (
@@ -4469,7 +5295,7 @@ export default function App() {
               </button>
             ))
           ) : (
-            <p className="muted">No resources yet. Ask an admin to add one.</p>
+            <EmptyState title="No resources yet" message="Ask an admin to add a target or assign a resource to your scope." />
           )}
         </div>
       </section>
@@ -4804,99 +5630,30 @@ export default function App() {
 
       {/* Recordings panel */}
       {mainTab === 'recordings' && canViewRecordings && (
-        <section className="panel reveal" style={{ marginBottom: '24px' }}>
-          <div className="panel-header">
-            <div>
-              <h3>Session Recordings</h3>
-              <p>Replay SSH sessions recorded in Asciinema format.</p>
-            </div>
-            <div className="status-row">
-              {loadingRecordings ? (
-                <span className="pill loading">loading</span>
-              ) : (
-                <span className="pill ok">{recordings.length} recordings</span>
-              )}
-            </div>
-          </div>
-          <div className="audit-controls">
-            <button type="button" className="secondary" onClick={() => loadRecordings()} disabled={loadingRecordings}>
-              Refresh
-            </button>
-            <button type="button" className="ghost" onClick={closePlayer}>Reset player</button>
-          </div>
-          {recordingsError && <p className="error">{recordingsError}</p>}
-          <div className="audit-list">
-            {recordings.length ? (
-              recordings.map((rec) => (
-                <article className="audit-item" key={rec.id}>
-                  <div>
-                    <h4>Recording #{rec.id} — Session #{rec.sessionId}</h4>
-                    <p className="muted">
-                      Duration: {rec.durationMs ? `${(rec.durationMs / 1000).toFixed(1)}s` : 'in progress'} —
-                      Size: {rec.fileSize ? `${(rec.fileSize / 1024).toFixed(1)} KB` : '—'}
-                    </p>
-                  </div>
-                  <div className="audit-meta">
-                    <span className="muted">{rec.createdAt}</span>
-                    <button
-                      type="button"
-                      className="secondary"
-                      onClick={() => onPlayRecording(rec.id)}
-                    >
-                      {castRecordingId === rec.id ? 'Playing' : 'Play'}
-                    </button>
-                  </div>
-                </article>
-              ))
-            ) : (
-              <p className="muted">No recordings available.</p>
-            )}
-          </div>
-          {castData && (
-            <div className="recording-player-card">
-              <div className="recording-player-header">
-                <h4 className="recording-player-title">Replay — Recording #{castRecordingId}</h4>
-                <div className="recording-player-actions">
-                  {!playerPlaying ? (
-                    <button
-                      type="button"
-                      className="secondary recording-player-btn"
-                      onClick={startPlayer}
-                    >
-                      ▶ Play
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="secondary recording-player-btn"
-                      onClick={stopPlayer}
-                    >
-                      ⏸ Pause
-                    </button>
-                  )}
-                  <span className="recording-player-meta">
-                    {playerIndex}/{playerEvents.length} events
-                  </span>
-                  <button
-                    type="button"
-                    className="ghost recording-player-close"
-                    onClick={closePlayer}
-                  >
-                    Close
-                  </button>
-                </div>
-              </div>
-              <div
-                className="terminal-shell"
-                ref={playerTermRef}
-                style={{ minHeight: '240px', borderRadius: '6px' }}
-              />
-              <p className="recording-player-note">
-                Animated replay powered by xterm.js. Click Play to watch the session unfold in real time.
-              </p>
-            </div>
+        <Suspense
+          fallback={(
+            <SectionCard title="Session Recordings" subtitle="Loading recordings view...">
+              <EmptyState title="Loading" message="Preparing the replay workspace." />
+            </SectionCard>
           )}
-        </section>
+        >
+          <RecordingsPanel
+            loadingRecordings={loadingRecordings}
+            recordings={recordings}
+            recordingsError={recordingsError}
+            loadRecordings={loadRecordings}
+            closePlayer={closePlayer}
+            castData={castData}
+            castRecordingId={castRecordingId}
+            playerPlaying={playerPlaying}
+            startPlayer={startPlayer}
+            stopPlayer={stopPlayer}
+            playerIndex={playerIndex}
+            playerEvents={playerEvents}
+            playerTermRef={playerTermRef}
+            onPlayRecording={onPlayRecording}
+          />
+        </Suspense>
       )}
 
       {mainTab === 'sessions' && (
@@ -5063,6 +5820,11 @@ export default function App() {
                   ? `${accessPromptResource.name} requires an access reason because containment mode is active.`
                   : `${accessPromptResource.name} requires an access reason before opening the session.`}
             </p>
+            <div className="policy-chip-row" style={{ marginBottom: '0.8rem' }}>
+              {describeAccessOutcome(accessPromptResource).map((item) => (
+                <span className="policy-chip" key={`access-prompt-${item}`}>{item}</span>
+              ))}
+            </div>
             {containmentEnabled && accessPromptMode === 'connect' && containmentStatus.reason && (
               <p className="muted" style={{ marginTop: 0 }}>
                 Containment context: {containmentStatus.reason}
@@ -5297,7 +6059,11 @@ export default function App() {
               </div>
             </div>
             <div className="agent-modal-tip">
-              <p>💡 Une fois le tunnel actif, l'agent redirige automatiquement vers <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
+              {agentModal.openInBrowser ? (
+                <p>💡 Une fois le tunnel actif, l'agent redirige automatiquement vers <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
+              ) : (
+                <p>💡 Une fois le tunnel actif, connecte ton client {String(agentModal.resource?.protocol || '').toUpperCase()} sur <strong>{agentModal.localEndpoint}</strong>.</p>
+              )}
               {agentModal.launchState === 'opening' && (
                 <p className="muted">Ouverture de l'application agent en cours...</p>
               )}
@@ -5400,7 +6166,17 @@ export default function App() {
     return renderLogin();
   }
   if (route === '/admin') {
-    return renderAdmin();
+    return (
+      <>
+        {renderAdmin()}
+        {renderBootstrapOverlay()}
+      </>
+    );
   }
-  return renderMain();
+  return (
+    <>
+      {renderMain()}
+      {renderBootstrapOverlay()}
+    </>
+  );
 }

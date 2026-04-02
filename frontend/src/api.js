@@ -75,16 +75,28 @@ export async function logout() {
   return response.json();
 }
 
-export async function changePassword(currentPassword, newPassword) {
+export async function changePassword(currentPassword, newPassword, options = {}) {
   const response = await fetch('/api/auth/change-password', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...withAuthHeaders()
     },
-    body: JSON.stringify({ currentPassword, newPassword })
+    body: JSON.stringify({
+      currentPassword,
+      newPassword,
+      keepCurrentSession: !!options.keepCurrentSession
+    })
   });
   await ensureResponseOk(response, 'Failed to change password');
+  return response.json();
+}
+
+export async function fetchBootstrapStatus() {
+  const response = await fetch('/api/auth/bootstrap-status', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch bootstrap status');
   return response.json();
 }
 
@@ -343,27 +355,6 @@ export async function revokeResourcePermission(userId, resourceId) {
   return response.json();
 }
 
-export async function getUserPermissions(userId) {
-  const response = await fetch(`/api/users/${userId}/permissions`, {
-    headers: withAuthHeaders()
-  });
-  await ensureResponseOk(response, 'Failed to fetch user permissions');
-  return response.json();
-}
-
-export async function setUserPermissionOverride(userId, permission, override) {
-  const response = await fetch(`/api/users/${userId}/permissions/${encodeURIComponent(permission)}`, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      ...withAuthHeaders()
-    },
-    body: JSON.stringify({ override })
-  });
-  await ensureResponseOk(response, 'Failed to set permission override');
-  return response.json();
-}
-
 // ── 2FA / TOTP ───────────────────────────────────────────────────────
 
 export async function setup2FA() {
@@ -406,6 +397,54 @@ export async function get2FAStatus() {
     headers: withAuthHeaders()
   });
   await ensureResponseOk(response, 'Failed to fetch 2FA status');
+  return response.json();
+}
+
+export async function beginWebAuthnRegistration(payload = {}) {
+  const response = await fetch('/api/auth/webauthn/register/options', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to start passkey registration');
+  return response.json();
+}
+
+export async function verifyWebAuthnRegistration(payload) {
+  const response = await fetch('/api/auth/webauthn/register/verify', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to verify passkey registration');
+  return response.json();
+}
+
+export async function deleteWebAuthnCredential(credentialId) {
+  const response = await fetch(`/api/auth/webauthn/credentials/${credentialId}`, {
+    method: 'DELETE',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to remove passkey');
+  return response.json();
+}
+
+export async function setMfaPreference(method) {
+  const response = await fetch('/api/auth/mfa-preference', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify({ method })
+  });
+  await ensureResponseOk(response, 'Failed to save MFA preference');
   return response.json();
 }
 

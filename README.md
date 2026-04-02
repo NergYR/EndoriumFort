@@ -158,6 +158,19 @@ Opens:
 - **Backend** on `http://localhost:8080`
 - **Frontend** on `http://localhost:5173` (Vite dev server with proxy)
 
+Optional local env bootstrap:
+
+```bash
+cp .env.example .env.local
+```
+
+Recommended local WebAuthn values:
+
+```bash
+export ENDORIUMFORT_WEBAUTHN_RP_ID=localhost
+export ENDORIUMFORT_WEBAUTHN_ORIGIN=http://localhost:5173
+```
+
 ### Default Login
 
 | Field | Value |
@@ -165,7 +178,7 @@ Opens:
 | Username | `admin` |
 | Password | `Admin123` |
 
-> Password is auto-hashed (SHA-256 + salt) on first login. Change it immediately.
+> First sign-in now forces a password rotation and MFA enrollment for the seeded `admin` account. The current password storage scheme is `scrypt`, with transparent migration for older hashes.
 
 ---
 
@@ -197,7 +210,7 @@ Opens:
 6. **Audit** — Search and filter all security events
   - export the current filtered audit view as CSV for reporting and case evidence
 7. **Recordings** — Replay past SSH sessions with the animated Asciinema player (admin/auditor)
-8. **Admin dashboard** — Manage users/resources/permissions and view platform stats
+8. **Admin dashboard** — Manage users/resources/access scope and view platform stats
   - includes **Relay Fabric** operations panel for distributed bastion control-plane:
     - live relay fleet inventory with online/offline status
     - per-resource relay assignment from the admin console
@@ -205,11 +218,11 @@ Opens:
     - agent-first relay bootstrap guidance in UI (manual API bootstrap kept as advanced fallback)
     - direct relay bootstrap from UI with relay certificate + short-lived one-time enrollment token generation (advanced mode)
     - runtime relay policy visibility (certificate policy, enrollment enabled, token TTL, stale threshold)
-9. **Granular permissions**:
-  - role gives a default permission baseline
-  - admin can override each permission per user (`allow`, `deny`, or `inherit`)
-  - admin UI includes a dedicated **Granular Action Permissions** panel per user
-  - endpoints: `GET /api/users/:id/permissions`, `PUT /api/users/:id/permissions/:permission`
+9. **Role + resource policy access model**:
+  - role defines the global permission baseline
+  - assigned resources define the user scope
+  - each resource carries its own access policy (justification, dual approval, adaptive risk, command guard)
+  - admin UI is centered on **Access Scope** and **Access Policy**, not per-action user overrides
 10. **Risk-aware access prompt**:
   - before access, operators get a live **Risk Preview** (`score`, `effectiveRiskLevel`, factors)
   - high/critical resources enforce **Session Purpose** at creation time
@@ -271,6 +284,31 @@ Set relay control-plane hardening values in backend runtime:
 
 If `ENDORIUMFORT_RELAY_ENROLL_SECRET` is not set, enrollment stays fail-closed (disabled).
 
+### Auth / WebAuthn Runtime Configuration
+
+Use these backend runtime variables to control login sessions, passkeys, and local/dev compatibility:
+
+- `ENDORIUMFORT_PORT`: backend listen port (default `8080`)
+- `ENDORIUMFORT_TOKEN_TTL_SECONDS`: auth session TTL in seconds (default `3600`)
+- `ENDORIUMFORT_WEBAUTHN_CHALLENGE_TTL_SECONDS`: passkey challenge TTL in seconds (default `180`)
+- `ENDORIUMFORT_WEBAUTHN_RP_ID`: explicit WebAuthn RP ID override
+- `ENDORIUMFORT_WEBAUTHN_ORIGIN`: explicit WebAuthn origin override
+
+Recommended values:
+
+- local Vite dev:
+  - `ENDORIUMFORT_WEBAUTHN_RP_ID=localhost`
+  - `ENDORIUMFORT_WEBAUTHN_ORIGIN=http://localhost:5173`
+- production:
+  - `ENDORIUMFORT_WEBAUTHN_RP_ID=bastion.example.com`
+  - `ENDORIUMFORT_WEBAUTHN_ORIGIN=https://bastion.example.com`
+
+Notes:
+
+- `localhost` and `127.0.0.1` are accepted for local development.
+- For non-localhost deployments, WebAuthn should use a real domain and `https`.
+- The backend now logs effective runtime config at startup without printing secrets.
+
 ### Linux Relay Daemon (real binary)
 
 EndoriumFort ships a dedicated Linux relay daemon binary:
@@ -313,7 +351,7 @@ You can alternatively bootstrap with one-time enrollment token:
 
 ### Agent Tunnel
 
-For transparent access to web applications (no URL rewriting):
+For transparent TCP access through the bastion (HTTP, SSH, RDP, VNC, and other TCP protocols):
 
 ```bash
 # Authenticate
@@ -352,6 +390,22 @@ For transparent access to web applications (no URL rewriting):
   --tunnel 3:8888 --log-json
 
 # Browse http://127.0.0.1:8888 — traffic tunneled through bastion
+```
+
+Quick protocol tests with the same tunnel primitive:
+
+```bash
+# SSH over agent tunnel (local 2222 -> remote 22)
+./agent/endoriumfort-agent connect \
+  --server http://bastion:8080 --token <your-token> \
+  --resource <ssh-resource-id> --local-port 2222
+ssh user@127.0.0.1 -p 2222
+
+# RDP over agent tunnel (local 3390 -> remote 3389)
+./agent/endoriumfort-agent connect \
+  --server http://bastion:8080 --token <your-token> \
+  --resource <rdp-resource-id> --local-port 3390
+# Then open your native RDP client to 127.0.0.1:3390
 ```
 
 Security note (agent tunnel hardening):
@@ -408,6 +462,7 @@ Supported query parameters:
 - `local-port` (optional, auto-allocated if omitted)
 - `token` (optional if already available in `EF_TOKEN` or `~/.endoriumfort_token`)
 - `redirect-url` (optional, defaults to `http://127.0.0.1:<local-port>`)
+- `no-browser=1` (optional, skip automatic browser opening; useful for RDP/SSH/VNC client flows)
 - `insecure=1` / `allow-http=1` for lab usage only
 
 Template placeholders in `redirect-url`:
@@ -525,6 +580,18 @@ echo "deb [signed-by=/etc/apt/keyrings/endoriumfort-archive-keyring.asc] https:/
 sudo apt update
 sudo apt install endoriumfort-relay endoriumfort-web-bastion
 ```
+
+If your environment gets `curl: (52) Empty reply from server` when fetching `public.key` (typically due custom-domain redirection issues on GitHub Pages), use this temporary fallback:
+
+```bash
+echo "deb [trusted=yes] https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/gh-pages/apt stable main" | \
+  sudo tee /etc/apt/sources.list.d/endoriumfort.list
+
+sudo apt update
+sudo apt install endoriumfort-agent endoriumfort-relay endoriumfort-web-bastion
+```
+
+This bypasses GPG verification and should be treated as a temporary workaround only.
 
 Unsigned fallback (only if APT GPG signing is not configured in CI):
 
@@ -703,7 +770,7 @@ EF_HTTP_PORT=8080 EF_HTTPS_PORT=8443 TZ=America/New_York docker compose up -d
 # 1) Prepare production environment file
 cp .env.prod.example .env.prod
 
-# 2) Adjust .env.prod (domain, email, immutable tag, ports)
+# 2) Adjust .env.prod (domain, WebAuthn origin, immutable tag, ports)
 
 # 3) Start production stack
 docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
@@ -749,6 +816,17 @@ docker compose up -d
 | `ACME_ENABLED` | `0` | Enable Let's Encrypt provisioning (`1` to enable) |
 | `ACME_DOMAIN` | _(empty)_ | Public DNS name for certificate issuance |
 | `ACME_EMAIL` | _(empty)_ | Contact email used by Let's Encrypt |
+| `ENDORIUMFORT_PORT` | `8080` | Internal backend listen port used by the container |
+| `ENDORIUMFORT_TOKEN_TTL_SECONDS` | `3600` | Auth session TTL in seconds |
+| `ENDORIUMFORT_WEBAUTHN_CHALLENGE_TTL_SECONDS` | `180` | WebAuthn challenge TTL in seconds |
+| `ENDORIUMFORT_WEBAUTHN_RP_ID` | _(empty)_ | Explicit WebAuthn RP ID override |
+| `ENDORIUMFORT_WEBAUTHN_ORIGIN` | _(empty)_ | Explicit WebAuthn origin override |
+| `ENDORIUMFORT_RELAY_ENROLL_SECRET` | _(empty)_ | Shared secret for relay enrollment |
+| `ENDORIUMFORT_RELAY_CERT_REQUIRED` | `true` | Require relay certificate on enroll/heartbeat |
+| `ENDORIUMFORT_RELAY_CERT_TTL_SECONDS` | `2592000` | Relay certificate TTL in seconds |
+| `ENDORIUMFORT_RELAY_ENROLL_TOKEN_TTL_SECONDS` | `600` | Relay enrollment token TTL in seconds |
+| `ENDORIUMFORT_RELAY_TOKEN_TTL_SECONDS` | `86400` | Relay auth token TTL in seconds |
+| `ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS` | `90` | Relay stale threshold in seconds |
 
 ### Persistent Volumes
 

@@ -68,6 +68,7 @@ type DeepLinkConfig struct {
 	ResourceID  int
 	LocalPort   int
 	RedirectURL string
+	NoBrowser   bool
 	InsecureTLS bool
 	AllowHTTP   bool
 	Manage      bool
@@ -514,19 +515,6 @@ func runTunnelListener(manager *TunnelManager, rt *tunnelRuntime, wg *sync.WaitG
 	localPort := rt.binding.LocalPort
 
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", localPort)
-
-	// Preflight: validate auth + resource access by issuing a one-time tunnel ticket.
-	if _, _, _, _, _, _, _, err := apiIssueTunnelTicket(manager.serverURL, manager.currentToken(), resource.ID, manager.insecureTLS); err != nil {
-		rt.stats.state.Store("degraded")
-		rt.stats.lastError.Store(err.Error())
-		if strings.Contains(err.Error(), "HTTP 401") && manager.refreshTokenFromSources() {
-			_, _, _, _, _, _, _, err = apiIssueTunnelTicket(manager.serverURL, manager.currentToken(), resource.ID, manager.insecureTLS)
-		}
-		if err != nil {
-			logEvent("error", "tunnel.preflight.failed", map[string]interface{}{"resourceId": resource.ID, "localPort": localPort, "error": err.Error()})
-			return
-		}
-	}
 	rt.stats.state.Store("healthy")
 	rt.stats.lastError.Store("")
 
@@ -959,6 +947,7 @@ func parseDeepLink(rawURL string) (DeepLinkConfig, error) {
 	cfg.Manage = parseBoolString(queryFirst(query, "manage"))
 	cfg.TUI = parseBoolString(queryFirst(query, "tui"))
 	cfg.JSONLogs = parseBoolString(queryFirst(query, "log-json", "log_json"))
+	cfg.NoBrowser = parseBoolString(queryFirst(query, "no-browser", "no_browser", "nobrowser"))
 
 	if cfg.ServerURL == "" {
 		return cfg, fmt.Errorf("paramètre requis manquant: server")
@@ -1053,7 +1042,7 @@ func runDeepLink(cfg DeepLinkConfig) {
 	useJSONLogs = cfg.JSONLogs
 
 	binding := TunnelBinding{
-		Resource: Resource{ID: cfg.ResourceID, Name: fmt.Sprintf("resource-%d", cfg.ResourceID)},
+		Resource:  Resource{ID: cfg.ResourceID, Name: fmt.Sprintf("resource-%d", cfg.ResourceID)},
 		LocalPort: cfg.LocalPort,
 	}
 
@@ -1064,11 +1053,15 @@ func runDeepLink(cfg DeepLinkConfig) {
 	}()
 
 	if waitTunnelReady(cfg.LocalPort, 10*time.Second) {
-		targetURL := buildRedirectURL(cfg)
-		if err := openInDefaultBrowser(targetURL); err != nil {
-			logEvent("warn", "deeplink.browser.open.failed", map[string]interface{}{"url": targetURL, "error": err.Error()})
+		if cfg.NoBrowser {
+			logEvent("info", "deeplink.browser.skip", map[string]interface{}{"localPort": cfg.LocalPort, "resourceId": cfg.ResourceID})
 		} else {
-			logEvent("info", "deeplink.browser.opened", map[string]interface{}{"url": targetURL, "localPort": cfg.LocalPort, "resourceId": cfg.ResourceID})
+			targetURL := buildRedirectURL(cfg)
+			if err := openInDefaultBrowser(targetURL); err != nil {
+				logEvent("warn", "deeplink.browser.open.failed", map[string]interface{}{"url": targetURL, "error": err.Error()})
+			} else {
+				logEvent("info", "deeplink.browser.opened", map[string]interface{}{"url": targetURL, "localPort": cfg.LocalPort, "resourceId": cfg.ResourceID})
+			}
 		}
 	} else {
 		logEvent("warn", "deeplink.tunnel.not_ready", map[string]interface{}{"localPort": cfg.LocalPort, "resourceId": cfg.ResourceID})
@@ -1290,6 +1283,9 @@ func handleTunnelConnection(tcpConn net.Conn, manager *TunnelManager, rt *tunnel
 			err = ticketErr
 			rt.stats.state.Store("degraded")
 			rt.stats.lastError.Store(ticketErr.Error())
+			if strings.Contains(ticketErr.Error(), "HTTP 429") {
+				break
+			}
 		} else {
 			wsURL := buildWSURL(manager.serverURL, resourceID, ticket)
 			timestamp := strconv.FormatInt(time.Now().Unix(), 10)
