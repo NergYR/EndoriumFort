@@ -286,6 +286,7 @@ void AppContext::init_database() {
   sqlite.exec("ALTER TABLE resources ADD COLUMN enable_command_guard INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN adaptive_access_policy INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN risk_level TEXT DEFAULT 'low';", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN tunnel_ticket_rate_limit_max_attempts INTEGER DEFAULT 0;", err);
 
   const std::string user_schema =
       "CREATE TABLE IF NOT EXISTS users ("
@@ -628,7 +629,7 @@ void AppContext::load_resources_from_db() {
       "http_username, http_password, created_at, updated_at, "
       "ssh_username, ssh_password, require_access_justification, "
       "require_dual_approval, enable_command_guard, adaptive_access_policy, "
-      "risk_level FROM resources";
+      "risk_level, tunnel_ticket_rate_limit_max_attempts FROM resources";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite resource select failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -668,6 +669,10 @@ void AppContext::load_resources_from_db() {
       auto rl = sqlite3_column_text(stmt, 17);
       if (rl) r.riskLevel = reinterpret_cast<const char *>(rl);
       if (r.riskLevel.empty()) r.riskLevel = "low";
+      r.tunnelTicketRateLimitMaxAttempts = sqlite3_column_int(stmt, 18);
+      if (r.tunnelTicketRateLimitMaxAttempts < 0) {
+        r.tunnelTicketRateLimitMaxAttempts = 0;
+      }
       resources[r.id] = r;
       if (r.id > max_id) max_id = r.id;
     }
@@ -684,8 +689,8 @@ bool AppContext::insert_resource(const Resource &r) {
       "image_url, image_data, http_username, http_password, created_at, updated_at, "
       "ssh_username, ssh_password, require_access_justification, "
       "require_dual_approval, enable_command_guard, adaptive_access_policy, "
-      "risk_level) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      "risk_level, tunnel_ticket_rate_limit_max_attempts) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite resource insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -717,6 +722,7 @@ bool AppContext::insert_resource(const Resource &r) {
     sqlite3_bind_int(stmt, 17, r.enableCommandGuard ? 1 : 0);
     sqlite3_bind_int(stmt, 18, r.adaptiveAccessPolicy ? 1 : 0);
     sqlite3_bind_text(stmt, 19, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 20, std::max(0, r.tunnelTicketRateLimitMaxAttempts));
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite resource insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -731,7 +737,8 @@ bool AppContext::update_resource_db(const Resource &r) {
       "description=?, image_url=?, image_data=?, http_username=?, http_password=?, "
       "updated_at=?, ssh_username=?, ssh_password=?, "
       "require_access_justification=?, require_dual_approval=?, "
-      "enable_command_guard=?, adaptive_access_policy=?, risk_level=? "
+      "enable_command_guard=?, adaptive_access_policy=?, risk_level=?, "
+      "tunnel_ticket_rate_limit_max_attempts=? "
       "WHERE id=?";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -762,7 +769,8 @@ bool AppContext::update_resource_db(const Resource &r) {
     sqlite3_bind_int(stmt, 15, r.enableCommandGuard ? 1 : 0);
     sqlite3_bind_int(stmt, 16, r.adaptiveAccessPolicy ? 1 : 0);
     sqlite3_bind_text(stmt, 17, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 18, r.id);
+    sqlite3_bind_int(stmt, 18, std::max(0, r.tunnelTicketRateLimitMaxAttempts));
+    sqlite3_bind_int(stmt, 19, r.id);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite resource update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);

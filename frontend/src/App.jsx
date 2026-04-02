@@ -366,6 +366,7 @@ export default function App() {
     target: '',
     protocol: 'ssh',
     port: '22',
+    tunnelTicketRateLimitMaxAttempts: '0',
     description: '',
     imageUrl: '',
     imageData: '', // base64 locale
@@ -2537,6 +2538,10 @@ export default function App() {
       target: trimmedTarget,
       protocol: selectedProtocol,
       port: Number.parseInt(resourceForm.port, 10) || 22,
+      tunnelTicketRateLimitMaxAttempts: Math.max(
+        0,
+        Number.parseInt(resourceForm.tunnelTicketRateLimitMaxAttempts, 10) || 0
+      ),
       description: resourceForm.description.trim(),
       imageUrl: resourceForm.imageUrl.trim(),
       imageData: resourceForm.imageData || '',
@@ -2567,6 +2572,7 @@ export default function App() {
         target: '',
         protocol: 'ssh',
         port: '22',
+        tunnelTicketRateLimitMaxAttempts: '0',
         description: '',
         imageUrl: '',
         httpUsername: '',
@@ -2593,6 +2599,9 @@ export default function App() {
       target: resource.target || '',
       protocol: resource.protocol || 'ssh',
       port: String(resource.port || 22),
+      tunnelTicketRateLimitMaxAttempts: String(
+        Math.max(0, Number(resource.tunnelTicketRateLimitMaxAttempts) || 0)
+      ),
       description: resource.description || '',
       imageUrl: resource.imageUrl || '',
       imageData: resource.imageData || '',
@@ -3916,6 +3925,21 @@ export default function App() {
                       onChange={onResourceFieldChange}
                     />
                   </label>
+                  {(resourceForm.protocol === 'agent' || resourceForm.protocol === 'rdp' || resourceForm.protocol === 'vnc') && (
+                    <label>
+                      Tunnel ticket limit / min
+                      <input
+                        name="tunnelTicketRateLimitMaxAttempts"
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={resourceForm.tunnelTicketRateLimitMaxAttempts}
+                        onChange={onResourceFieldChange}
+                        placeholder="0 = unlimited"
+                      />
+                      <small className="muted">0 = unlimited. Applied per user and per resource.</small>
+                    </label>
+                  )}
                   {(resourceForm.protocol === 'http' || resourceForm.protocol === 'https') && (
                     <>
                       <label>
@@ -4095,6 +4119,7 @@ export default function App() {
                         target: '',
                         protocol: 'ssh',
                         port: '22',
+                        tunnelTicketRateLimitMaxAttempts: '0',
                         description: '',
                         imageUrl: '',
                         httpUsername: '',

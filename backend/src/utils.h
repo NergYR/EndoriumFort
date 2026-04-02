@@ -105,6 +105,8 @@ inline std::string build_resource_payload_json(const Resource &resource) {
   oss << "\"target\":\"" << json_escape(resource.target) << "\",";
   oss << "\"protocol\":\"" << json_escape(resource.protocol) << "\",";
   oss << "\"port\":" << resource.port;
+  oss << ",\"tunnelTicketRateLimitMaxAttempts\":"
+      << resource.tunnelTicketRateLimitMaxAttempts;
   oss << ",\"requireAccessJustification\":"
       << (resource.requireAccessJustification ? "true" : "false");
     oss << ",\"requireDualApproval\":"
@@ -427,6 +429,8 @@ inline crow::json::wvalue resource_to_json(const Resource &resource) {
   payload["target"] = resource.target;
   payload["protocol"] = resource.protocol;
   payload["port"] = resource.port;
+  payload["tunnelTicketRateLimitMaxAttempts"] =
+      resource.tunnelTicketRateLimitMaxAttempts;
   payload["description"] = resource.description;
   payload["imageUrl"] = resource.imageUrl;
   payload["imageData"] = resource.imageData;

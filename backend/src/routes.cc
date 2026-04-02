@@ -843,6 +843,11 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
         std::string protocol = body["protocol"].s();
         int port = 22;
         if (body.has("port")) port = body["port"].i();
+        int tunnel_ticket_rate_limit_max_attempts = 0;
+        if (body.has("tunnelTicketRateLimitMaxAttempts")) {
+          tunnel_ticket_rate_limit_max_attempts =
+              body["tunnelTicketRateLimitMaxAttempts"].i();
+        }
         std::string description;
         if (body.has("description")) description = body["description"].s();
         std::string image_url;
@@ -883,6 +888,8 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
           return crow::response(400, "Missing name, target, or protocol");
         if (port <= 0 || port > 65535)
           return crow::response(400, "Invalid port");
+        if (tunnel_ticket_rate_limit_max_attempts < 0)
+          return crow::response(400, "Invalid tunnelTicketRateLimitMaxAttempts");
 
         // Validate protocol whitelist
         if (!is_allowed_role(protocol, {"ssh", "rdp", "vnc", "http", "https", "agent"}))
@@ -906,6 +913,8 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
         resource.target = target;
         resource.protocol = protocol;
         resource.port = port;
+        resource.tunnelTicketRateLimitMaxAttempts =
+            tunnel_ticket_rate_limit_max_attempts;
         resource.description = description;
         resource.imageUrl = image_url;
         resource.imageData = image_data;
@@ -958,6 +967,11 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
             std::string protocol = body["protocol"].s();
             int port = 22;
             if (body.has("port")) port = body["port"].i();
+            int tunnel_ticket_rate_limit_max_attempts = 0;
+            if (body.has("tunnelTicketRateLimitMaxAttempts")) {
+              tunnel_ticket_rate_limit_max_attempts =
+                  body["tunnelTicketRateLimitMaxAttempts"].i();
+            }
             std::string description;
             if (body.has("description")) description = body["description"].s();
             std::string image_url;
@@ -998,6 +1012,8 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
               return crow::response(400, "Missing name, target, or protocol");
             if (port <= 0 || port > 65535)
               return crow::response(400, "Invalid port");
+            if (tunnel_ticket_rate_limit_max_attempts < 0)
+              return crow::response(400, "Invalid tunnelTicketRateLimitMaxAttempts");
 
             // Validate protocol whitelist
             if (!is_allowed_role(protocol, {"ssh", "rdp", "vnc", "http", "https", "agent"}))
@@ -1022,6 +1038,8 @@ void register_resource_routes(CrowApp &app, AppContext &ctx) {
               resource.target = target;
               resource.protocol = protocol;
               resource.port = port;
+              resource.tunnelTicketRateLimitMaxAttempts =
+                  tunnel_ticket_rate_limit_max_attempts;
               resource.description = description;
               resource.imageUrl = image_url;
               resource.imageData = image_data;

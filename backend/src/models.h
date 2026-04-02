@@ -26,6 +26,7 @@ struct Resource {
   std::string target;
   std::string protocol;
   int port = 22;
+  int tunnelTicketRateLimitMaxAttempts = 0;
   std::string description;
   std::string imageUrl;
   std::string imageData; // base64
