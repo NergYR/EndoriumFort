@@ -30,7 +30,7 @@ export function SectionCard({ title, subtitle = '', actions = null, className = 
 export function MetricTile({ label, value, icon = '', tone = '', className = '' }) {
   return (
     <article className={joinClassNames('metric-tile', tone, className)}>
-      {icon ? <span className="metric-tile-icon" aria-hidden="true">{icon}</span> : null}
+      <span className="metric-tile-accent" aria-hidden="true" />
       <div>
         <strong>{value}</strong>
         <span>{label}</span>

@@ -731,6 +731,11 @@ export default function App() {
     ];
   }, [accessRequests, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, users.length]);
 
+  const activeAdminSection = useMemo(
+    () => adminSections.find((section) => section.id === adminSection) || null,
+    [adminSection, adminSections]
+  );
+
   const isRelayOnline = (relay) => String(relay?.status || '').toLowerCase() === 'online';
 
   const navigate = (path) => {
@@ -3793,17 +3798,30 @@ export default function App() {
         <>
           {stats && (
             <section className="metric-tile-grid reveal" style={{ marginBottom: '1rem' }}>
-              <MetricTile icon="⚡" label="Active sessions" value={stats.sessions?.active || 0} />
-              <MetricTile icon="📊" label="Total sessions" value={stats.sessions?.total || 0} />
-              <MetricTile icon="🖥️" label="Resources" value={stats.resources?.total || 0} />
-              <MetricTile icon="👤" label="Users" value={stats.users?.total || 0} />
-              <MetricTile icon="🎬" label="Recordings" value={stats.recordings?.total || 0} />
-              <MetricTile icon="🔑" label="Active tokens" value={stats.auth?.activeTokens || 0} />
+              <MetricTile tone="sessions" label="Active sessions" value={stats.sessions?.active || 0} />
+              <MetricTile tone="total" label="Total sessions" value={stats.sessions?.total || 0} />
+              <MetricTile tone="resources" label="Resources" value={stats.resources?.total || 0} />
+              <MetricTile tone="users" label="Users" value={stats.users?.total || 0} />
+              <MetricTile tone="recordings" label="Recordings" value={stats.recordings?.total || 0} />
+              <MetricTile tone="tokens" label="Active tokens" value={stats.auth?.activeTokens || 0} />
             </section>
           )}
 
           <section className="admin-shell-head reveal" style={{ marginBottom: '1rem' }}>
             <AdminSectionNav sections={adminSections} current={adminSection} onChange={setAdminSection} />
+            {activeAdminSection ? (
+              <div className="admin-section-status">
+                <div className="admin-section-status-copy">
+                  <strong>{activeAdminSection.label}</strong>
+                  {activeAdminSection.hint ? <span>{activeAdminSection.hint}</span> : null}
+                </div>
+                {activeAdminSection.badge ? (
+                  <StatusBadge tone={activeAdminSection.badgeTone || 'ok'}>
+                    {activeAdminSection.badge}
+                  </StatusBadge>
+                ) : null}
+              </div>
+            ) : null}
           </section>
         </>
       )}
@@ -4973,21 +4991,6 @@ export default function App() {
 
       {canViewAudit && (
         <div className="live-alert-stack" role="status" aria-live="polite">
-          <div className="live-alert-toolbar">
-            <strong>Alert Noise Filter</strong>
-            <div className="live-alert-profile-tabs" role="group" aria-label="Live alert filter mode">
-              {Object.keys(LIVE_ALERT_PROFILES).map((profileKey) => (
-                <button
-                  type="button"
-                  key={profileKey}
-                  className={`live-alert-profile-btn ${liveAlertProfile === profileKey ? 'active' : ''}`}
-                  onClick={() => setLiveAlertProfile(profileKey)}
-                >
-                  {LIVE_ALERT_PROFILE_LABEL[profileKey] || profileKey}
-                </button>
-              ))}
-            </div>
-          </div>
           {liveSecurityAlerts.map((alert) => (
             <article className={`live-alert ${alert.severity}`} key={alert.key}>
               <div className="live-alert-head">
@@ -5079,6 +5082,27 @@ export default function App() {
 
         <p className="muted">{tabGuide.focus}</p>
       </section>
+
+      {canViewAudit && (
+        <section className="live-alert-settings reveal" aria-label="Alert noise filter">
+          <div className="live-alert-settings-copy">
+            <strong>Alert Noise Filter</strong>
+            <span>Adjust how aggressively live alerts are surfaced while you work.</span>
+          </div>
+          <div className="live-alert-profile-tabs" role="group" aria-label="Live alert filter mode">
+            {Object.keys(LIVE_ALERT_PROFILES).map((profileKey) => (
+              <button
+                type="button"
+                key={profileKey}
+                className={`live-alert-profile-btn ${liveAlertProfile === profileKey ? 'active' : ''}`}
+                onClick={() => setLiveAlertProfile(profileKey)}
+              >
+                {LIVE_ALERT_PROFILE_LABEL[profileKey] || profileKey}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* ── Dashboard Stats ── */}
       {false && mainTab === 'overview' && stats && (

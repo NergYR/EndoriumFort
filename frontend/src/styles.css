@@ -866,18 +866,22 @@ button:disabled {
 .admin-shell-head {
   display: grid;
   gap: 0.8rem;
+  position: relative;
+  z-index: 2;
 }
 
 .admin-section-nav {
   display: grid;
   gap: 0.8rem;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  position: relative;
+  z-index: 3;
 }
 
 .admin-section-tab {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 0.9rem;
   padding: 0.9rem 1rem;
   border-radius: 16px;
@@ -887,6 +891,9 @@ button:disabled {
   cursor: pointer;
   text-align: left;
   transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
 }
 
 .admin-section-tab:hover {
@@ -905,7 +912,39 @@ button:disabled {
   display: block;
 }
 
+.admin-section-tab-copy {
+  min-width: 0;
+}
+
 .admin-section-tab span {
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.admin-section-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.9rem;
+  padding: 0.85rem 1rem;
+  border-radius: 16px;
+  border: 1px solid rgba(26, 43, 75, 0.12);
+  background: rgba(255, 255, 255, 0.82);
+  position: relative;
+  z-index: 1;
+}
+
+.admin-section-status-copy {
+  min-width: 0;
+}
+
+.admin-section-status-copy strong,
+.admin-section-status-copy span {
+  display: block;
+}
+
+.admin-section-status-copy span {
   margin-top: 0.2rem;
   color: var(--muted);
   font-size: 0.82rem;
@@ -936,16 +975,20 @@ button:disabled {
   background: rgba(255, 255, 255, 0.82);
 }
 
-.metric-tile-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  background: rgba(58, 100, 240, 0.12);
-  font-size: 1.1rem;
+.metric-tile-accent {
+  width: 10px;
+  height: 56px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--brand-start), var(--brand-end));
+  flex: 0 0 auto;
 }
+
+.metric-tile.sessions .metric-tile-accent { background: linear-gradient(180deg, #16a34a, #4ade80); }
+.metric-tile.total .metric-tile-accent { background: linear-gradient(180deg, #2563eb, #60a5fa); }
+.metric-tile.resources .metric-tile-accent { background: linear-gradient(180deg, #4f46e5, #818cf8); }
+.metric-tile.users .metric-tile-accent { background: linear-gradient(180deg, #d97706, #fbbf24); }
+.metric-tile.recordings .metric-tile-accent { background: linear-gradient(180deg, #db2777, #f472b6); }
+.metric-tile.tokens .metric-tile-accent { background: linear-gradient(180deg, #0f766e, #2dd4bf); }
 
 .metric-tile strong,
 .metric-tile span {
@@ -1970,25 +2013,43 @@ button:disabled {
   border-style: solid;
 }
 
-.live-alert-toolbar {
-  border-radius: 12px;
+.live-alert-settings {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0.95rem;
+  border-radius: 14px;
   border: 1px solid var(--stroke);
   background: var(--card-bg-soft);
   box-shadow: var(--shadow);
-  padding: 0.55rem 0.65rem;
-  display: grid;
-  gap: 0.45rem;
 }
 
-.live-alert-toolbar strong {
-  font-size: 0.75rem;
+.live-alert-settings-copy {
+  min-width: 0;
+}
+
+.live-alert-settings-copy strong,
+.live-alert-settings-copy span {
+  display: block;
+}
+
+.live-alert-settings-copy strong {
+  font-size: 0.78rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.live-alert-settings-copy span {
+  margin-top: 0.22rem;
+  color: var(--muted);
+  font-size: 0.84rem;
 }
 
 .live-alert-profile-tabs {
   display: flex;
   gap: 0.35rem;
+  flex-wrap: wrap;
 }
 
 .live-alert-profile-btn {
@@ -2073,6 +2134,11 @@ button:disabled {
 
 [data-theme="dark"] .live-alert {
   background: #1f2a3e;
+  border-color: var(--stroke);
+}
+
+[data-theme="dark"] .live-alert-settings {
+  background: rgba(15, 23, 42, 0.78);
   border-color: var(--stroke);
 }
 
@@ -2521,6 +2587,7 @@ button:disabled {
 }
 
 [data-theme="dark"] .admin-section-tab,
+[data-theme="dark"] .admin-section-status,
 [data-theme="dark"] .metric-tile,
 [data-theme="dark"] .empty-state {
   background: rgba(15, 23, 42, 0.78);
@@ -3061,12 +3128,13 @@ button:disabled {
 }
 
 .stat-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
   display: grid;
   place-items: center;
-  font-size: 1.3rem;
+  font-size: 2rem;
+  line-height: 1;
   flex-shrink: 0;
 }
 
