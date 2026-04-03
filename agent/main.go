@@ -42,6 +42,42 @@ func agentUserAgent() string {
 	return "EndoriumFortAgent/" + version
 }
 
+func defaultLogDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Logs", "EndoriumFortAgent")
+	case "windows":
+		appData := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+		if appData != "" {
+			return filepath.Join(appData, "EndoriumFortAgent", "Logs")
+		}
+	}
+	return filepath.Join(home, ".endoriumfort", "logs")
+}
+
+func setupFileLogging() {
+	logDir := defaultLogDir()
+	if logDir == "" {
+		return
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		log.Printf("warning: impossible de creer le dossier de logs %s: %v", logDir, err)
+		return
+	}
+	logPath := filepath.Join(logDir, "agent.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("warning: impossible d'ouvrir le fichier de log %s: %v", logPath, err)
+		return
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+	log.Printf("logging.initialized path=%s version=%s", logPath, version)
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────
 
 type Resource struct {
@@ -148,6 +184,7 @@ func (t *tunnelFlag) Set(value string) error {
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
+	setupFileLogging()
 	if len(os.Args) >= 2 && isDeepLinkArg(os.Args[1]) {
 		cmdOpenLink([]string{os.Args[1]})
 		return
