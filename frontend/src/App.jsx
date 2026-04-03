@@ -62,29 +62,9 @@ import {
 import { describeAccessOutcome, describeResourcePolicy, normalizeRiskLevel } from './accessPolicy.js';
 import AdminSectionNav from './components/admin/AdminSectionNav.jsx';
 import { EmptyState, InlineAlert, MetricTile, SectionCard, StatusBadge } from './components/ui/primitives.jsx';
+import { useI18n } from './i18n.jsx';
 
 const RecordingsPanel = lazy(() => import('./components/operator/RecordingsPanel.jsx'));
-
-const ROLE_BLUEPRINTS = [
-  {
-    id: 'operator',
-    label: 'Session Operator',
-    description: 'Launch and manage remote sessions on authorized resources.',
-    permissions: ['Start and terminate sessions', 'Use SSH/web/agent access paths', 'View personal operations data']
-  },
-  {
-    id: 'admin',
-    label: 'Platform Admin',
-    description: 'Govern users, resources, and assignment policies.',
-    permissions: ['Create and edit users', 'Manage resources and credentials', 'Assign resource permissions']
-  },
-  {
-    id: 'auditor',
-    label: 'Security Auditor',
-    description: 'Monitor traceability and investigate security events.',
-    permissions: ['Read audit events', 'Replay session recordings', 'Access governance metrics']
-  }
-];
 
 const normalizeRole = (role) => {
   const value = String(role || '').toLowerCase();
@@ -94,10 +74,11 @@ const normalizeRole = (role) => {
   return value || 'operator';
 };
 
-const roleLabel = (role) => {
+const roleLabel = (role, t) => {
   const mapped = normalizeRole(role);
-  const found = ROLE_BLUEPRINTS.find((item) => item.id === mapped);
-  return found ? found.label : mapped;
+  if (!t) return mapped;
+  const label = t(`roles.${mapped}.label`);
+  return label !== `roles.${mapped}.label` ? label : mapped;
 };
 
 const isWebAuthnSupported = () =>
@@ -299,16 +280,17 @@ const extractSessionIdFromAuditItem = (item) => {
 };
 
 const DEFAULT_SSH_SNIPPETS = [
-  { id: 'health', label: 'Health Snapshot', command: 'whoami && hostname && uptime' },
-  { id: 'net', label: 'Network Quick Check', command: 'ip a && ss -tulpen | head -n 30' },
-  { id: 'disk', label: 'Disk Pressure', command: 'df -h && du -sh /var/log 2>/dev/null' },
-  { id: 'proc', label: 'Top Processes', command: 'ps aux --sort=-%cpu | head -n 15' }
+  { id: 'health', labelKey: 'Health Snapshot', command: 'whoami && hostname && uptime' },
+  { id: 'net', labelKey: 'Network Quick Check', command: 'ip a && ss -tulpen | head -n 30' },
+  { id: 'disk', labelKey: 'Disk Pressure', command: 'df -h && du -sh /var/log 2>/dev/null' },
+  { id: 'proc', labelKey: 'Top Processes', command: 'ps aux --sort=-%cpu | head -n 15' }
 ];
 
 const ACCESS_PLAYBOOK_STORAGE_KEY = 'endoriumfort_access_playbooks';
 const SESSION_WATCHLIST_STORAGE_KEY = 'endoriumfort_session_watchlist';
 
 export default function App() {
+  const { locale, setLocale, t, raw } = useI18n();
   const [status, setStatus] = useState('loading');
   const [detail, setDetail] = useState('');
   const [auth, setAuth] = useState(() => {
@@ -573,10 +555,30 @@ export default function App() {
   const canViewAudit = hasCapability(auth.role, auth.permissions, 'viewAudit');
   const canViewRecordings = hasCapability(auth.role, auth.permissions, 'viewRecordings');
   const canOperateSessions = hasCapability(auth.role, auth.permissions, 'operateSessions');
-  const roleName = roleLabel(auth.role);
+  const roleName = roleLabel(auth.role, t);
   const activeLiveAlertProfile = LIVE_ALERT_PROFILES[liveAlertProfile] || LIVE_ALERT_PROFILES.normal;
   const containmentEnabled = !!containmentStatus.enabled;
   const bootstrapRequired = !!(auth.token && bootstrapState.required);
+  const roleBlueprints = useMemo(() => ([
+    {
+      id: 'operator',
+      label: t('roles.operator.label'),
+      description: t('roles.operator.description'),
+      permissions: raw('roles.operator.permissions') || []
+    },
+    {
+      id: 'admin',
+      label: t('roles.admin.label'),
+      description: t('roles.admin.description'),
+      permissions: raw('roles.admin.permissions') || []
+    },
+    {
+      id: 'auditor',
+      label: t('roles.auditor.label'),
+      description: t('roles.auditor.description'),
+      permissions: raw('roles.auditor.permissions') || []
+    }
+  ]), [raw, t]);
 
   useEffect(() => {
     try {
@@ -619,62 +621,65 @@ export default function App() {
       }))
       .filter((item) => item.id && item.label && item.command)
       .map((item) => ({ ...item, custom: true }));
-    return [...DEFAULT_SSH_SNIPPETS.map((item) => ({ ...item, custom: false })), ...normalizedCustom];
+    return [
+      ...DEFAULT_SSH_SNIPPETS.map((item) => ({ ...item, label: item.labelKey, custom: false })),
+      ...normalizedCustom
+    ];
   }, [customSnippets]);
   const tabGuide = useMemo(() => {
     const base = {
       overview: {
-        title: 'Overview',
-        hint: 'Fast health and posture checks.',
-        focus: 'Review posture and recent sessions.'
+        title: t('app.overview'),
+        hint: t('app.overviewHint'),
+        focus: t('app.overviewFocus')
       },
       sessions: {
-        title: 'Sessions',
-        hint: 'Operate live access.',
-        focus: 'Start, monitor, and terminate active sessions.'
+        title: t('app.sessions'),
+        hint: t('app.sessionsHint'),
+        focus: t('app.sessionsFocus')
       },
       audit: {
-        title: 'Audit',
-        hint: 'Investigate events.',
-        focus: 'Filter and inspect traceability records.'
+        title: t('app.audit'),
+        hint: t('app.auditHint'),
+        focus: t('app.auditFocus')
       },
       recordings: {
-        title: 'Recordings',
-        hint: 'Replay captured evidence.',
-        focus: 'Open SSH cast files and inspect timelines.'
+        title: t('app.recordings'),
+        hint: t('app.recordingsHint'),
+        focus: t('app.recordingsFocus')
       }
     };
     return base[mainTab] || base.overview;
-  }, [mainTab]);
+  }, [mainTab, t]);
 
   const missionBoardEntries = useMemo(() => {
     const entries = [
       {
         id: 'sessions',
-        stage: 'Operate',
-        title: 'Live Access',
+        stage: t('app.operate'),
+        title: t('app.liveAccess'),
         shortcut: 'Alt+1',
-        hint: 'Open and supervise sessions.'
+        hint: t('app.openAndSupervise')
       },
       {
         id: 'audit',
-        stage: 'Trace',
-        title: 'Investigation',
+        stage: t('app.trace'),
+        title: t('app.investigation'),
         shortcut: 'Alt+2',
-        hint: 'Review events and trails.'
+        hint: t('app.reviewEvents')
       },
       {
         id: 'recordings',
-        stage: 'Evidence',
-        title: 'Replay Vault',
+        stage: t('app.evidence'),
+        title: t('app.replayVault'),
         shortcut: 'Alt+3',
-        hint: 'Replay recorded SSH sessions.',
+        hint: t('app.replayRecordedSsh'),
         hidden: !canViewRecordings
       }
     ];
 
     return entries.filter((entry) => !entry.hidden);
-  }, [canViewRecordings]);
+  }, [canViewRecordings, t]);
 
   const pendingAccessApprovals = useMemo(() => {
     return accessRequests
@@ -702,34 +707,34 @@ export default function App() {
     return [
       {
         id: 'resources',
-        label: 'Resources',
-        hint: 'Inventory and policies',
+        label: t('admin.resources'),
+        hint: t('admin.inventoryAndPolicies'),
         badge: String(resources.length),
         badgeTone: loadingResources ? 'loading' : 'ok'
       },
       {
         id: 'users',
-        label: 'Users',
-        hint: 'Accounts and access scope',
+        label: t('admin.users'),
+        hint: t('admin.accountsAndAccessScope'),
         badge: String(users.length),
         badgeTone: loadingUsers ? 'loading' : 'ok'
       },
       {
         id: 'routing',
-        label: 'Routing',
-        hint: 'Relays and approvals',
-        badge: pendingRequests ? `${pendingRequests} pending` : `${relayInventorySummary.online} online`,
+        label: t('admin.routing'),
+        hint: t('admin.relaysAndApprovals'),
+        badge: pendingRequests ? t('admin.pendingCount', { count: pendingRequests }) : t('admin.onlineCount', { count: relayInventorySummary.online }),
         badgeTone: pendingRequests ? 'active' : 'ok'
       },
       {
         id: 'security',
-        label: 'Security',
-        hint: 'MFA and posture',
-        badge: adminsWithoutMfa ? `${adminsWithoutMfa} risk` : 'healthy',
+        label: t('admin.security'),
+        hint: t('admin.mfaAndPosture'),
+        badge: adminsWithoutMfa ? t('admin.riskCount', { count: adminsWithoutMfa }) : t('admin.healthy'),
         badgeTone: adminsWithoutMfa ? 'loading' : 'ok'
       }
     ];
-  }, [accessRequests, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, users.length]);
+  }, [accessRequests, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, t, users.length]);
 
   const activeAdminSection = useMemo(
     () => adminSections.find((section) => section.id === adminSection) || null,
@@ -756,7 +761,7 @@ export default function App() {
   useEffect(() => {
     const onUnauthorized = () => {
       setAuth((prev) => ({ ...prev, token: '', password: '', permissions: [] }));
-      setAuthError('Session expirée. Veuillez vous reconnecter.');
+      setAuthError(t('auth.sessionExpired'));
       setTokenExpiresAt('');
       setBootstrapState({
         required: false,
@@ -775,7 +780,7 @@ export default function App() {
     };
     window.addEventListener('endoriumfort:unauthorized', onUnauthorized);
     return () => window.removeEventListener('endoriumfort:unauthorized', onUnauthorized);
-  }, []);
+  }, [t]);
 
   // Dark mode effect
   useEffect(() => {
@@ -814,10 +819,10 @@ export default function App() {
     }
     const timer = setTimeout(() => {
       onLogout();
-      setAuthError('Session expired. Please login again.');
+      setAuthError(t('auth.sessionExpired'));
     }, remaining);
     return () => clearTimeout(timer);
-  }, [tokenExpiresAt, auth.token]);
+  }, [tokenExpiresAt, auth.token, t]);
 
   useEffect(() => {
     if (!auth.token && route !== '/login') {
@@ -834,17 +839,17 @@ export default function App() {
       .then((data) => {
         if (!active) return;
         setStatus(data.status || 'ok');
-        setDetail(data.message || 'API reachable');
+        setDetail(data.message || t('app.healthApiReachable'));
       })
       .catch(() => {
         if (!active) return;
         setStatus('offline');
-        setDetail('Start the backend to enable health checks.');
+        setDetail(t('app.healthStartBackend'));
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!auth.token) {
@@ -1545,13 +1550,13 @@ export default function App() {
       setAuthError('');
       navigate('/');
     } catch (error) {
-      setAuthError(error.message || 'Login failed');
+      setAuthError(error.message || t('auth.loginFailed'));
     }
   };
 
   const onLoginWithPasskey = async () => {
     if (!webauthnLoginOptions) {
-      setAuthError('No passkey challenge is available for this login.');
+      setAuthError(t('auth.noPasskeyChallenge'));
       return;
     }
     setWebauthnBusy(true);
@@ -1569,7 +1574,7 @@ export default function App() {
       });
       if (payload.status === 'mfa_required') {
         setWebauthnLoginOptions(payload.webauthn || null);
-        throw new Error(payload.message || 'Passkey verification is still required.');
+        throw new Error(payload.message || t('auth.passkeyStillRequired'));
       }
       const bootstrap = payload.bootstrap || {};
       setTwoFARequired(false);
@@ -1604,7 +1609,7 @@ export default function App() {
       }));
       navigate('/');
     } catch (error) {
-      setAuthError(error.message || 'Passkey sign-in failed');
+      setAuthError(error.message || t('auth.passkeySignInFailed'));
     } finally {
       setWebauthnBusy(false);
     }
@@ -1704,7 +1709,7 @@ export default function App() {
       setUserError('');
       setSecurityAuditError('');
     } catch (error) {
-      setSessionError(error.message || 'Unable to refresh data');
+      setSessionError(error.message || t('feedback.unableRefreshData'));
     } finally {
       setQuickRefreshing(false);
     }
@@ -1717,7 +1722,7 @@ export default function App() {
         prev.map((item) => (item.id === sessionId ? updated : item))
       );
     } catch (error) {
-      setSessionError(error.message || 'Unable to terminate session');
+      setSessionError(error.message || t('feedback.unableTerminateSession'));
     }
   };
 
@@ -1737,7 +1742,7 @@ export default function App() {
 
   const loadAudit = async () => {
     if (!auth.token) {
-      setAuditError('Sign in to view audit logs.');
+      setAuditError(t('app.auditorRoleHint'));
       return;
     }
     setLoadingAudit(true);
@@ -1746,7 +1751,7 @@ export default function App() {
       setAuditItems(Array.isArray(data.items) ? data.items : []);
       setAuditError('');
     } catch (error) {
-      setAuditError(error.message || 'Unable to load audit log');
+      setAuditError(error.message || t('feedback.unableLoadAudit'));
     } finally {
       setLoadingAudit(false);
     }
@@ -1937,11 +1942,11 @@ export default function App() {
 
     const resource = resolveSessionResource(session);
     if (!resource || !resource.hasCredentials) {
-      setTerminalInfo('Manual password required for this session.');
+      setTerminalInfo(t('feedback.manualPasswordRequired'));
       return;
     }
 
-    setTerminalInfo('Attempting automatic reconnect with vault credentials...');
+    setTerminalInfo(t('feedback.autoReconnectAttempt'));
 
     try {
       const lease = await issueEphemeralCredential(resource.id);
@@ -1949,7 +1954,7 @@ export default function App() {
       if (creds.sshPassword) {
         setSshPassword(creds.sshPassword);
         setAutoConnectSessionId(session.id);
-        setTerminalInfo('Vault credentials loaded. Reconnecting...');
+        setTerminalInfo(t('feedback.vaultCredentialsLoaded'));
       }
     } catch (_) {
       try {
@@ -1957,10 +1962,10 @@ export default function App() {
         if (creds.sshPassword) {
           setSshPassword(creds.sshPassword);
           setAutoConnectSessionId(session.id);
-          setTerminalInfo('Vault credentials loaded. Reconnecting...');
+          setTerminalInfo(t('feedback.vaultCredentialsLoaded'));
         }
       } catch (_) {
-        setTerminalInfo('Automatic credential recovery failed. Enter password manually.');
+        setTerminalInfo(t('feedback.automaticCredentialRecoveryFailed'));
       }
     }
   };
@@ -1980,21 +1985,21 @@ export default function App() {
   const connectTerminal = () => {
     setTerminalInfo('');
     if (!activeTerminalSession) {
-      setTerminalError('Pick a session to connect.');
+      setTerminalError(t('feedback.pickSessionToConnect'));
       return;
     }
     if (!sshPassword) {
-      setTerminalError('SSH password is required.');
+      setTerminalError(t('feedback.sshPasswordRequired'));
       return;
     }
     if (!auth.token) {
-      setTerminalError('Sign in first.');
+      setTerminalError(t('feedback.signInFirst'));
       return;
     }
 
     const terminal = terminalInstanceRef.current;
     if (!terminal) {
-      setTerminalError('Terminal is initializing... retrying.');
+      setTerminalError(t('feedback.terminalInitializing'));
       window.setTimeout(() => {
         if (terminalInstanceRef.current && auth.token && activeTerminalSession) {
           connectTerminal();
@@ -2050,7 +2055,7 @@ export default function App() {
         try {
           const payload = JSON.parse(event.data);
           if (payload.type === 'error') {
-            setTerminalError(payload.message || 'SSH error');
+            setTerminalError(payload.message || t('feedback.sshError'));
           }
         } catch (error) {
           terminal.write(event.data);
@@ -2070,12 +2075,12 @@ export default function App() {
       socketRef.current = null;
       if (!socketOpened) {
         setTerminalStatus('error');
-        setTerminalError('SSH live connection rejected. Session may be expired; re-login and retry.');
+        setTerminalError(t('feedback.sshRejected'));
         return;
       }
       if (event?.code === 1008 || event?.code === 1006) {
         setTerminalStatus('error');
-        setTerminalError('SSH live connection interrupted (auth or proxy). Re-login and retry.');
+        setTerminalError(t('feedback.sshInterrupted'));
         return;
       }
       setTerminalStatus('closed');
@@ -2084,7 +2089,7 @@ export default function App() {
     socket.addEventListener('error', () => {
       if (socketRef.current !== socket) return;
       setTerminalStatus('error');
-      setTerminalError('WebSocket transport error. Check reverse proxy routing and session authentication.');
+      setTerminalError(t('feedback.websocketTransportError'));
     });
   };
 
@@ -2092,15 +2097,15 @@ export default function App() {
     if (!snippet?.command) return;
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setTerminalError('Connect the SSH terminal before sending snippets.');
+      setTerminalError(t('feedback.connectTerminalBeforeSnippets'));
       return;
     }
     const payload = execute ? `${snippet.command}\n` : snippet.command;
     socket.send(JSON.stringify({ type: 'input', data: payload }));
     setTerminalInfo(
       execute
-        ? `Snippet executed: ${snippet.label}`
-        : `Snippet injected (press Enter to run): ${snippet.label}`
+        ? t('feedback.snippetExecuted', { label: snippet.label })
+        : t('feedback.snippetInjected', { label: snippet.label })
     );
   };
 
@@ -2108,7 +2113,7 @@ export default function App() {
     const label = snippetLabel.trim();
     const command = snippetCommand.trim();
     if (!label || !command) {
-      setTerminalError('Snippet label and command are required.');
+      setTerminalError(t('feedback.snippetRequired'));
       return;
     }
     const id = `custom-${Date.now()}`;
@@ -2116,7 +2121,7 @@ export default function App() {
     setSnippetLabel('');
     setSnippetCommand('');
     setTerminalError('');
-    setTerminalInfo(`Snippet saved: ${label}`);
+    setTerminalInfo(t('feedback.snippetSaved', { label }));
   };
 
   const removeCustomSnippet = (snippetId) => {
@@ -2228,7 +2233,7 @@ export default function App() {
 
   const connectToResource = async (resource, accessMeta = {}) => {
     if (!auth.token) {
-      setSessionError('Sign in to start a session.');
+      setSessionError(t('feedback.signInFirst'));
       return false;
     }
 
@@ -2360,7 +2365,7 @@ export default function App() {
 
   const applyCurrentAccessPlaybook = () => {
     if (!currentAccessPlaybook) {
-      setSessionError('No saved playbook for this resource.');
+      setSessionError(locale === 'fr' ? 'Aucun playbook enregistré pour cette ressource.' : 'No saved playbook for this resource.');
       return;
     }
     setAccessPromptReason(currentAccessPlaybook.justification || '');
@@ -2382,7 +2387,7 @@ export default function App() {
       updatedAt: new Date().toISOString()
     };
     if (!playbook.justification && !playbook.ticketId && !playbook.purpose && !playbook.purposeEvidence) {
-      setSessionError('Playbook cannot be empty. Fill at least one field before saving.');
+      setSessionError(locale === 'fr' ? 'Le playbook ne peut pas être vide. Remplissez au moins un champ avant enregistrement.' : 'Playbook cannot be empty. Fill at least one field before saving.');
       return;
     }
     setAccessPlaybooks((prev) => {
@@ -2390,7 +2395,11 @@ export default function App() {
       return [...next, playbook];
     });
     setSessionError('');
-    setTerminalInfo(`Access playbook saved for ${accessPromptResource?.name || 'resource'}.`);
+    setTerminalInfo(
+      locale === 'fr'
+        ? `Playbook d'accès enregistré pour ${accessPromptResource?.name || 'la ressource'}.`
+        : `Access playbook saved for ${accessPromptResource?.name || 'resource'}.`
+    );
   };
 
   const deleteCurrentAccessPlaybook = () => {
@@ -2409,8 +2418,8 @@ export default function App() {
     if (!reason) {
       setSessionError(
         containmentEnabled
-          ? 'Access reason is required while containment mode is active.'
-          : 'Access reason is required for this resource.'
+          ? (locale === 'fr' ? "Une raison d'accès est requise tant que le mode confinement est actif." : 'Access reason is required while containment mode is active.')
+          : (locale === 'fr' ? "Une raison d'accès est requise pour cette ressource." : 'Access reason is required for this resource.')
       );
       return;
     }
@@ -2419,7 +2428,7 @@ export default function App() {
     const riskLevel = String(accessPromptResource.riskLevel || '').toLowerCase();
     const purposeRequired = riskLevel === 'high' || riskLevel === 'critical';
     if (purposeRequired && !purpose) {
-      setSessionError('High-risk resources require a purpose.');
+      setSessionError(locale === 'fr' ? 'Les ressources à haut risque exigent un objectif.' : 'High-risk resources require a purpose.');
       return;
     }
     if (accessPromptMode === 'request') {
@@ -2430,11 +2439,11 @@ export default function App() {
           ticketId: accessPromptTicketId.trim()
         });
         setAccessRequests((prev) => [created, ...prev]);
-        setSessionError('Access request submitted. Wait for admin approval.');
+        setSessionError(locale === 'fr' ? "Demande d'accès envoyée. Attendez l'approbation d'un admin." : 'Access request submitted. Wait for admin approval.');
         closeAccessPrompt();
         return;
       } catch (error) {
-        setSessionError(error.message || 'Unable to submit access request');
+        setSessionError(error.message || (locale === 'fr' ? "Impossible d'envoyer la demande d'accès" : 'Unable to submit access request'));
         return;
       }
     }
@@ -2468,7 +2477,7 @@ export default function App() {
         setRiskPreviewError('');
       } catch (error) {
         setRiskPreview(null);
-        setRiskPreviewError(error.message || 'Unable to compute risk preview');
+        setRiskPreviewError(error.message || (locale === 'fr' ? "Impossible de calculer l'aperçu de risque" : 'Unable to compute risk preview'));
       } finally {
         setRiskPreviewLoading(false);
       }
@@ -2493,7 +2502,7 @@ export default function App() {
       const data = await fetchSessionDna(sessionId);
       setSessionDna(data);
     } catch (error) {
-      setSessionDnaError(error.message || 'Unable to load session DNA');
+      setSessionDnaError(error.message || (locale === 'fr' ? "Impossible de charger l'ADN de session" : 'Unable to load session DNA'));
     } finally {
       setSessionDnaLoading(false);
     }
@@ -2507,7 +2516,7 @@ export default function App() {
       );
       setAccessRequestError('');
     } catch (error) {
-      setAccessRequestError(error.message || 'Unable to approve access request');
+      setAccessRequestError(error.message || (locale === 'fr' ? "Impossible d'approuver la demande d'accès" : 'Unable to approve access request'));
     }
   };
 
@@ -2519,7 +2528,7 @@ export default function App() {
       );
       setAccessRequestError('');
     } catch (error) {
-      setAccessRequestError(error.message || 'Unable to deny access request');
+      setAccessRequestError(error.message || (locale === 'fr' ? "Impossible de refuser la demande d'accès" : 'Unable to deny access request'));
     }
   };
 
@@ -2534,7 +2543,7 @@ export default function App() {
     const trimmedTarget = resourceForm.target.trim();
     const selectedProtocol = (resourceForm.protocol || '').trim();
     if (!trimmedName || !trimmedTarget || !selectedProtocol) {
-      setResourceError('Name, target and protocol are required.');
+      setResourceError(locale === 'fr' ? 'Le nom, la cible et le protocole sont requis.' : 'Name, target and protocol are required.');
       return;
     }
 
@@ -2591,7 +2600,7 @@ export default function App() {
         riskLevel: 'low'
       });
     } catch (error) {
-      setResourceError(error.message || 'Unable to save resource');
+      setResourceError(error.message || t('feedback.unableSaveResource'));
     } finally {
       setSavingResource(false);
     }
@@ -2627,7 +2636,7 @@ export default function App() {
       await deleteResource(resourceId);
       setResources((prev) => prev.filter((item) => item.id !== resourceId));
     } catch (error) {
-      setResourceError(error.message || 'Unable to delete resource');
+      setResourceError(error.message || t('feedback.unableDeleteResource'));
     }
   };
 
@@ -2662,7 +2671,7 @@ export default function App() {
         forcePasswordRotation: false
       });
     } catch (error) {
-      setUserError(error.message || 'Unable to save user');
+      setUserError(error.message || t('feedback.unableSaveUser'));
     }
   };
 
@@ -2681,7 +2690,7 @@ export default function App() {
       await deleteUser(userId);
       setUsers((prev) => prev.filter((item) => item.id !== userId));
     } catch (error) {
-      setUserError(error.message || 'Unable to delete user');
+      setUserError(error.message || t('feedback.unableDeleteUser'));
     }
   };
 
@@ -2693,7 +2702,7 @@ export default function App() {
       setUserResourceScope(resourceResponse.resourceIds || []);
       setAccessScopeError('');
     } catch (error) {
-      setAccessScopeError(error.message || 'Unable to load access scope');
+      setAccessScopeError(error.message || t('feedback.unableLoadAccessScope'));
     } finally {
       setLoadingAccessScope(false);
     }
@@ -2713,7 +2722,7 @@ export default function App() {
       }
       setAccessScopeError('');
     } catch (error) {
-      setAccessScopeError(error.message || 'Unable to modify resource scope');
+      setAccessScopeError(error.message || t('feedback.unableModifyResourceScope'));
     }
   };
 
@@ -2748,7 +2757,7 @@ export default function App() {
       }));
       setRelayError('');
     } catch (error) {
-      setRelayError(error.message || 'Unable to update relay assignment');
+      setRelayError(error.message || t('feedback.unableUpdateRelayAssignment'));
     } finally {
       setRelayAssignBusyResourceId(0);
     }
@@ -2766,7 +2775,7 @@ export default function App() {
       setRelayEnrollmentTokenExpiresAt(String(data?.expiresAt || ''));
       setRelayError('');
     } catch (error) {
-      setRelayError(error.message || 'Unable to issue relay enrollment token');
+      setRelayError(error.message || t('feedback.unableIssueRelayToken'));
     } finally {
       setIssuingRelayEnrollmentToken(false);
     }
@@ -2785,7 +2794,7 @@ export default function App() {
       setRelayCertificateExpiresAt(String(data?.expiresAt || ''));
       setRelayError('');
     } catch (error) {
-      setRelayError(error.message || 'Unable to issue relay certificate');
+      setRelayError(error.message || t('feedback.unableIssueRelayCertificate'));
     } finally {
       setIssuingRelayCertificate(false);
     }
@@ -2795,9 +2804,9 @@ export default function App() {
     if (!relayCertificate) return;
     try {
       await navigator.clipboard.writeText(relayCertificate);
-      setRelayCertificateCopyStatus('Certificate copied');
+      setRelayCertificateCopyStatus(t('feedback.certificateCopied'));
     } catch (_) {
-      setRelayCertificateCopyStatus('Copy failed');
+      setRelayCertificateCopyStatus(t('feedback.copyFailed'));
     }
   };
 
@@ -2805,9 +2814,9 @@ export default function App() {
     if (!relayEnrollmentToken) return;
     try {
       await navigator.clipboard.writeText(relayEnrollmentToken);
-      setRelayEnrollmentCopyStatus('Token copied');
+      setRelayEnrollmentCopyStatus(t('feedback.tokenCopied'));
     } catch (_) {
-      setRelayEnrollmentCopyStatus('Copy failed');
+      setRelayEnrollmentCopyStatus(t('feedback.copyFailed'));
     }
   };
 
@@ -2820,7 +2829,7 @@ export default function App() {
       const data = await setup2FA();
       setTotpSetupData(data);
     } catch (error) {
-      setTotpError(error.message || 'Failed to setup 2FA');
+      setTotpError(error.message || t('feedback.failedSetup2fa'));
     }
   };
 
@@ -2845,7 +2854,7 @@ export default function App() {
         webauthnEnabled: !!data.webauthnEnabled
       });
     } catch (error) {
-      setTotpError(error.message || 'Invalid code');
+      setTotpError(error.message || t('feedback.invalidCode'));
     }
   };
 
@@ -2865,7 +2874,7 @@ export default function App() {
         webauthnEnabled: !!data.webauthnEnabled
       }));
     } catch (error) {
-      setTotpError(error.message || 'Invalid code');
+      setTotpError(error.message || t('feedback.invalidCode'));
     }
   };
 
@@ -2891,9 +2900,9 @@ export default function App() {
   const onCopyTotpValue = async (value, label) => {
     try {
       await navigator.clipboard.writeText(value || '');
-      setTotpCopyStatus(`${label} copied`);
+      setTotpCopyStatus(t('feedback.copiedLabel', { label }));
     } catch (_) {
-      setTotpCopyStatus(`Unable to copy ${label.toLowerCase()}`);
+      setTotpCopyStatus(t('feedback.unableCopyLabel', { label: String(label || '').toLowerCase() }));
     }
   };
 
@@ -2922,9 +2931,9 @@ export default function App() {
       });
       setWebauthnLabel('');
     } catch (error) {
-      const message = error.message || 'Failed to register passkey';
+      const message = error.message || t('feedback.failedRegisterPasskey');
       if (message.toLowerCase().includes('valid domain')) {
-        setTotpError(`${message} Current origin: ${window.location.origin}`);
+        setTotpError(`${message} ${t('feedback.currentOrigin', { value: window.location.origin })}`);
       } else {
         setTotpError(message);
       }
@@ -2949,7 +2958,7 @@ export default function App() {
         webauthnEnabled: !!data.webauthnEnabled
       }));
     } catch (error) {
-      setTotpError(error.message || 'Failed to remove passkey');
+      setTotpError(error.message || t('feedback.failedRemovePasskey'));
     } finally {
       setWebauthnBusy(false);
     }
@@ -2961,7 +2970,7 @@ export default function App() {
       const data = await setMfaPreference(method);
       setPreferredMfaMethod(String(data.preferredMfaMethod || method || 'any'));
     } catch (error) {
-      setTotpError(error.message || 'Failed to save MFA preference');
+      setTotpError(error.message || t('feedback.failedSaveMfaPreference'));
     }
   };
 
@@ -3044,7 +3053,7 @@ export default function App() {
       return;
     }
     refreshRelayBindings().catch(() => {
-      setRelayError('Unable to resolve current relay bindings');
+      setRelayError(t('feedback.unableResolveRelayBindings'));
     });
   }, [auth.token, canManagePlatform, resources]);
 
@@ -3067,7 +3076,7 @@ export default function App() {
       const data = await fetchRecordings(sessionId);
       setRecordings(Array.isArray(data.items) ? data.items : []);
     } catch (error) {
-      setRecordingsError(error.message || 'Unable to load recordings');
+      setRecordingsError(error.message || t('feedback.unableLoadRecordings'));
     } finally {
       setLoadingRecordings(false);
     }
@@ -3124,7 +3133,7 @@ export default function App() {
         }, 100);
       }
     } catch (error) {
-      setRecordingsError(error.message || 'Unable to load recording');
+      setRecordingsError(error.message || t('feedback.unableLoadRecording'));
     }
   };
 
@@ -3210,7 +3219,7 @@ export default function App() {
 
       socket.addEventListener('open', () => {
         setShadowStatus('live');
-        terminal.writeln('\x1b[33m[SHADOW MODE]\x1b[0m Connected to session #' + session.id + ' — Read-only observation');
+        terminal.writeln(`\x1b[33m${t('feedback.shadowConnected', { id: session.id })}\x1b[0m`);
         terminal.writeln('');
       });
 
@@ -3219,7 +3228,7 @@ export default function App() {
           try {
             const payload = JSON.parse(event.data);
             if (payload.type === 'status') {
-              terminal.writeln('\x1b[36m[INFO]\x1b[0m ' + payload.message);
+              terminal.writeln(`\x1b[36m${t('feedback.shadowInfo', { message: payload.message })}\x1b[0m`);
             }
           } catch (_) {
             terminal.write(event.data);
@@ -3254,7 +3263,7 @@ export default function App() {
     setChangePwError('');
     setChangePwSuccess('');
     if (changePwNew !== changePwConfirm) {
-      setChangePwError('New passwords do not match');
+      setChangePwError(t('feedback.passwordsDoNotMatch'));
       return;
     }
     try {
@@ -3263,8 +3272,8 @@ export default function App() {
       });
       setChangePwSuccess(
         bootstrapRequired
-          ? 'Password updated. Let us finish MFA setup to secure the admin account.'
-          : 'Password changed successfully'
+          ? t('feedback.passwordUpdatedContinueMfa')
+          : t('feedback.passwordChanged')
       );
       setChangePwCurrent('');
       setChangePwNew('');
@@ -3287,7 +3296,7 @@ export default function App() {
         });
       }
     } catch (error) {
-      setChangePwError(error.message || 'Failed to change password');
+      setChangePwError(error.message || t('feedback.failedChangePassword'));
     }
   };
 
@@ -3372,7 +3381,7 @@ export default function App() {
           key: `watch:${sessionId}:${Date.now()}`,
           sessionId,
           status: normalizedStatus,
-          message: `Session #${sessionId} status changed: ${previous} -> ${normalizedStatus}`,
+          message: t('feedback.sessionStatusChanged', { id: sessionId, from: previous, to: normalizedStatus }),
           createdAt: new Date().toISOString()
         });
       }
@@ -3497,7 +3506,7 @@ export default function App() {
 
   const exportFilteredAuditCsv = () => {
     if (!filteredAuditItems.length) {
-      setAuditError('No audit rows to export with current filters.');
+      setAuditError(t('app.noAuditEvents'));
       return;
     }
 
@@ -3527,43 +3536,42 @@ export default function App() {
 
   const formatRelativeDate = (value) => {
     const timestamp = Date.parse(value || '');
-    if (!timestamp) return value || 'n/a';
+    if (!timestamp) return value || t('common.notAvailable');
     const diffSec = Math.floor((Date.now() - timestamp) / 1000);
-    if (diffSec < 60) return 'just now';
-    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-    return `${Math.floor(diffSec / 86400)}d ago`;
+    if (diffSec < 60) return t('time.justNow');
+    if (diffSec < 3600) return t('time.minutesAgo', { count: Math.floor(diffSec / 60) });
+    if (diffSec < 86400) return t('time.hoursAgo', { count: Math.floor(diffSec / 3600) });
+    return t('time.daysAgo', { count: Math.floor(diffSec / 86400) });
   };
 
   const renderBootstrapOverlay = () => {
     if (!bootstrapRequired) return null;
     const currentStep = bootstrapState.passwordChangeRequired
-      ? 'Change the default admin password'
-      : 'Enable MFA for the admin account';
+      ? t('bootstrap.changeDefaultPassword')
+      : t('bootstrap.enableMfa');
     return (
       <div className="modal-overlay bootstrap-overlay">
         <div className="modal-content bootstrap-modal" onClick={(event) => event.stopPropagation()}>
-          <p className="workflow-kicker">Initial Security Setup</p>
-          <h3>Secure the default admin account</h3>
+          <p className="workflow-kicker">{t('bootstrap.title')}</p>
+          <h3>{t('bootstrap.heading')}</h3>
           <p className="muted">
-            This first-run checkpoint is mandatory before using the platform. We need a private
-            admin password and at least one MFA factor bound to the account: TOTP or a passkey.
+            {t('bootstrap.body')}
           </p>
           <div className="bootstrap-checklist">
             <div className={`bootstrap-step ${bootstrapState.passwordChangeRequired ? 'active' : 'done'}`}>
-              <strong>1. Change the default password</strong>
-              <span>{bootstrapState.passwordChangeRequired ? 'Required now' : 'Done'}</span>
+              <strong>1. {t('bootstrap.step1')}</strong>
+              <span>{bootstrapState.passwordChangeRequired ? t('bootstrap.requiredNow') : t('bootstrap.done')}</span>
             </div>
             <div className={`bootstrap-step ${!bootstrapState.passwordChangeRequired && bootstrapState.mfaSetupRequired ? 'active' : ''} ${!bootstrapState.mfaSetupRequired ? 'done' : ''}`}>
-              <strong>2. Enable MFA with TOTP or passkey</strong>
-              <span>{bootstrapState.mfaSetupRequired ? 'Pending' : 'Done'}</span>
+              <strong>2. {t('bootstrap.step2')}</strong>
+              <span>{bootstrapState.mfaSetupRequired ? t('bootstrap.pending') : t('bootstrap.done')}</span>
             </div>
           </div>
-          <p className="bootstrap-status">Current step: {currentStep}</p>
+          <p className="bootstrap-status">{t('bootstrap.currentStep', { step: currentStep })}</p>
           {bootstrapState.passwordChangeRequired ? (
             <form onSubmit={onChangePassword}>
               <label>
-                Current password
+                {t('auth.currentPassword')}
                 <input
                   type="password"
                   value={changePwCurrent}
@@ -3573,18 +3581,18 @@ export default function App() {
                 />
               </label>
               <label>
-                New admin password
+                {t('bootstrap.newAdminPassword')}
                 <input
                   type="password"
                   value={changePwNew}
                   onChange={(e) => setChangePwNew(e.target.value)}
                   required
                   autoComplete="new-password"
-                  placeholder="Min 8 chars, upper + lower + digit"
+                  placeholder={t('auth.passwordPlaceholder')}
                 />
               </label>
               <label>
-                Confirm new password
+                {t('auth.confirmNewPassword')}
                 <input
                   type="password"
                   value={changePwConfirm}
@@ -3596,7 +3604,7 @@ export default function App() {
               {changePwError && <p className="error">{changePwError}</p>}
               {changePwSuccess && <p className="success">{changePwSuccess}</p>}
               <div className="bootstrap-actions">
-                <button type="submit">Save new password</button>
+                <button type="submit">{t('auth.saveNewPassword')}</button>
               </div>
             </form>
           ) : (
@@ -3605,23 +3613,22 @@ export default function App() {
               {!totpEnabled && !totpSetupData && (
                 <>
                   <p className="muted">
-                    Finish admin hardening with either a TOTP authenticator or a WebAuthn passkey
-                    such as a physical security key.
+                    {t('bootstrap.finishHardening')}
                   </p>
                   <div className="bootstrap-actions">
-                    <button type="button" onClick={onSetup2FA}>Start MFA setup</button>
+                    <button type="button" onClick={onSetup2FA}>{t('bootstrap.startMfaSetup')}</button>
                     <button
                       type="button"
                       className="ghost"
                       onClick={() => onRegisterPasskey('Admin security key')}
                       disabled={webauthnBusy || !isWebAuthnSupported()}
                     >
-                      {webauthnBusy ? 'Registering...' : 'Use passkey / security key'}
+                      {webauthnBusy ? t('admin.registering') : t('auth.usePasskey')}
                     </button>
                   </div>
                   {!isWebAuthnSupported() && (
                     <p className="muted">
-                      Passkeys require a compatible browser in a secure context (HTTPS or localhost).
+                      {t('bootstrap.passkeyBrowserHint')}
                     </p>
                   )}
                 </>
@@ -3629,29 +3636,28 @@ export default function App() {
               {totpSetupData && (
                 <div className="bootstrap-totp-panel">
                   <p>
-                    Use the secret below in your authenticator app or OATH-TOTP hardware token,
-                    or copy the full `otpauth://` enrollment URI for compatible devices.
+                    {t('bootstrap.totpHelp')}
                   </p>
                   {totpQrDataUrl && (
                     <div className="bootstrap-qr-image-card">
-                      <img src={totpQrDataUrl} alt="Local TOTP QR Code" width={220} height={220} />
+                      <img src={totpQrDataUrl} alt={t('bootstrap.qrAlt')} width={220} height={220} />
                     </div>
                   )}
                   <div className="bootstrap-qr-card">
-                    <strong>Manual secret</strong>
+                    <strong>{t('bootstrap.manualSecret')}</strong>
                     <code className="inline-secret">{totpSetupData.secret}</code>
                     <div className="bootstrap-actions">
-                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.secret, 'Secret')}>
-                        Copy secret
+                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.secret, t('bootstrap.manualSecret'))}>
+                        {t('bootstrap.copySecret')}
                       </button>
-                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.otpauthUri, 'Enrollment URI')}>
-                        Copy URI
+                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.otpauthUri, t('bootstrap.enrollmentUri'))}>
+                        {t('bootstrap.copyUri')}
                       </button>
                     </div>
                   </div>
                   {totpCopyStatus && <p className="muted">{totpCopyStatus}</p>}
                   <label>
-                    Authenticator code
+                    {t('auth.authenticatorCode')}
                     <input
                       type="text"
                       inputMode="numeric"
@@ -3662,12 +3668,12 @@ export default function App() {
                     />
                   </label>
                   <div className="bootstrap-actions">
-                    <button type="button" onClick={onVerify2FA}>Verify and enable MFA</button>
+                    <button type="button" onClick={onVerify2FA}>{t('bootstrap.verifyAndEnableMfa')}</button>
                   </div>
                 </div>
               )}
               {(totpEnabled || webauthnEnabled) && !bootstrapState.mfaSetupRequired && (
-                <p className="success">MFA enabled. The admin account is now secured.</p>
+                <p className="success">{t('bootstrap.mfaEnabled')}</p>
               )}
             </div>
           )}
@@ -3683,17 +3689,23 @@ export default function App() {
           <img src="/assets/logo-full-blue.png" alt="EndoriumFort" className="login-logo" />
         </div>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-          <h1>Sign in</h1>
-          <button type="button" className="ghost icon-btn" title={darkMode ? 'Light mode' : 'Dark mode'} onClick={toggleDarkMode}>
-            {darkMode ? '☀️' : '🌙'}
-          </button>
+          <h1>{t('auth.signIn')}</h1>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <select aria-label={t('common.language')} value={locale} onChange={(event) => setLocale(event.target.value)}>
+              <option value="fr">{t('common.french')}</option>
+              <option value="en">{t('common.english')}</option>
+            </select>
+            <button type="button" className="ghost icon-btn" title={darkMode ? t('auth.lightMode') : t('auth.darkMode')} onClick={toggleDarkMode}>
+              {darkMode ? '☀️' : '🌙'}
+            </button>
+          </div>
         </div>
         <p className="muted">
-          Access the WebBastion console to launch remote sessions.
+          {t('auth.accessConsole')}
         </p>
         <form className="auth-form" onSubmit={onLogin}>
           <label>
-            User
+            {t('auth.user')}
             <input
               name="user"
               value={auth.user}
@@ -3703,13 +3715,13 @@ export default function App() {
             />
           </label>
           <label>
-            Password
+            {t('auth.password')}
             <input
               name="password"
               type="password"
               value={auth.password}
               onChange={onAuthChange}
-              placeholder="Password"
+              placeholder={t('auth.password')}
               disabled={twoFARequired}
             />
           </label>
@@ -3717,7 +3729,7 @@ export default function App() {
             <div className="login-mfa-block">
               {availableMfaMethods.includes('totp') && (
                 <label>
-                  Authenticator Code (6 digits)
+                  {t('auth.authenticatorCode6Digits')}
                   <input
                     className="mfa-code-input login-mfa-code"
                     type="text"
@@ -3733,7 +3745,7 @@ export default function App() {
               {availableMfaMethods.includes('webauthn') && (
                 <div className="mfa-panel-block login-passkey-card">
                   <p className="muted">
-                    A registered passkey or physical security key can also complete this login.
+                    {t('auth.usePasskey')}
                   </p>
                   <button
                     type="button"
@@ -3741,14 +3753,14 @@ export default function App() {
                     onClick={onLoginWithPasskey}
                     disabled={webauthnBusy || !webauthnLoginOptions}
                   >
-                    {webauthnBusy ? 'Waiting for security key...' : 'Use passkey / security key'}
+                    {webauthnBusy ? t('auth.waitingForSecurityKey') : t('auth.usePasskey')}
                   </button>
                 </div>
               )}
             </div>
           )}
           <button type="submit">
-            {twoFARequired ? 'Verify & Sign in' : 'Sign in'}
+            {twoFARequired ? t('auth.verifyAndSignIn') : t('auth.signIn')}
           </button>
           {twoFARequired && (
             <button
@@ -3762,7 +3774,7 @@ export default function App() {
                 setAuthError('');
               }}
             >
-              Back
+              {t('common.back')}
             </button>
           )}
         </form>
@@ -3777,19 +3789,23 @@ export default function App() {
         <div className="brand">
           <img src="/assets/logo-icon-dark.png" alt="EndoriumFort" className="brand-logo" />
           <div>
-            <h1>Admin Console</h1>
+            <h1>{t('admin.console')}</h1>
           </div>
         </div>
         <div className="top-actions">
-          <button type="button" className="ghost icon-btn" title={darkMode ? 'Light mode' : 'Dark mode'} onClick={toggleDarkMode}>
+          <select aria-label={t('common.language')} value={locale} onChange={(event) => setLocale(event.target.value)}>
+            <option value="fr">{t('common.french')}</option>
+            <option value="en">{t('common.english')}</option>
+          </select>
+          <button type="button" className="ghost icon-btn" title={darkMode ? t('auth.lightMode') : t('auth.darkMode')} onClick={toggleDarkMode}>
             {darkMode ? '☀️' : '🌙'}
           </button>
           <button type="button" className="ghost" onClick={() => navigate('/')}
           >
-            Back to console
+            {t('auth.backToConsole')}
           </button>
           <button type="button" className="secondary" onClick={onLogout}>
-            Sign out
+            {t('auth.signOut')}
           </button>
         </div>
       </header>
@@ -3798,12 +3814,12 @@ export default function App() {
         <>
           {stats && (
             <section className="metric-tile-grid reveal" style={{ marginBottom: '1rem' }}>
-              <MetricTile tone="sessions" label="Active sessions" value={stats.sessions?.active || 0} />
-              <MetricTile tone="total" label="Total sessions" value={stats.sessions?.total || 0} />
-              <MetricTile tone="resources" label="Resources" value={stats.resources?.total || 0} />
-              <MetricTile tone="users" label="Users" value={stats.users?.total || 0} />
-              <MetricTile tone="recordings" label="Recordings" value={stats.recordings?.total || 0} />
-              <MetricTile tone="tokens" label="Active tokens" value={stats.auth?.activeTokens || 0} />
+              <MetricTile tone="sessions" label={t('app.activeCount', { count: '' }).trim()} value={stats.sessions?.active || 0} />
+              <MetricTile tone="total" label={t('app.totalSessions')} value={stats.sessions?.total || 0} />
+              <MetricTile tone="resources" label={t('admin.resources')} value={stats.resources?.total || 0} />
+              <MetricTile tone="users" label={t('admin.users')} value={stats.users?.total || 0} />
+              <MetricTile tone="recordings" label={t('app.recordings')} value={stats.recordings?.total || 0} />
+              <MetricTile tone="tokens" label={t('app.activeTokens')} value={stats.auth?.activeTokens || 0} />
             </section>
           )}
 
@@ -3827,8 +3843,8 @@ export default function App() {
       )}
 
       {!canManagePlatform ? (
-        <SectionCard title="Platform admin access required">
-          <EmptyState title="Admin access only" message="Sign in with a platform admin account to manage users, resources, routing, and security." />
+        <SectionCard title={t('admin.requiredTitle')}>
+          <EmptyState title={t('admin.requiredTitle')} message={t('admin.requiredMessage')} />
         </SectionCard>
       ) : (
         <div className="admin-grid">
@@ -3836,7 +3852,7 @@ export default function App() {
           <div className="panel reveal access-scope-panel">
             <div className="panel-header">
               <div>
-                <h3>{editingResourceId ? 'Edit resource' : 'New resource'}</h3>
+                <h3>{editingResourceId ? t('admin.editResource') : t('admin.newResource')}</h3>
               </div>
             </div>
             <form className="resource-form" onSubmit={onSubmitResource}>
@@ -4092,7 +4108,7 @@ export default function App() {
                   </select>
                 </label>
                 <div className="policy-preview">
-                  {describeResourcePolicy(resourceForm).map((item) => (
+                  {describeResourcePolicy(resourceForm, t).map((item) => (
                     <span className="policy-chip" key={`preview-${item}`}>{item}</span>
                   ))}
                 </div>
@@ -4152,7 +4168,7 @@ export default function App() {
                       });
                     }}
                   >
-                    Cancel
+                    {t('common.cancel')}
                   </button>
                 )}
               </div>
@@ -4165,10 +4181,10 @@ export default function App() {
           <div className="panel reveal">
             <div className="panel-header">
               <div>
-                <h3>Resources</h3>
-                <p>{resources.length} configured tiles</p>
+                <h3>{t('admin.resources')}</h3>
+                <p>{t('admin.configuredTiles', { count: resources.length })}</p>
               </div>
-              {loadingResources && <span className="pill loading">loading</span>}
+              {loadingResources && <span className="pill loading">{t('common.loading')}</span>}
             </div>
             <div className="resource-list">
               {resources.length ? (
@@ -4183,7 +4199,7 @@ export default function App() {
                         <p className="muted">{resource.description}</p>
                       )}
                       <div className="policy-chip-row">
-                        {describeResourcePolicy(resource).map((item) => (
+                        {describeResourcePolicy(resource, t).map((item) => (
                           <span className="policy-chip" key={`${resource.id}-${item}`}>{item}</span>
                         ))}
                       </div>
@@ -4194,20 +4210,20 @@ export default function App() {
                         className="secondary"
                         onClick={() => onEditResource(resource)}
                       >
-                        Edit
+                        {t('common.edit')}
                       </button>
                       <button
                         type="button"
                         className="ghost"
                         onClick={() => onDeleteResource(resource.id)}
                       >
-                        Delete
+                        {t('common.delete')}
                       </button>
                     </div>
                   </article>
                 ))
               ) : (
-                <p className="muted">No resources created yet.</p>
+                <p className="muted">{t('admin.noResources')}</p>
               )}
             </div>
           </div>
@@ -4219,7 +4235,7 @@ export default function App() {
               <div>
                 <h3>Relay Fabric</h3>
               </div>
-              {loadingRelays && <span className="pill loading">syncing</span>}
+              {loadingRelays && <span className="pill loading">{t('common.syncing')}</span>}
             </div>
 
             <div className="relay-kpi-grid">
@@ -4388,7 +4404,7 @@ export default function App() {
                   );
                 })
               ) : (
-                <p className="muted">Create resources before assigning relay routes.</p>
+                <p className="muted">{t('admin.createResourcesBeforeAssigning')}</p>
               )}
             </div>
           </div>
@@ -4400,7 +4416,7 @@ export default function App() {
               <div>
                 <h3>Access Requests</h3>
               </div>
-              {loadingAccessRequests && <span className="pill loading">loading</span>}
+              {loadingAccessRequests && <span className="pill loading">{t('common.loading')}</span>}
             </div>
             {accessRequestError && <p className="error">{accessRequestError}</p>}
             <div className="resource-list">
@@ -4428,14 +4444,14 @@ export default function App() {
                           className="secondary"
                           onClick={() => onApproveAccessRequest(request.id)}
                         >
-                          Approve
+                          {t('admin.approve')}
                         </button>
                         <button
                           type="button"
                           className="ghost"
                           onClick={() => onDenyAccessRequest(request.id)}
                         >
-                          Deny
+                          {t('admin.deny')}
                         </button>
                       </div>
                     )}
@@ -4452,9 +4468,9 @@ export default function App() {
           <div className="panel reveal">
             <div className="panel-header">
               <div>
-                <h3>{editingUserId ? 'Edit user' : 'New user'}</h3>
+                <h3>{editingUserId ? t('admin.editUser') : t('admin.newUser')}</h3>
               </div>
-              {loadingUsers && <span className="pill loading">loading</span>}
+              {loadingUsers && <span className="pill loading">{t('common.loading')}</span>}
             </div>
             <form className="resource-form" onSubmit={onSubmitUser}>
               <label>
@@ -4474,7 +4490,7 @@ export default function App() {
                   type="password"
                   value={userForm.password}
                   onChange={onUserFieldChange}
-                  placeholder={editingUserId ? 'New password' : 'Password'}
+                  placeholder={editingUserId ? t('auth.newPassword') : t('auth.password')}
                 />
               </label>
               <label>
@@ -4516,7 +4532,7 @@ export default function App() {
                       });
                     }}
                   >
-                    Cancel
+                    {t('common.cancel')}
                   </button>
                 )}
               </div>
@@ -4528,7 +4544,7 @@ export default function App() {
                   <article className="resource-row" key={user.id}>
                     <div>
                       <h4>{user.username}</h4>
-                      <p className="muted">Role: {roleLabel(user.role)}</p>
+                      <p className="muted">{t('admin.roleLabel', { role: roleLabel(user.role, t) })}</p>
                       {user.bootstrapPasswordChangeRequired && (
                         <p className="muted">Password rotation required at next sign-in.</p>
                       )}
@@ -4544,7 +4560,7 @@ export default function App() {
                         className="secondary"
                         onClick={() => onEditUser(user)}
                       >
-                        Edit
+                        {t('common.edit')}
                       </button>
                       <button
                         type="button"
@@ -4558,13 +4574,13 @@ export default function App() {
                         className="ghost"
                         onClick={() => onDeleteUser(user.id)}
                       >
-                        Delete
+                        {t('common.delete')}
                       </button>
                     </div>
                   </article>
                 ))
               ) : (
-                <p className="muted">No users created yet.</p>
+                <p className="muted">{t('admin.noUsers')}</p>
               )}
             </div>
           </div>
@@ -4586,7 +4602,7 @@ export default function App() {
                     setAccessScopeError('');
                   }}
                 >
-                  Close
+                  {t('common.close')}
                 </button>
               )}
             </div>
@@ -4595,7 +4611,7 @@ export default function App() {
               <p className="muted">No user selected yet.</p>
             ) : (
               <>
-                {loadingAccessScope && <p>Loading access scope...</p>}
+                {loadingAccessScope && <p>{t('admin.loadingAccessScope')}</p>}
                 {accessScopeError && <p className="error">{accessScopeError}</p>}
                 <div className="panel-header" style={{ marginTop: '0.5rem' }}>
                   <div>
@@ -4631,7 +4647,7 @@ export default function App() {
                       </article>
                     ))
                   ) : (
-                    <p className="muted">No resources yet.</p>
+                    <p className="muted">{t('admin.noResourcesYet')}</p>
                   )}
                 </div>
 
@@ -4641,13 +4657,13 @@ export default function App() {
                   </div>
                 </div>
                 <div className="resource-list permissions-grid">
-                  {(ROLE_BLUEPRINTS.find((role) => role.id === normalizeRole(selectedUserForAccessScope.role))?.permissions || [])
+                  {(roleBlueprints.find((role) => role.id === normalizeRole(selectedUserForAccessScope.role))?.permissions || [])
                     .map((permission) => (
                       <article className="resource-row compact-perm-row" key={permission}>
                         <div>
                           <h4>{permission}</h4>
                           <p className="muted">
-                            Granted by role: {roleLabel(selectedUserForAccessScope.role)}
+                            {t('admin.grantedByRole', { role: roleLabel(selectedUserForAccessScope.role, t) })}
                           </p>
                         </div>
                       </article>
@@ -4739,7 +4755,7 @@ export default function App() {
                     onClick={() => onUpdateMfaPreference('webauthn')}
                     disabled={!webauthnEnabled}
                   >
-                    Prefer Passkey
+                    {t('admin.preferPasskey')}
                   </button>
                 </div>
               </div>
@@ -4792,14 +4808,14 @@ export default function App() {
                     className="ghost"
                     onClick={() => { setTotpSetupData(null); setTotpSetupCode(''); }}
                   >
-                    Cancel
+                    {t('common.cancel')}
                   </button>
                 </div>
               </div>
             )}
             <div className="mfa-panel-block">
               <label>
-                Passkey label
+                {t('admin.passkeyLabel')}
                 <input
                   className="mfa-code-input"
                   type="text"
@@ -4825,7 +4841,7 @@ export default function App() {
                   {webauthnCredentials.map((credential) => (
                     <article key={credential.id} className="mfa-passkey-item">
                       <div>
-                        <strong>{credential.label || 'Passkey'}</strong>
+                        <strong>{credential.label || t('admin.passkey')}</strong>
                         <p className="muted">
                           Added {formatRelativeDate(credential.createdAt)}
                           {credential.lastUsedAt ? ` · used ${formatRelativeDate(credential.lastUsedAt)}` : ''}
@@ -4939,7 +4955,7 @@ export default function App() {
             )}
             {canManagePlatform && activeSecurityIncident?.active && (
               <button type="button" className="ghost" onClick={closeIncidentCase} disabled={incidentCaseBusy}>
-                {incidentCaseBusy ? 'Closing incident...' : 'Close incident case'}
+                {incidentCaseBusy ? t('app.closingIncident') : t('app.closeIncidentCase')}
               </button>
             )}
             {canManagePlatform && !containmentEnabled && (
@@ -4954,7 +4970,7 @@ export default function App() {
             )}
             {canOperateSessions && activeIncidentSuspectSessions.length > 0 && (
               <button type="button" className="ghost" onClick={requestTerminateIncidentSuspects}>
-                Terminate active suspects ({activeIncidentSuspectSessions.length})
+                {t('app.terminateActiveSuspects', { count: activeIncidentSuspectSessions.length })}
               </button>
             )}
             <button type="button" className="ghost" onClick={dismissLiveSecurityIncident}>
@@ -4969,8 +4985,7 @@ export default function App() {
           <div className="modal-content" onClick={(event) => event.stopPropagation()}>
             <h3>Confirm Session Termination</h3>
             <p>
-              You are about to terminate {activeIncidentSuspectSessions.length} active correlated suspect session(s).
-              This action is immediate.
+              {t('app.confirmTerminateBody', { count: activeIncidentSuspectSessions.length })}
             </p>
             <div className="resource-actions" style={{ marginTop: '0.9rem' }}>
               <button type="button" onClick={confirmTerminateIncidentSuspects} disabled={incidentTerminateBusy}>
@@ -4982,7 +4997,7 @@ export default function App() {
                 onClick={() => setIncidentTerminateConfirmOpen(false)}
                 disabled={incidentTerminateBusy}
               >
-                Cancel
+                {t('common.cancel')}
               </button>
             </div>
           </div>
@@ -5017,8 +5032,8 @@ export default function App() {
         <div className="brand">
           <img src="/assets/logo-icon-dark.png" alt="EndoriumFort" className="brand-logo" />
           <div>
-            <h1>WebBastion Console</h1>
-            <p>Minimal access console for SSH sessions and live supervision.</p>
+            <h1>{t('app.title')}</h1>
+            <p>{t('app.subtitle')}</p>
           </div>
         </div>
         <div className="top-actions">
@@ -5028,38 +5043,42 @@ export default function App() {
             <span className="pill monitor">{roleName}</span>
           </div>
           <div className="nav-actions">
+            <select aria-label={t('common.language')} value={locale} onChange={(event) => setLocale(event.target.value)}>
+              <option value="fr">{t('common.french')}</option>
+              <option value="en">{t('common.english')}</option>
+            </select>
             {canManagePlatform && (
               <button
                 type="button"
                 className="secondary"
                 onClick={() => navigate('/admin')}
               >
-                Admin
+                {t('app.admin')}
               </button>
             )}
             <button type="button" className="ghost" onClick={() => setChangePwOpen(true)}>
-              Change password
+              {t('auth.changePassword')}
             </button>
-            <button type="button" className="ghost icon-btn" title={darkMode ? 'Light mode' : 'Dark mode'} onClick={toggleDarkMode}>
+            <button type="button" className="ghost icon-btn" title={darkMode ? t('auth.lightMode') : t('auth.darkMode')} onClick={toggleDarkMode}>
               {darkMode ? '☀️' : '🌙'}
             </button>
             <button type="button" className="ghost" onClick={onLogout}>
-              Sign out
+              {t('auth.signOut')}
             </button>
           </div>
         </div>
       </header>
 
-      <section className="mission-board reveal" aria-label="Mission board navigation">
+      <section className="mission-board reveal" aria-label={t('nav.missionBoard')}>
         <div className="mission-headline">
           <div>
-            <p className="workflow-kicker">Access Workspace</p>
-            <h3>Choose a resource and act</h3>
-            <p>Risk, requirements, and launch path are visible before you connect.</p>
+            <p className="workflow-kicker">{t('app.accessWorkspace')}</p>
+            <h3>{t('app.chooseResource')}</h3>
+            <p>{t('app.chooseResourceHint')}</p>
           </div>
           <div className="mission-headline-actions">
             <button type="button" className="ghost" onClick={onQuickRefresh} disabled={quickRefreshing}>
-              {quickRefreshing ? 'Refreshing...' : 'Refresh data'}
+              {quickRefreshing ? t('app.refreshing') : t('app.refreshData')}
             </button>
           </div>
         </div>
@@ -5084,12 +5103,12 @@ export default function App() {
       </section>
 
       {canViewAudit && (
-        <section className="live-alert-settings reveal" aria-label="Alert noise filter">
+        <section className="live-alert-settings reveal" aria-label={t('nav.alertNoiseFilter')}>
           <div className="live-alert-settings-copy">
-            <strong>Alert Noise Filter</strong>
-            <span>Adjust how aggressively live alerts are surfaced while you work.</span>
+            <strong>{t('app.alertNoiseFilter')}</strong>
+            <span>{t('app.alertNoiseHint')}</span>
           </div>
-          <div className="live-alert-profile-tabs" role="group" aria-label="Live alert filter mode">
+          <div className="live-alert-profile-tabs" role="group" aria-label={t('nav.liveAlertFilterMode')}>
             {Object.keys(LIVE_ALERT_PROFILES).map((profileKey) => (
               <button
                 type="button"
@@ -5125,7 +5144,7 @@ export default function App() {
             <div className="stat-icon stat-resources">🖥️</div>
             <div>
               <h4>{stats.resources?.total || 0}</h4>
-              <p className="muted">Resources</p>
+              <p className="muted">{t('app.resources')}</p>
             </div>
           </div>
           <div className="stat-card">
@@ -5200,7 +5219,7 @@ export default function App() {
               <h3>Recent sessions</h3>
               <p>Last opened sessions, prioritized for fast intervention.</p>
             </div>
-            <span className="pill ok">{recentSessions.length} shown</span>
+            <span className="pill ok">{t('app.shownCount', { count: recentSessions.length })}</span>
           </div>
           <div className="recent-session-list">
             {recentSessions.length ? (
@@ -5231,14 +5250,14 @@ export default function App() {
       <section className="panel resources-panel reveal">
         <div className="panel-header">
           <div>
-            <h3>Resources</h3>
-            <p>Open a tile to see what the session will require.</p>
+            <h3>{t('app.resources')}</h3>
+            <p>{t('app.resourcesHint')}</p>
           </div>
           <div className="status-row">
             {loadingResources ? (
-              <span className="pill loading">loading</span>
+              <span className="pill loading">{t('common.loading')}</span>
             ) : (
-              <span className="pill ok">{resources.length} tiles</span>
+              <span className="pill ok">{t('app.tilesCount', { count: resources.length })}</span>
             )}
           </div>
         </div>
@@ -5277,25 +5296,25 @@ export default function App() {
                     <p className="muted">{resource.description}</p>
                   )}
                   <div className="policy-chip-row">
-                    {describeAccessOutcome(resource).map((item) => (
+                    {describeAccessOutcome(resource, t).map((item) => (
                       <span className="policy-chip" key={`outcome-${resource.id}-${item}`}>{item}</span>
                     ))}
                   </div>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   {resource.hasCredentials && (
-                    <span className="pill ok" title="Credentials stored in vault" style={{ fontSize: '0.65rem' }}>🔐 vault</span>
+                    <span className="pill ok" title={t('app.vaultStored')} style={{ fontSize: '0.65rem' }}>🔐 {t('app.vault')}</span>
                   )}
                   {resource.protocol === 'agent' ? (
-                    <span className="pill loading" style={{ fontSize: '0.65rem' }}>🚀 launch</span>
+                    <span className="pill loading" style={{ fontSize: '0.65rem' }}>🚀 {t('app.launch')}</span>
                   ) : (
-                    <span className="pill ready">connect</span>
+                    <span className="pill ready">{t('app.connectLower')}</span>
                   )}
                 </div>
               </button>
             ))
           ) : (
-            <EmptyState title="No resources yet" message="Ask an admin to add a target or assign a resource to your scope." />
+            <EmptyState title={t('app.noResourcesYet')} message={t('app.noResourcesMessage')} />
           )}
         </div>
       </section>
@@ -5306,14 +5325,14 @@ export default function App() {
         <div className="panel reveal">
           <div className="panel-header">
             <div>
-              <h3>Sessions</h3>
-              <p>Start, supervise, and terminate SSH access.</p>
+              <h3>{t('app.sessionPanelTitle')}</h3>
+              <p>{t('app.sessionPanelHint')}</p>
             </div>
             <div className="status-row">
               {loadingSessions ? (
-                <span className="pill loading">loading</span>
+                <span className="pill loading">{t('common.loading')}</span>
               ) : (
-                <span className="pill ok">{activeSessions.length} active</span>
+                <span className="pill ok">{t('app.activeCount', { count: activeSessions.length })}</span>
               )}
             </div>
           </div>
@@ -5323,11 +5342,11 @@ export default function App() {
             <div style={{ marginBottom: '1rem' }}>
               <div className="panel-header" style={{ marginBottom: '0.7rem' }}>
                 <div>
-                  <h3 style={{ fontSize: '1rem' }}>Pending Approvals</h3>
-                  <p>Latest dual-control requests awaiting admin action.</p>
+                  <h3 style={{ fontSize: '1rem' }}>{t('app.pendingApprovals')}</h3>
+                  <p>{t('app.pendingApprovalsHint')}</p>
                 </div>
                 <span className={`pill ${pendingAccessApprovals.length ? 'loading' : 'ok'}`}>
-                  {pendingAccessApprovals.length} pending
+                  {t('admin.pendingCount', { count: pendingAccessApprovals.length })}
                 </span>
               </div>
               {accessRequestError && <p className="error">{accessRequestError}</p>}
@@ -5350,20 +5369,20 @@ export default function App() {
                           className="secondary"
                           onClick={() => onApproveAccessRequest(request.id)}
                         >
-                          Approve
+                          {t('admin.approve')}
                         </button>
                         <button
                           type="button"
                           className="ghost"
                           onClick={() => onDenyAccessRequest(request.id)}
                         >
-                          Deny
+                          {t('admin.deny')}
                         </button>
                       </div>
                     </article>
                   ))
                 ) : (
-                  <p className="muted">No pending approvals.</p>
+                  <p className="muted">{t('app.noPendingApprovals')}</p>
                 )}
               </div>
             </div>
@@ -5372,28 +5391,28 @@ export default function App() {
           <div className="watchlist-panel">
             <div className="slo-grid">
               <article className="slo-card">
-                <span>Completion rate</span>
+                <span>{t('app.completionRate')}</span>
                 <strong>{sessionSlo.completionRate}%</strong>
-                <p className="muted">Terminated sessions / total sessions</p>
+                <p className="muted">{t('app.terminatedSessionsTotal')}</p>
               </article>
               <article className="slo-card">
-                <span>Average duration</span>
+                <span>{t('app.averageDuration')}</span>
                 <strong>{sessionSlo.avgDurationMin} min</strong>
-                <p className="muted">Based on closed session history</p>
+                <p className="muted">{t('app.basedOnClosedHistory')}</p>
               </article>
               <article className="slo-card">
-                <span>Stale active sessions</span>
+                <span>{t('app.staleActiveSessions')}</span>
                 <strong>{sessionSlo.staleActive}</strong>
-                <p className="muted">Active over 4 hours</p>
+                <p className="muted">{t('app.activeOverHours')}</p>
               </article>
             </div>
             <div className="panel-header" style={{ marginBottom: '0.35rem' }}>
               <div>
-                <h3 style={{ fontSize: '1rem' }}>Critical Session Watchlist</h3>
-                <p>Pin sessions to monitor status changes faster.</p>
+                <h3 style={{ fontSize: '1rem' }}>{t('app.criticalSessionWatchlist')}</h3>
+                <p>{t('app.watchlistHint')}</p>
               </div>
               <span className={`pill ${watchedSessions.length ? 'loading' : 'ok'}`}>
-                {watchedSessions.length} watched
+                {t('app.watchedCount', { count: watchedSessions.length })}
               </span>
             </div>
             {watchlistAlerts.length > 0 && (
@@ -5402,7 +5421,7 @@ export default function App() {
                   <article key={alert.key} className="watch-alert-item">
                     <p>{alert.message}</p>
                     <button type="button" className="ghost" onClick={() => dismissWatchAlert(alert.key)}>
-                      Dismiss
+                      {t('app.dismiss')}
                     </button>
                   </article>
                 ))}
@@ -5419,7 +5438,7 @@ export default function App() {
                 ))}
               </div>
             ) : (
-              <p className="muted">No watched sessions yet. Use Pin on any session card.</p>
+              <p className="muted">{t('app.noWatchedSessions')}</p>
             )}
           </div>
 
@@ -5439,7 +5458,7 @@ export default function App() {
                       className={watchedSessionIds.includes(Number(session.id)) ? 'secondary' : 'ghost'}
                       onClick={() => toggleWatchSession(session.id)}
                     >
-                      {watchedSessionIds.includes(Number(session.id)) ? 'Pinned' : 'Pin'}
+                      {watchedSessionIds.includes(Number(session.id)) ? t('app.pinned') : t('app.pin')}
                     </button>
                     <span className={`pill ${session.status}`}>
                       {session.status}
@@ -5448,12 +5467,12 @@ export default function App() {
                 </header>
                 <p className="session-route">
                   <strong>{session.user}</strong>
-                  <span className="arrow">to</span>
+                  <span className="arrow">{t('app.to')}</span>
                   <strong>{session.target}</strong>
                 </p>
                 <div className="session-route-hints">
                   <span className={`pill ${sessionRelayHints[session.id]?.route === 'relay' ? 'loading' : 'ready'}`}>
-                    {sessionRelayHints[session.id]?.route === 'relay' ? 'via relay' : 'direct route'}
+                    {sessionRelayHints[session.id]?.route === 'relay' ? t('app.viaRelay') : t('app.directRoute')}
                   </span>
                   {sessionRelayHints[session.id]?.route === 'relay' && sessionRelayHints[session.id]?.relayLabel && (
                     <span className="muted session-relay-label">
@@ -5462,9 +5481,9 @@ export default function App() {
                   )}
                 </div>
                 <div className="session-meta">
-                  <span>Opened: {session.createdAt}</span>
+                  <span>{t('app.openedAt', { value: session.createdAt })}</span>
                   {session.terminatedAt && (
-                    <span>Closed: {session.terminatedAt}</span>
+                    <span>{t('app.closedAt', { value: session.terminatedAt })}</span>
                   )}
                 </div>
                 <div className="session-actions">
@@ -5474,14 +5493,14 @@ export default function App() {
                     onClick={() => onTerminate(session.id)}
                     disabled={session.status !== 'active' || !canOperateSessions}
                   >
-                    Terminate
+                    {t('app.terminate')}
                   </button>
                   <button
                     type="button"
                     className="ghost"
                     onClick={() => openAudit(session.id)}
                   >
-                    Open audit
+                    {t('app.openAudit')}
                   </button>
                   {canViewAudit && (
                     <button
@@ -5489,7 +5508,7 @@ export default function App() {
                       className="ghost"
                       onClick={() => onOpenSessionDna(session.id)}
                     >
-                      Session DNA
+                      {t('app.sessionDna')}
                     </button>
                   )}
                   {canViewAudit && (
@@ -5498,7 +5517,7 @@ export default function App() {
                       className="ghost"
                       onClick={() => openRecordings(session.id)}
                     >
-                      Recordings
+                      {t('app.recordings')}
                     </button>
                   )}
                   <button
@@ -5507,7 +5526,7 @@ export default function App() {
                     onClick={() => openTerminal(session)}
                     disabled={session.status !== 'active' || !canOperateSessions}
                   >
-                    Open live
+                    {t('app.openLive')}
                   </button>
                   {canViewAudit &&
                     session.status === 'active' && (
@@ -5515,9 +5534,9 @@ export default function App() {
                         type="button"
                         className="ghost shadow-btn"
                         onClick={() => openShadow(session)}
-                        title="Observe this session in real-time (read-only)"
+                        title={t('app.shadowObserve')}
                       >
-                        👁 Shadow
+                        👁 {t('app.shadowTitle')}
                       </button>
                     )}
                 </div>
@@ -5530,14 +5549,14 @@ export default function App() {
           <div className="panel audit-panel reveal">
             <div className="panel-header">
               <div>
-                <h3>Audit log</h3>
-                <p>Recent audit events and session actions.</p>
+                <h3>{t('app.auditLog')}</h3>
+                <p>{t('app.auditLogHint')}</p>
               </div>
               <div className="status-row">
                 {loadingAudit ? (
-                  <span className="pill loading">loading</span>
+                  <span className="pill loading">{t('common.loading')}</span>
                 ) : (
-                  <span className="pill ok">{filteredAuditItems.length} events</span>
+                  <span className="pill ok">{t('app.eventsCount', { count: filteredAuditItems.length })}</span>
                 )}
               </div>
             </div>
@@ -5548,7 +5567,7 @@ export default function App() {
                 onClick={loadAudit}
                 disabled={loadingAudit}
               >
-                Refresh
+                {t('common.refresh')}
               </button>
               <button
                 type="button"
@@ -5556,7 +5575,7 @@ export default function App() {
                 onClick={exportFilteredAuditCsv}
                 disabled={!filteredAuditItems.length}
               >
-                Export CSV
+                {t('app.exportCsv')}
               </button>
               {auditFilter && (
                 <button
@@ -5564,17 +5583,17 @@ export default function App() {
                   className="ghost"
                   onClick={() => setAuditFilter(null)}
                 >
-                  Clear filter
+                  {t('app.clearFilter')}
                 </button>
               )}
               <button type="button" className="ghost" onClick={() => setAuditFilter(null)}>
-                Clear view
+                {t('app.clearView')}
               </button>
             </div>
             <div className="audit-search-row">
               <input
                 type="text"
-                placeholder="Search events..."
+                placeholder={t('app.searchEvents')}
                 value={auditSearchQuery}
                 onChange={(e) => setAuditSearchQuery(e.target.value)}
                 style={{ flex: 1, maxWidth: '280px' }}
@@ -5584,22 +5603,22 @@ export default function App() {
                 onChange={(e) => setAuditTypeFilter(e.target.value)}
                 style={{ maxWidth: '200px' }}
               >
-                <option value="">All types</option>
-                <option value="auth.login">Login</option>
-                <option value="auth.logout">Logout</option>
-                <option value="auth.login.failure">Login Failure</option>
-                <option value="session.create">Session Create</option>
-                <option value="session.terminate">Session Terminate</option>
-                <option value="session.close">Session Close</option>
-                <option value="resource">Resource</option>
-                <option value="user">User</option>
-                <option value="credential">Credential</option>
-                <option value="tunnel">Tunnel</option>
+                <option value="">{t('app.allTypes')}</option>
+                <option value="auth.login">{t('app.login')}</option>
+                <option value="auth.logout">{t('app.logout')}</option>
+                <option value="auth.login.failure">{t('app.loginFailure')}</option>
+                <option value="session.create">{t('app.sessionCreate')}</option>
+                <option value="session.terminate">{t('app.sessionTerminate')}</option>
+                <option value="session.close">{t('app.sessionClose')}</option>
+                <option value="resource">{t('app.resource')}</option>
+                <option value="user">{t('admin.users')}</option>
+                <option value="credential">{t('app.credential')}</option>
+                <option value="tunnel">{t('app.tunnel')}</option>
               </select>
             </div>
             {auditError && <p className="error">{auditError}</p>}
             {!canViewAudit && (
-              <p className="muted">Sign in with Security Auditor or Platform Admin role.</p>
+              <p className="muted">{t('app.auditorRoleHint')}</p>
             )}
             {canViewAudit && (
               <div className="audit-list">
@@ -5609,7 +5628,7 @@ export default function App() {
                       <div>
                         <h4>{item.type}</h4>
                         <p className="muted">
-                          {renderAuditDetail(item) || 'No session data'}
+                          {renderAuditDetail(item) || t('app.noSessionData')}
                         </p>
                       </div>
                       <div className="audit-meta">
@@ -5619,7 +5638,7 @@ export default function App() {
                     </article>
                   ))
                 ) : (
-                  <p className="muted">No audit events available.</p>
+                  <p className="muted">{t('app.noAuditEvents')}</p>
                 )}
               </div>
             )}
@@ -5632,8 +5651,8 @@ export default function App() {
       {mainTab === 'recordings' && canViewRecordings && (
         <Suspense
           fallback={(
-            <SectionCard title="Session Recordings" subtitle="Loading recordings view...">
-              <EmptyState title="Loading" message="Preparing the replay workspace." />
+            <SectionCard title={t('recordings.title')} subtitle={t('app.loadingRecordingsView')}>
+              <EmptyState title={t('common.loading')} message={t('app.preparingReplayWorkspace')} />
             </SectionCard>
           )}
         >
@@ -5660,8 +5679,8 @@ export default function App() {
       <section className="panel terminal-panel reveal">
         <div className="panel-header">
           <div>
-            <h3>Live SSH console</h3>
-            <p>Connect to the selected session with on-demand credentials.</p>
+            <h3>{t('app.liveSshConsole')}</h3>
+            <p>{t('app.liveSshConsoleHint')}</p>
           </div>
           <span className={`pill ${terminalStatus === 'live' ? 'ok' : 'loading'}`}>
             {terminalStatus}
@@ -5669,30 +5688,30 @@ export default function App() {
         </div>
         <div className="terminal-controls">
           <div>
-            <span className="muted">Session</span>
+            <span className="muted">{t('app.sessions')}</span>
             <h4>
               {activeTerminalSession
                 ? `#${activeTerminalSession.id} ${activeTerminalSession.target}`
-                : 'No session selected'}
+                : t('auth.noSessionSelected')}
             </h4>
           </div>
           <label>
-            SSH password
+            {t('app.sshPassword')}
             <input
               type="password"
               value={sshPassword}
               onChange={(event) => setSshPassword(event.target.value)}
-              placeholder="Enter SSH password"
+              placeholder={t('auth.enterSshPassword')}
             />
           </label>
           <button type="button" onClick={connectTerminal}>
-            Connect
+            {t('auth.connect')}
           </button>
         </div>
         <div className="snippet-studio">
           <div className="snippet-studio-head">
-            <h4>SSH Snippets Studio</h4>
-            <p>Inject or execute repeatable operational commands without retyping.</p>
+            <h4>{t('app.sshSnippetsStudio')}</h4>
+            <p>{t('app.sshSnippetsHint')}</p>
           </div>
           <div className="snippet-grid">
             {sshSnippetLibrary.map((snippet) => (
@@ -5701,10 +5720,10 @@ export default function App() {
                 <code>{snippet.command}</code>
                 <div className="snippet-actions">
                   <button type="button" className="ghost" onClick={() => sendSnippetToTerminal(snippet, false)}>
-                    Inject
+                    {t('app.inject')}
                   </button>
                   <button type="button" onClick={() => sendSnippetToTerminal(snippet, true)}>
-                    Run
+                    {t('app.run')}
                   </button>
                   {snippet.custom && (
                     <button
@@ -5721,7 +5740,7 @@ export default function App() {
           </div>
           <div className="snippet-builder">
             <label>
-              Snippet label
+              {t('app.snippetLabel')}
               <input
                 type="text"
                 value={snippetLabel}
@@ -5730,7 +5749,7 @@ export default function App() {
               />
             </label>
             <label>
-              Command
+              {t('app.command')}
               <input
                 type="text"
                 value={snippetCommand}
@@ -5739,7 +5758,7 @@ export default function App() {
               />
             </label>
             <button type="button" className="secondary" onClick={addCustomSnippet}>
-              Save snippet
+              {t('app.saveSnippet')}
             </button>
           </div>
         </div>
@@ -5751,12 +5770,12 @@ export default function App() {
 
       {mainTab === 'sessions' && inlineWebResource && (
       <section className="panel reveal" style={{ marginBottom: '24px' }}>
-        <div className="panel-header">
-          <div>
-            <h3>Embedded Web Access</h3>
-            <p>
-              {inlineWebResource.name} - {inlineWebResource.protocol} {inlineWebResource.target}:{inlineWebResource.port}
-            </p>
+          <div className="panel-header">
+            <div>
+              <h3>{t('app.embeddedWebAccess')}</h3>
+              <p>
+                {inlineWebResource.name} - {inlineWebResource.protocol} {inlineWebResource.target}:{inlineWebResource.port}
+              </p>
           </div>
           <div className="resource-actions">
             <button
@@ -5764,7 +5783,7 @@ export default function App() {
               className="ghost"
               onClick={() => setInlineWebResource(null)}
             >
-              Close
+              {t('common.close')}
             </button>
           </div>
         </div>
@@ -5781,11 +5800,11 @@ export default function App() {
       {/* Shadow session panel */}
       {mainTab === 'sessions' && shadowSession && (
         <section className="panel terminal-panel shadow-panel reveal">
-          <div className="panel-header">
-            <div>
-              <h3>👁 Shadow — Session #{shadowSession.id}</h3>
+            <div className="panel-header">
+              <div>
+              <h3>👁 {t('app.shadowTitle')} - Session #{shadowSession.id}</h3>
               <p>
-                Read-only observation of{' '}
+                {t('app.readOnlyObservation')}{' '}
                 <strong>{shadowSession.user}</strong> → <strong>{shadowSession.target}</strong>
               </p>
             </div>
@@ -5794,7 +5813,7 @@ export default function App() {
                 {shadowStatus}
               </span>
               <button type="button" className="secondary" onClick={closeShadow}>
-                Close
+                {t('common.close')}
               </button>
             </div>
           </div>
@@ -5810,96 +5829,96 @@ export default function App() {
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <h3>
               {accessPromptMode === 'request'
-                ? 'Approval Request Required'
-                : 'Connection Justification Required'}
+                ? t('app.approvalRequestRequired')
+                : t('app.connectionJustificationRequired')}
             </h3>
             <p className="muted" style={{ marginTop: 0 }}>
               {accessPromptMode === 'request'
-                ? `${accessPromptResource.name} requires an approval workflow before session start.`
+                ? t('app.approvalWorkflowRequired', { name: accessPromptResource.name })
                 : containmentEnabled
-                  ? `${accessPromptResource.name} requires an access reason because containment mode is active.`
-                  : `${accessPromptResource.name} requires an access reason before opening the session.`}
+                  ? t('app.containmentReasonRequired', { name: accessPromptResource.name })
+                  : t('app.accessReasonRequired', { name: accessPromptResource.name })}
             </p>
             <div className="policy-chip-row" style={{ marginBottom: '0.8rem' }}>
-              {describeAccessOutcome(accessPromptResource).map((item) => (
+              {describeAccessOutcome(accessPromptResource, t).map((item) => (
                 <span className="policy-chip" key={`access-prompt-${item}`}>{item}</span>
               ))}
             </div>
             {containmentEnabled && accessPromptMode === 'connect' && containmentStatus.reason && (
               <p className="muted" style={{ marginTop: 0 }}>
-                Containment context: {containmentStatus.reason}
+                {t('app.containmentContext', { value: containmentStatus.reason })}
               </p>
             )}
             <form onSubmit={onSubmitAccessPrompt}>
               <div className="risk-preview-box">
-                <strong>Risk Preview</strong>
-                {riskPreviewLoading && <p className="muted">Calculating risk score...</p>}
+                <strong>{t('app.riskPreview')}</strong>
+                {riskPreviewLoading && <p className="muted">{t('app.calculatingRiskScore')}</p>}
                 {riskPreviewError && <p className="error">{riskPreviewError}</p>}
                 {riskPreview && (
                   <>
                     <p className="muted" style={{ marginBottom: '0.35rem' }}>
-                      Score: <strong>{riskPreview.score}/100</strong> ({riskPreview.effectiveRiskLevel})
+                      {t('app.score', { value: riskPreview.score, risk: riskPreview.effectiveRiskLevel })}
                     </p>
                     <p className="muted" style={{ margin: 0 }}>
                       {Array.isArray(riskPreview.factors)
                         ? riskPreview.factors.join(' - ')
-                        : 'No factors'}
+                        : t('app.noFactors')}
                     </p>
                   </>
                 )}
               </div>
               <div className="playbook-strip">
                 <div>
-                  <strong>Access Playbook</strong>
+                  <strong>{t('app.accessPlaybook')}</strong>
                   <p className="muted">
                     {currentAccessPlaybook
-                      ? `Saved for this resource (${new Date(currentAccessPlaybook.updatedAt || Date.now()).toLocaleString()}).`
-                      : 'No playbook yet for this resource.'}
+                      ? t('app.playbookSavedAt', { value: new Date(currentAccessPlaybook.updatedAt || Date.now()).toLocaleString(locale) })
+                      : t('app.noPlaybookYet')}
                   </p>
                 </div>
                 <div className="playbook-actions">
                   <button type="button" className="ghost" onClick={applyCurrentAccessPlaybook}>
-                    Apply
+                    {t('app.apply')}
                   </button>
                   <button type="button" className="secondary" onClick={saveCurrentAccessPlaybook}>
-                    Save
+                    {t('common.save')}
                   </button>
                   {currentAccessPlaybook && (
                     <button type="button" className="danger" onClick={deleteCurrentAccessPlaybook}>
-                      Delete
+                      {t('common.delete')}
                     </button>
                   )}
                 </div>
               </div>
               <label>
-                Access reason
+                {t('app.accessReason')}
                 <input
                   type="text"
                   value={accessPromptReason}
                   onChange={(event) => setAccessPromptReason(event.target.value)}
-                  placeholder="Describe why you need this access"
+                  placeholder={t('app.accessReasonPlaceholder')}
                   required
                 />
               </label>
               <label>
-                Ticket / Change ID (optional)
+                {t('app.ticketChangeId')}
                 <input
                   type="text"
                   value={accessPromptTicketId}
                   onChange={(event) => setAccessPromptTicketId(event.target.value)}
-                  placeholder="INC-1234 / CHG-5678"
+                  placeholder={t('app.ticketChangePlaceholder')}
                 />
               </label>
               <label>
-                Session purpose {(String(accessPromptResource.riskLevel || '').toLowerCase() === 'high' ||
+                {t('app.sessionPurpose')} {(String(accessPromptResource.riskLevel || '').toLowerCase() === 'high' ||
                 String(accessPromptResource.riskLevel || '').toLowerCase() === 'critical')
-                  ? '(required for high-risk)'
-                  : '(optional)'}
+                  ? t('app.requiredForHighRisk')
+                  : t('app.optionalLabel')}
                 <input
                   type="text"
                   value={accessPromptPurpose}
                   onChange={(event) => setAccessPromptPurpose(event.target.value)}
-                  placeholder="Maintenance, incident response, onboarding..."
+                  placeholder={t('app.sessionPurposePlaceholder')}
                   required={
                     String(accessPromptResource.riskLevel || '').toLowerCase() === 'high' ||
                     String(accessPromptResource.riskLevel || '').toLowerCase() === 'critical'
@@ -5907,24 +5926,24 @@ export default function App() {
                 />
               </label>
               <label>
-                Purpose evidence (optional)
+                {t('app.purposeEvidence')}
                 <input
                   type="text"
                   value={accessPromptPurposeEvidence}
                   onChange={(event) => setAccessPromptPurposeEvidence(event.target.value)}
-                  placeholder="Change request, SOP ref, ticket notes"
+                  placeholder={t('app.purposeEvidencePlaceholder')}
                 />
               </label>
               <div style={{ display: 'flex', gap: '0.8rem', marginTop: '0.8rem' }}>
                 <button type="submit">
-                  {accessPromptMode === 'request' ? 'Submit request' : 'Continue'}
+                  {accessPromptMode === 'request' ? t('app.submitRequest') : t('app.continue')}
                 </button>
                 <button
                   type="button"
                   className="ghost"
                   onClick={closeAccessPrompt}
                 >
-                  Cancel
+                  {t('common.cancel')}
                 </button>
               </div>
             </form>
@@ -5935,8 +5954,8 @@ export default function App() {
       {sessionDnaLoading && (
         <div className="modal-overlay" onClick={() => setSessionDnaLoading(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3>Session DNA</h3>
-            <p className="muted">Loading chain...</p>
+            <h3>{t('app.sessionDna')}</h3>
+            <p className="muted">{t('app.loadingChain')}</p>
           </div>
         </div>
       )}
@@ -5950,12 +5969,12 @@ export default function App() {
           }}
         >
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3>Session DNA {sessionDna?.sessionId ? `#${sessionDna.sessionId}` : ''}</h3>
+            <h3>{t('app.sessionDna')} {sessionDna?.sessionId ? `#${sessionDna.sessionId}` : ''}</h3>
             {sessionDnaError && <p className="error">{sessionDnaError}</p>}
             {sessionDna && (
               <>
                 <p className="muted" style={{ marginTop: 0 }}>
-                  Integrity: {sessionDna.verified ? 'verified' : 'mismatch detected'}
+                  {t('app.integrity', { value: sessionDna.verified ? t('app.verified') : t('app.mismatchDetected') })}
                 </p>
                 <div className="audit-timeline" style={{ maxHeight: '320px', overflowY: 'auto' }}>
                   {(sessionDna.entries || []).length ? (
@@ -5967,7 +5986,7 @@ export default function App() {
                       </article>
                     ))
                   ) : (
-                    <p className="muted">No DNA entries for this session.</p>
+                    <p className="muted">{t('app.noDnaEntries')}</p>
                   )}
                 </div>
               </>
@@ -5981,7 +6000,7 @@ export default function App() {
                   setSessionDnaError('');
                 }}
               >
-                Close
+                {t('common.close')}
               </button>
             </div>
           </div>
@@ -5998,26 +6017,26 @@ export default function App() {
             <div className="agent-modal-header">
               <span className="agent-icon">🚀</span>
               <div>
-                <h3>Agent Tunnel</h3>
-                <p className="muted">Connexion via l'agent local EndoriumFort</p>
+                <h3>{t('app.agentTunnel')}</h3>
+                <p className="muted">{t('app.agentLocalConnection')}</p>
               </div>
             </div>
             <div className="agent-modal-info">
               <div className="agent-info-row">
-                <span className="agent-label">Ressource</span>
+                <span className="agent-label">{t('app.resourceLabel')}</span>
                 <span className="agent-value">{agentModal.resource.name}</span>
               </div>
               <div className="agent-info-row">
-                <span className="agent-label">Cible</span>
+                <span className="agent-label">{t('app.targetLabel')}</span>
                 <span className="agent-value">{agentModal.resource.target}:{agentModal.resource.port}</span>
               </div>
               <div className="agent-info-row">
-                <span className="agent-label">Port local</span>
+                <span className="agent-label">{t('app.localPort')}</span>
                 <span className="agent-value">127.0.0.1:{agentModal.port}</span>
               </div>
             </div>
             <div className="agent-command-block">
-              <label className="agent-label">Commande de secours (si le protocole n'est pas enregistré) :</label>
+              <label className="agent-label">{t('app.fallbackCommand')}</label>
               <div className="agent-command-row">
                 <code className="agent-command">{agentModal.command}</code>
                 <button
@@ -6033,12 +6052,12 @@ export default function App() {
                     setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, copied: 'idle' }) : null), 2000);
                   }}
                 >
-                  {agentModal.copied === 'ok' ? '✓ Copié' : agentModal.copied === 'fail' ? '❌ Échec' : '📋 Copier'}
+                  {agentModal.copied === 'ok' ? `✓ ${t('app.copied')}` : agentModal.copied === 'fail' ? `❌ ${t('app.copyFailed')}` : `📋 ${t('app.copy')}`}
                 </button>
               </div>
             </div>
             <div className="agent-command-block">
-              <label className="agent-label">Lien deep-link :</label>
+              <label className="agent-label">{t('app.deepLink')}</label>
               <div className="agent-command-row">
                 <code className="agent-command">{agentModal.deepLink}</code>
                 <button
@@ -6054,26 +6073,26 @@ export default function App() {
                     setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, linkCopied: 'idle' }) : null), 2000);
                   }}
                 >
-                  {agentModal.linkCopied === 'ok' ? '✓ Copié' : agentModal.linkCopied === 'fail' ? '❌ Échec' : '📋 Copier lien'}
+                  {agentModal.linkCopied === 'ok' ? `✓ ${t('app.copied')}` : agentModal.linkCopied === 'fail' ? `❌ ${t('app.copyFailed')}` : `📋 ${t('app.copyLink')}`}
                 </button>
               </div>
             </div>
             <div className="agent-modal-tip">
               {agentModal.openInBrowser ? (
-                <p>💡 Une fois le tunnel actif, l'agent redirige automatiquement vers <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
+                <p>💡 {t('app.agentOpenBrowserTip', { value: agentModal.localUrl })} <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
               ) : (
-                <p>💡 Une fois le tunnel actif, connecte ton client {String(agentModal.resource?.protocol || '').toUpperCase()} sur <strong>{agentModal.localEndpoint}</strong>.</p>
+                <p>💡 {t('app.agentClientTip', { protocol: String(agentModal.resource?.protocol || '').toUpperCase(), value: agentModal.localEndpoint })}</p>
               )}
               {agentModal.launchState === 'opening' && (
-                <p className="muted">Ouverture de l'application agent en cours...</p>
+                <p className="muted">{t('app.openingAgentApp')}</p>
               )}
               {agentModal.launchState === 'fallback' && (
                 <>
                   <p className="error" style={{ marginBottom: '0.45rem' }}>
-                    L'application agent ne semble pas enregistrée comme handler du protocole.
+                    {t('app.missingProtocolHandler')}
                   </p>
                   <p className="muted" style={{ marginBottom: '0.45rem' }}>
-                    Installation rapide ({agentModal.installGuide?.platform || 'OS'}) :
+                    {t('app.quickInstall', { platform: agentModal.installGuide?.platform || 'OS' })}
                   </p>
                   <div className="agent-command-row">
                     <code className="agent-command">{agentModal.installGuide?.command}</code>
@@ -6090,7 +6109,7 @@ export default function App() {
                         setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, installCopied: 'idle' }) : null), 2000);
                       }}
                     >
-                      {agentModal.installCopied === 'ok' ? '✓ Copié' : agentModal.installCopied === 'fail' ? '❌ Échec' : '📋 Copier install'}
+                      {agentModal.installCopied === 'ok' ? `✓ ${t('app.copied')}` : agentModal.installCopied === 'fail' ? `❌ ${t('app.copyFailed')}` : `📋 ${t('app.copyInstall')}`}
                     </button>
                   </div>
                 </>
@@ -6102,7 +6121,7 @@ export default function App() {
                 className="secondary"
                 onClick={() => launchAgentDeepLink(agentModal.deepLink)}
               >
-                🚀 Ouvrir avec l'agent
+                🚀 {t('app.openWithAgent')}
               </button>
               <button
                 type="button"
@@ -6113,12 +6132,12 @@ export default function App() {
                 }}
                 className="ghost"
               >
-                🔄 Nouveau port
+                🔄 {t('app.newPort')}
               </button>
               <button type="button" className="ghost" onClick={() => {
                 clearAgentLaunchWatcher();
                 setAgentModal(null);
-              }}>Fermer</button>
+              }}>{t('app.closeLabel')}</button>
             </div>
           </div>
         </div>
@@ -6128,32 +6147,32 @@ export default function App() {
       {changePwOpen && (
         <div className="modal-overlay" onClick={() => setChangePwOpen(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3>Change Password</h3>
+            <h3>{t('auth.changePassword')}</h3>
             <form onSubmit={onChangePassword}>
               <label>
-                Current password
+                {t('auth.currentPassword')}
                 <input type="password" value={changePwCurrent}
                   onChange={(e) => setChangePwCurrent(e.target.value)} required />
               </label>
               <label>
-                New password
+                {t('auth.newPassword')}
                 <input type="password" value={changePwNew}
                   onChange={(e) => setChangePwNew(e.target.value)} required
-                  placeholder="Min 8 chars, upper + lower + digit" />
+                  placeholder={t('auth.passwordPlaceholder')} />
               </label>
               <label>
-                Confirm new password
+                {t('auth.confirmNewPassword')}
                 <input type="password" value={changePwConfirm}
                   onChange={(e) => setChangePwConfirm(e.target.value)} required />
               </label>
               {changePwError && <p className="error">{changePwError}</p>}
               {changePwSuccess && <p className="success">{changePwSuccess}</p>}
               <div style={{display:'flex',gap:'0.8rem',marginTop:'0.8rem'}}>
-                <button type="submit">Change</button>
+                <button type="submit">{t('auth.change')}</button>
                 <button type="button" className="ghost" onClick={() => {
                   setChangePwOpen(false); setChangePwError(''); setChangePwSuccess('');
                   setChangePwCurrent(''); setChangePwNew(''); setChangePwConfirm('');
-                }}>Cancel</button>
+                }}>{t('common.cancel')}</button>
               </div>
             </form>
           </div>
