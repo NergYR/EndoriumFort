@@ -2,7 +2,7 @@ module github.com/endoriumfort/agent
 
 go 1.25.0
 
-toolchain go1.25.8
+toolchain go1.25.9
 
 require github.com/gorilla/websocket v1.5.3
 

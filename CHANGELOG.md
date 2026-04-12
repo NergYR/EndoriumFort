@@ -1,6 +1,11 @@
 # Changelog
 
 ## v1.1.0-dev - 2026-03-11
+### Go Toolchain Security Patch
+- Upgraded Go toolchain baseline to `1.25.9` across agent and CI workflows to address `govulncheck` findings in Go standard library (`GO-2026-4947`, `GO-2026-4946`, `GO-2026-4870`).
+- Updated `actions/setup-go` references in CI/release workflows and `agent/go.mod` toolchain directive to `1.25.9`.
+- Updated README Go version references to match the new minimum patched baseline.
+
 ### Resource Tile UX Refresh
 - Redesigned the access workspace resource tiles to improve readability and reduce truncation under dense metadata.
 - Added a structured tile header (resource visual, name, protocol chip, endpoint, launch/connect mode badge).
@@ -14,6 +19,8 @@
 - Added unit test coverage for deep-link `no-browser` flag parsing in `agent/main_test.go`.
 
 ### Agent Distribution & Packaging
+- Fixed Windows MSI CI/install script compatibility with WiX v7 OSMF enforcement by accepting EULA ID `wix7` in automation paths.
+- Normalized WiX version parsing before installing `WixToolset.UI.wixext`, improving extension resolution when `wix --version` includes metadata.
 - Added native packaging scripts for the agent:
   - Linux `.deb` / `.rpm` (`agent/packaging/linux/build-packages.sh`)
   - macOS `.pkg` (`agent/packaging/macos/build-pkg.sh`)

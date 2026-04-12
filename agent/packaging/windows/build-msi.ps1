@@ -49,22 +49,50 @@ if (-not $wix) {
   throw "WiX CLI not found. Install with: dotnet tool install --global wix"
 }
 
+function Get-WixVersionInfo {
+  $raw = ((& wix --version 2>$null | Select-Object -First 1) -as [string]).Trim()
+  $major = 0
+  $normalized = ""
+  if ($raw -match "(\d+)\.(\d+)\.(\d+)") {
+    $major = [int]$Matches[1]
+    $normalized = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+  }
+  elseif ($raw -match "^(\d+)") {
+    $major = [int]$Matches[1]
+  }
+
+  return [PSCustomObject]@{
+    Raw = $raw
+    Major = $major
+    Normalized = $normalized
+  }
+}
+
+$wixVersionInfo = Get-WixVersionInfo
+$wixBuildEulaArgs = @()
+if ($wixVersionInfo.Major -ge 7) {
+  & wix eula accept wix7 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Unable to persist WiX v7 EULA acceptance via 'wix eula accept'; continuing with per-build -acceptEula flag."
+  }
+  $wixBuildEulaArgs = @("-acceptEula", "wix7")
+}
+
 function Ensure-WixUiExtension {
   $listOutput = (& wix extension list 2>$null | Out-String)
   if ($LASTEXITCODE -eq 0 -and $listOutput -match "WixToolset.UI.wixext") {
     return $true
   }
 
-  $wixVersion = ((& wix --version 2>$null | Select-Object -First 1) -as [string]).Trim()
-  if ($wixVersion) {
-    & wix extension add "WixToolset.UI.wixext/$wixVersion" 2>$null
+  if ($wixVersionInfo.Normalized) {
+    & wix extension add "WixToolset.UI.wixext/$($wixVersionInfo.Normalized)" 2>$null
   }
   if ($LASTEXITCODE -ne 0) {
     & wix extension add WixToolset.UI.wixext 2>$null
   }
   if ($LASTEXITCODE -ne 0) {
-    if ($wixVersion) {
-      & wix extension add -g "WixToolset.UI.wixext/$wixVersion" 2>$null
+    if ($wixVersionInfo.Normalized) {
+      & wix extension add -g "WixToolset.UI.wixext/$($wixVersionInfo.Normalized)" 2>$null
     }
   }
   if ($LASTEXITCODE -ne 0) {
@@ -239,7 +267,7 @@ ${UiBlockContent}
   if (Test-Path $msiOut) {
     Remove-Item -Path $msiOut -Force
   }
-  $wixBuildOutput = (& wix build $wxsPath -o $msiOut @wixBuildExtArgs 2>&1 | Out-String)
+  $wixBuildOutput = (& wix build @wixBuildEulaArgs $wxsPath -o $msiOut @wixBuildExtArgs 2>&1 | Out-String)
   $wixExitCode = $LASTEXITCODE
 
   if ($wixBuildOutput) {
@@ -256,7 +284,7 @@ ${UiBlockContent}
       Remove-Item -Path $msiOut -Force
     }
 
-    $wixBuildOutput = (& wix build $wxsPath -o $msiOut 2>&1 | Out-String)
+    $wixBuildOutput = (& wix build @wixBuildEulaArgs $wxsPath -o $msiOut 2>&1 | Out-String)
     $wixExitCode = $LASTEXITCODE
     if ($wixBuildOutput) {
       Write-Host $wixBuildOutput
