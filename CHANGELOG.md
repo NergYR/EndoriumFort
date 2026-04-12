@@ -1,6 +1,12 @@
 # Changelog
 
 ## v1.1.0-dev - 2026-03-11
+### Resource Tile UX Refresh
+- Redesigned the access workspace resource tiles to improve readability and reduce truncation under dense metadata.
+- Added a structured tile header (resource visual, name, protocol chip, endpoint, launch/connect mode badge).
+- Reworked tile metadata rendering so access-policy and security tags wrap cleanly and remain fully readable on desktop and mobile.
+- Updated dark-mode variants for the new tile chips/tags to preserve contrast and status semantics.
+
 ### Agent Tunnel UX (RDP/VNC)
 - Frontend now routes `rdp` and `vnc` resources through the same agent deep-link tunnel flow as `agent` resources, avoiding SSH-terminal startup attempts for non-SSH protocols.
 - Added protocol-aware agent modal guidance: browser auto-redirect remains for web-style usage, while RDP/VNC now show direct local endpoint instructions for native clients.

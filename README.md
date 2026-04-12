@@ -975,3 +975,13 @@ Contributions via pull requests are welcome! Since the license does not allow de
 <p align="center">
   <strong>EndoriumFort</strong> — Secure your infrastructure, audit everything.
 </p>
+
+---
+
+## UI Updates (Access Workspace)
+
+Recent resource-tile improvements in the user access workspace:
+
+- clearer tile header with resource name, protocol, target endpoint, and launch mode
+- full wrapping of policy/access/vault tags (no hard truncation in compact cards)
+- improved desktop/mobile readability and dark-mode contrast for tile badges

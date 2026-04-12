@@ -5264,55 +5264,73 @@ export default function App() {
         {resourceError && <InlineAlert tone="error">{resourceError}</InlineAlert>}
         <div className="resource-tiles">
           {resources.length ? (
-            resources.map((resource) => (
-              <button
-                type="button"
-                className="resource-tile"
-                key={resource.id}
-                onClick={() => onConnectResource(resource)}
-              >
-                <div
-                  className="resource-thumb"
-                  style={
-                    resource.imageData
-                      ? { backgroundImage: `url(${resource.imageData})` }
-                      : resource.imageUrl
-                        ? { backgroundImage: `url(${resource.imageUrl})` }
-                        : undefined
-                  }
+            resources.map((resource) => {
+              const protocol = String(resource?.protocol || 'ssh').toLowerCase();
+              const resourceName = resource?.name || `${t('app.resource')} #${resource.id}`;
+              const endpointPort = resource?.port ?? '-';
+              const endpoint = `${resource?.target || t('common.notAvailable')}:${endpointPort}`;
+              const policyTags = Array.from(new Set([
+                ...describeAccessOutcome(resource, t),
+                ...describeResourcePolicy(resource, t)
+              ]));
+
+              return (
+                <button
+                  type="button"
+                  className="resource-tile"
+                  key={resource.id}
+                  onClick={() => onConnectResource(resource)}
                 >
-                  {!(resource.imageData || resource.imageUrl) && (
-                    <span className="resource-letter">
-                      {resource.name ? resource.name[0] : 'R'}
+                  <div className="resource-tile-header">
+                    <div
+                      className="resource-thumb"
+                      style={
+                        resource.imageData
+                          ? { backgroundImage: `url(${resource.imageData})` }
+                          : resource.imageUrl
+                            ? { backgroundImage: `url(${resource.imageUrl})` }
+                            : undefined
+                      }
+                    >
+                      {!(resource.imageData || resource.imageUrl) && (
+                        <span className="resource-letter">
+                          {resourceName[0] || 'R'}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="resource-info">
+                      <h4 title={resourceName}>{resourceName}</h4>
+                      <p className="resource-endpoint">
+                        <span className="resource-protocol-chip">{protocol.toUpperCase()}</span>
+                        <span className="resource-endpoint-value">{endpoint}</span>
+                      </p>
+                    </div>
+
+                    <span className={`resource-launch-pill ${protocol === 'agent' ? 'agent' : 'direct'}`}>
+                      {protocol === 'agent' ? t('app.launch') : t('app.connectLower')}
                     </span>
-                  )}
-                </div>
-                <div className="resource-info">
-                  <h4>{resource.name}</h4>
-                  <p className="muted">
-                    {resource.protocol} {resource.target}:{resource.port}
-                  </p>
+                  </div>
+
                   {resource.description && (
-                    <p className="muted">{resource.description}</p>
+                    <p className="resource-description">{resource.description}</p>
                   )}
-                  <div className="policy-chip-row">
-                    {describeAccessOutcome(resource, t).map((item) => (
-                      <span className="policy-chip" key={`outcome-${resource.id}-${item}`}>{item}</span>
+
+                  <div className="resource-tag-row">
+                    {resource.hasCredentials && (
+                      <span className="resource-tag resource-tag-vault" title={t('app.vaultStored')}>
+                        {t('app.vault')}
+                      </span>
+                    )}
+                    {policyTags.map((item) => (
+                      <span className="resource-tag resource-tag-policy" key={`policy-${resource.id}-${item}`}>
+                        {item}
+                      </span>
                     ))}
                   </div>
-                </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  {resource.hasCredentials && (
-                    <span className="pill ok" title={t('app.vaultStored')} style={{ fontSize: '0.65rem' }}>🔐 {t('app.vault')}</span>
-                  )}
-                  {resource.protocol === 'agent' ? (
-                    <span className="pill loading" style={{ fontSize: '0.65rem' }}>🚀 {t('app.launch')}</span>
-                  ) : (
-                    <span className="pill ready">{t('app.connectLower')}</span>
-                  )}
-                </div>
-              </button>
-            ))
+                </button>
+              );
+            })
           ) : (
             <EmptyState title={t('app.noResourcesYet')} message={t('app.noResourcesMessage')} />
           )}
