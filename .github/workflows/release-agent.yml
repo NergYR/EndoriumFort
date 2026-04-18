@@ -120,7 +120,7 @@ jobs:
             repository-sbom.cdx.json >/dev/null
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: "EndoriumFort ${{ steps.version.outputs.VERSION }}"
           body: |
@@ -223,7 +223,7 @@ jobs:
         run: sha256sum *.deb *.rpm > checksums-sha256.txt
 
       - name: Upload Linux installers to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             release/packages/linux/*.deb
@@ -378,7 +378,7 @@ jobs:
         run: shasum -a 256 *.pkg > checksums-sha256.txt
 
       - name: Upload macOS installers to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             release/packages/macos/*.pkg
@@ -474,7 +474,7 @@ jobs:
           } | Set-Content -Path "$path/checksums-sha256.txt" -Encoding utf8
 
       - name: Upload Windows installer to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             release/packages/windows/*.msi
