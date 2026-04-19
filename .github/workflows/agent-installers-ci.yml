@@ -19,10 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
           cache-dependency-path: agent/go.sum
@@ -53,7 +53,7 @@ jobs:
           VERSION="$(tr -d '[:space:]' < agent/VERSION)" bash agent/packaging/linux/build-packages.sh
 
       - name: Upload Linux installer artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-installers-linux
           path: |
@@ -64,10 +64,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
           cache-dependency-path: agent/go.sum
@@ -88,7 +88,7 @@ jobs:
           VERSION="$(tr -d '[:space:]' < agent/VERSION)" BINARY="$GITHUB_WORKSPACE/release/endoriumfort-agent-darwin-arm64" ARCH="arm64" bash agent/packaging/macos/build-pkg.sh
 
       - name: Upload macOS installer artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-installers-macos
           path: release/packages/macos/*.pkg
@@ -97,10 +97,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
           cache-dependency-path: agent/go.sum
@@ -171,7 +171,7 @@ jobs:
           .\agent\packaging\windows\build-msi.ps1 -Version $version -BinaryPath .\release\endoriumfort-agent-windows-amd64.exe -OutputDir .\release\packages\windows
 
       - name: Upload Windows installer artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-installers-windows
           path: release/packages/windows/*.msi
