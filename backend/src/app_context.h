@@ -20,6 +20,9 @@
 // ── Rate limiting state ──
 struct RateLimitEntry {
   std::queue<std::chrono::steady_clock::time_point> attempts;
+  int consecutive_failures = 0;  // Track consecutive failures for exponential backoff
+  std::chrono::steady_clock::time_point last_failure_time;  // Time of last failure
+  std::chrono::steady_clock::time_point block_until;  // Time when IP/user will be unblocked
 };
 
 struct TunnelTicket {
@@ -150,6 +153,13 @@ struct AppContext {
   std::mutex behavior_mutex;
   std::unordered_map<int, int64_t> session_input_events;
 
+    // ── Runtime anomaly signal correlation ──
+    std::mutex anomaly_mutex;
+    std::unordered_map<std::string, std::queue<std::chrono::steady_clock::time_point>>
+      anomaly_signal_windows;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point>
+      anomaly_signal_cooldowns;
+
   // ── Ephemeral credential leases ──
   std::mutex ephemeral_credential_mutex;
   std::unordered_map<int, EphemeralCredentialLease> ephemeral_credentials;
@@ -182,6 +192,12 @@ struct AppContext {
   std::unordered_map<crow::websocket::connection *,
                      std::shared_ptr<TunnelState>>
       tunnel_connections;
+
+  // ── VNC WebSocket state ──
+  std::mutex vnc_mutex;
+  std::unordered_map<crow::websocket::connection *,
+                     std::shared_ptr<VncConnection>>
+      vnc_connections;
 
   // ── One-time tunnel tickets ──
   std::mutex tunnel_ticket_mutex;
@@ -253,6 +269,15 @@ struct AppContext {
 
   // ── Security ──
   bool check_rate_limit(const std::string &key);
+  void record_failed_login_attempt(const std::string &key);
+  bool is_login_blocked(const std::string &key);
+  void clear_login_attempts(const std::string &key);
+  int get_consecutive_failures(const std::string &key);
+  int record_anomaly_signal(const std::string &key,
+                            std::chrono::seconds window);
+  bool should_emit_anomaly_signal(const std::string &key,
+                                  std::chrono::seconds cooldown);
+  void clear_anomaly_signal(const std::string &key);
   bool is_safe_target(const std::string &host, bool allow_loopback = false);
 
   // ── DB init ──

@@ -10,6 +10,7 @@
 #include "security_middleware.h"
 #include "ssh.h"
 #include "tunnel.h"
+#include "vnc.h"
 
 #ifdef ENDORIUMFORT_SSH_ENABLED
 #ifndef _WIN32
@@ -48,12 +49,14 @@ int main() {
   register_audit_routes(app, ctx);
   register_recording_routes(app, ctx);
   register_stats_routes(app, ctx);
+  register_enterprise_routes(app, ctx);
   register_proxy_routes(app, ctx);
   register_web_resource_routes(app, ctx);
   register_ssh_routes(app, ctx);
   register_relay_routes(app, ctx);
   register_tunnel_routes(app, ctx);
   register_rdp_routes(app, ctx);
+  register_vnc_routes(app, ctx);
 
   // ── Start server ──
   app.port(runtime_config.port).multithreaded().run();

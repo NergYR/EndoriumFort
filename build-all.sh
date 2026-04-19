@@ -3,9 +3,84 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+is_wsl() {
+  grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null
+}
+
+cpu_cores() {
+  if command -v nproc >/dev/null 2>&1; then
+    nproc
+  elif command -v getconf >/dev/null 2>&1; then
+    getconf _NPROCESSORS_ONLN
+  else
+    echo 2
+  fi
+}
+
+IS_WSL=0
+if is_wsl; then
+  IS_WSL=1
+fi
+
+CORES="$(cpu_cores)"
+if [[ "$CORES" =~ ^[0-9]+$ ]] && [[ "$CORES" -gt 0 ]]; then
+  :
+else
+  CORES=2
+fi
+
+DEFAULT_BUILD_JOBS="$CORES"
+if [[ "$IS_WSL" -eq 1 ]]; then
+  DEFAULT_BUILD_JOBS=2
+fi
+
+BUILD_JOBS="${ENDORIUMFORT_BUILD_JOBS:-$DEFAULT_BUILD_JOBS}"
+if [[ ! "$BUILD_JOBS" =~ ^[0-9]+$ ]] || [[ "$BUILD_JOBS" -lt 1 ]]; then
+  echo "Invalid ENDORIUMFORT_BUILD_JOBS='$BUILD_JOBS' (must be integer >= 1)" >&2
+  exit 1
+fi
+
+BUILD_TESTING="${ENDORIUMFORT_BUILD_TESTING:-OFF}"
+case "$BUILD_TESTING" in
+  ON|OFF) ;;
+  *)
+    echo "Invalid ENDORIUMFORT_BUILD_TESTING='$BUILD_TESTING' (use ON or OFF)" >&2
+    exit 1
+    ;;
+esac
+
+if [[ -n "${ENDORIUMFORT_AGENT_CROSS_COMPILE:-}" ]]; then
+  AGENT_CROSS_COMPILE="$ENDORIUMFORT_AGENT_CROSS_COMPILE"
+else
+  if [[ "$IS_WSL" -eq 1 ]]; then
+    AGENT_CROSS_COMPILE=0
+  else
+    AGENT_CROSS_COMPILE=1
+  fi
+fi
+
+if [[ ! "$AGENT_CROSS_COMPILE" =~ ^[01]$ ]]; then
+  echo "Invalid ENDORIUMFORT_AGENT_CROSS_COMPILE='$AGENT_CROSS_COMPILE' (use 0 or 1)" >&2
+  exit 1
+fi
+
+export CMAKE_BUILD_PARALLEL_LEVEL="$BUILD_JOBS"
+export GOMAXPROCS="$BUILD_JOBS"
+
 info() {
   printf "\n\033[1;36m==> %s\033[0m\n" "$1"
 }
+
+if [[ "$IS_WSL" -eq 1 ]]; then
+  info "WSL build-safe defaults active"
+  echo "  Build jobs: $BUILD_JOBS"
+  echo "  Backend tests in normal build: $BUILD_TESTING"
+  if [[ "$AGENT_CROSS_COMPILE" -eq 0 ]]; then
+    echo "  Agent cross-compilation: disabled"
+  else
+    echo "  Agent cross-compilation: enabled"
+  fi
+fi
 
 # ─── Version helpers ─────────────────────────────────────────────────────
 # Compute a hash of source files in a directory (excluding build artifacts)
@@ -80,8 +155,8 @@ cat > "$ROOT_DIR/backend/src/version.h" <<EOF
 EOF
 
 info "Building backend"
-cmake -S "$ROOT_DIR/backend" -B "$ROOT_DIR/backend/build"
-cmake --build "$ROOT_DIR/backend/build"
+cmake -S "$ROOT_DIR/backend" -B "$ROOT_DIR/backend/build" -DBUILD_TESTING="$BUILD_TESTING"
+cmake --build "$ROOT_DIR/backend/build" --parallel "$BUILD_JOBS"
 
 # ─── Frontend ────────────────────────────────────────────────────────────
 info "Checking frontend sources"
@@ -151,14 +226,18 @@ else
   GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o endoriumfort-relay-linux-amd64 ./cmd/endoriumfort-relay
   echo "  Relay binary (Linux amd64): $ROOT_DIR/agent/endoriumfort-relay-linux-amd64"
 
-  # Cross-compile: Windows .exe
-  GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o endoriumfort-agent.exe .
-  echo "  Agent binary (Windows amd64): $ROOT_DIR/agent/endoriumfort-agent.exe"
+  if [[ "$AGENT_CROSS_COMPILE" -eq 1 ]]; then
+    # Cross-compile: Windows .exe
+    GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o endoriumfort-agent.exe .
+    echo "  Agent binary (Windows amd64): $ROOT_DIR/agent/endoriumfort-agent.exe"
 
-  # Cross-compile: macOS (skip if already native)
-  if [[ "$HOST_OS" != "darwin" ]]; then
-    GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o endoriumfort-agent-darwin-arm64 .
-    echo "  Agent binary (macOS arm64): $ROOT_DIR/agent/endoriumfort-agent-darwin-arm64"
+    # Cross-compile: macOS (skip if already native)
+    if [[ "$HOST_OS" != "darwin" ]]; then
+      GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o endoriumfort-agent-darwin-arm64 .
+      echo "  Agent binary (macOS arm64): $ROOT_DIR/agent/endoriumfort-agent-darwin-arm64"
+    fi
+  else
+    echo "  Agent cross-compilation disabled (set ENDORIUMFORT_AGENT_CROSS_COMPILE=1 to enable)"
   fi
 fi
 

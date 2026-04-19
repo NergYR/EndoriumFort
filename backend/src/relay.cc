@@ -10,7 +10,7 @@
 #include <sstream>
 
 namespace {
-std::string trim_copy(std::string value) {
+std::string relay_trim_copy(std::string value) {
   while (!value.empty() &&
          std::isspace(static_cast<unsigned char>(value.front()))) {
     value.erase(value.begin());
@@ -27,12 +27,12 @@ std::string request_source_ip(const crow::request &request) {
   if (!forwarded.empty()) {
     size_t comma = forwarded.find(',');
     if (comma != std::string::npos) forwarded = forwarded.substr(0, comma);
-    forwarded = trim_copy(forwarded);
+    forwarded = relay_trim_copy(forwarded);
     if (!forwarded.empty()) return forwarded;
   }
-  std::string real_ip = trim_copy(request.get_header_value("X-Real-IP"));
+  std::string real_ip = relay_trim_copy(request.get_header_value("X-Real-IP"));
   if (!real_ip.empty()) return real_ip;
-  return trim_copy(request.remote_ip_address);
+  return relay_trim_copy(request.remote_ip_address);
 }
 
 bool can_read_resource_scope(AppContext &ctx, const AuthSession &auth,
@@ -50,7 +50,7 @@ std::string join_capabilities(const crow::json::rvalue &value) {
   std::ostringstream oss;
   bool first = true;
   for (const auto &entry : value) {
-    std::string cap = trim_copy(std::string(entry.s()));
+    std::string cap = relay_trim_copy(std::string(entry.s()));
     if (cap.empty()) continue;
     if (!first) oss << ',';
     oss << cap;
@@ -113,7 +113,7 @@ void cleanup_relay_certificates(AppContext &ctx, int64_t now_epoch) {
 }
 
 bool is_secure_relay_transport(const crow::request &request) {
-  std::string proto = trim_copy(request.get_header_value("X-Forwarded-Proto"));
+  std::string proto = relay_trim_copy(request.get_header_value("X-Forwarded-Proto"));
   std::transform(proto.begin(), proto.end(), proto.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   if (proto == "https") return true;
@@ -280,8 +280,8 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
         }
 
         const std::string provided_secret =
-            trim_copy(request.get_header_value("X-EndoriumFort-Relay-Secret"));
-        const std::string enrollment_token = trim_copy(
+            relay_trim_copy(request.get_header_value("X-EndoriumFort-Relay-Secret"));
+        const std::string enrollment_token = relay_trim_copy(
             request.get_header_value("X-EndoriumFort-Relay-Enrollment-Token"));
         const int64_t now_epoch = now_epoch_seconds();
         bool enrollment_token_ok = false;
@@ -297,14 +297,14 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
           return crow::response(401, "Relay enrollment denied");
         }
 
-        const std::string relay_id = trim_copy(std::string(body["relayId"].s()));
+        const std::string relay_id = relay_trim_copy(std::string(body["relayId"].s()));
         if (relay_id.empty()) {
           return crow::response(400, "Invalid relayId");
         }
 
         std::string certificate_id;
         if (ctx.relay_certificate_required) {
-          const std::string presented_certificate = trim_copy(
+            const std::string presented_certificate = relay_trim_copy(
               request.get_header_value("X-EndoriumFort-Relay-Certificate"));
           if (presented_certificate.empty()) {
             return crow::response(401, "Missing relay certificate");
@@ -318,8 +318,8 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
 
         RelayNode relay;
         relay.relayId = relay_id;
-        relay.label = body.has("label") ? trim_copy(std::string(body["label"].s())) : relay_id;
-        relay.version = body.has("version") ? trim_copy(std::string(body["version"].s())) : "";
+        relay.label = body.has("label") ? relay_trim_copy(std::string(body["label"].s())) : relay_id;
+        relay.version = body.has("version") ? relay_trim_copy(std::string(body["version"].s())) : "";
         relay.capabilitiesCsv = body.has("capabilities")
                                     ? join_capabilities(body["capabilities"])
                                     : "";
@@ -373,7 +373,7 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
         }
 
         const std::string relay_token =
-            trim_copy(request.get_header_value("X-EndoriumFort-Relay-Token"));
+            relay_trim_copy(request.get_header_value("X-EndoriumFort-Relay-Token"));
         if (relay_token.empty()) {
           return crow::response(401, "Missing relay token");
         }
@@ -382,7 +382,7 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
         if (!relay_id) return crow::response(401, "Invalid relay token");
 
         if (ctx.relay_certificate_required) {
-          const std::string presented_certificate = trim_copy(
+            const std::string presented_certificate = relay_trim_copy(
               request.get_header_value("X-EndoriumFort-Relay-Certificate"));
           if (presented_certificate.empty()) {
             return crow::response(401, "Missing relay certificate");
@@ -500,7 +500,7 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
 
         std::string relay_id;
         if (body.has("relayId")) {
-          relay_id = trim_copy(std::string(body["relayId"].s()));
+          relay_id = relay_trim_copy(std::string(body["relayId"].s()));
           if (relay_id.empty()) return crow::response(400, "Invalid relayId");
           std::lock_guard<std::mutex> lock(ctx.relay_mutex);
           if (ctx.relays.find(relay_id) == ctx.relays.end()) {

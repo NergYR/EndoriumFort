@@ -403,4 +403,161 @@ inline PasswordPolicyResult validate_password(const std::string &password) {
   return {true, "ok"};
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  AES-256-GCM vault encryption/decryption
+// ═══════════════════════════════════════════════════════════════════════
+
+inline std::optional<std::string> get_vault_encryption_key() {
+  const char *env_key = std::getenv("ENDORIUMFORT_VAULT_KEY");
+  if (!env_key || std::string(env_key).empty()) {
+    return std::nullopt;
+  }
+  // Key should be 64 hex chars (32 bytes)
+  std::string key_hex(env_key);
+  if (key_hex.size() != 64) {
+    return std::nullopt;
+  }
+  std::string key_bytes;
+  if (!hex_decode(key_hex, key_bytes) || key_bytes.size() != 32) {
+    return std::nullopt;
+  }
+  return key_bytes;
+}
+
+/// Encrypt plaintext using AES-256-GCM; returns format "aes256:v1:iv:tag:ciphertext" (all hex).
+/// Returns empty string on error.
+inline std::string aes256_encrypt(const std::string &plaintext) {
+  auto key_opt = get_vault_encryption_key();
+  if (!key_opt) {
+    return {};  // No key configured, return plaintext as-is (unencrypted)
+  }
+  const std::string &key = *key_opt;
+
+  EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+  if (!ctx) return {};
+
+  unsigned char iv[12];  // 96-bit IV for GCM
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+  std::uniform_int_distribution<uint64_t> dist;
+  uint64_t a = dist(gen), b = dist(gen);
+  std::memcpy(iv, &a, 8);
+  std::memcpy(iv + 8, &b, 4);
+
+  unsigned char tag[16];
+  std::vector<unsigned char> ciphertext(plaintext.size() + 16);
+
+  int len = 0;
+  int ciphertext_len = 0;
+
+  if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr,
+                         reinterpret_cast<const unsigned char *>(key.data()),
+                         iv) != 1) {
+    EVP_CIPHER_CTX_free(ctx);
+    return {};
+  }
+
+  if (EVP_EncryptUpdate(
+          ctx, ciphertext.data(), &len,
+          reinterpret_cast<const unsigned char *>(plaintext.data()),
+          plaintext.size()) != 1) {
+    EVP_CIPHER_CTX_free(ctx);
+    return {};
+  }
+  ciphertext_len = len;
+
+  if (EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len) != 1) {
+    EVP_CIPHER_CTX_free(ctx);
+    return {};
+  }
+  ciphertext_len += len;
+
+  if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag) != 1) {
+    EVP_CIPHER_CTX_free(ctx);
+    return {};
+  }
+
+  EVP_CIPHER_CTX_free(ctx);
+
+  // Format: "aes256:v1:{iv_hex}:{tag_hex}:{ciphertext_hex}"
+  std::string iv_hex = hex_encode(iv, 12);
+  std::string tag_hex = hex_encode(tag, 16);
+  std::string ciphertext_hex = hex_encode(ciphertext.data(), ciphertext_len);
+
+  return "aes256:v1:" + iv_hex + ":" + tag_hex + ":" + ciphertext_hex;
+}
+
+/// Decrypt ciphertext (format "aes256:v1:iv:tag:ciphertext") using AES-256-GCM.
+/// Returns plaintext on success, empty string on error.
+inline std::string aes256_decrypt(const std::string &ciphertext_packed) {
+  auto key_opt = get_vault_encryption_key();
+  if (!key_opt) {
+    // No key, assume plaintext (for backward compatibility)
+    return ciphertext_packed;
+  }
+  const std::string &key = *key_opt;
+
+  // Parse format: "aes256:v1:iv:tag:ciphertext"
+  const std::string prefix = "aes256:v1:";
+  if (ciphertext_packed.rfind(prefix, 0) != 0) {
+    // Not encrypted or wrong format, return as-is
+    return ciphertext_packed;
+  }
+
+  size_t pos = prefix.size();
+  size_t iv_end = ciphertext_packed.find(':', pos);
+  if (iv_end == std::string::npos) return {};
+
+  size_t tag_end = ciphertext_packed.find(':', iv_end + 1);
+  if (tag_end == std::string::npos) return {};
+
+  std::string iv_hex = ciphertext_packed.substr(pos, iv_end - pos);
+  std::string tag_hex = ciphertext_packed.substr(iv_end + 1, tag_end - iv_end - 1);
+  std::string ciphertext_hex = ciphertext_packed.substr(tag_end + 1);
+
+  std::string iv_bytes, tag_bytes, ciphertext_bytes;
+  if (!hex_decode(iv_hex, iv_bytes) || iv_bytes.size() != 12) return {};
+  if (!hex_decode(tag_hex, tag_bytes) || tag_bytes.size() != 16) return {};
+  if (!hex_decode(ciphertext_hex, ciphertext_bytes)) return {};
+
+  EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+  if (!ctx) return {};
+
+  std::vector<unsigned char> plaintext(ciphertext_bytes.size() + 1);
+  int len = 0;
+  int plaintext_len = 0;
+
+  if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr,
+                         reinterpret_cast<const unsigned char *>(key.data()),
+                         reinterpret_cast<const unsigned char *>(iv_bytes.data())) != 1) {
+    EVP_CIPHER_CTX_free(ctx);
+    return {};
+  }
+
+  if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16,
+                          reinterpret_cast<unsigned char *>(
+                              const_cast<char *>(tag_bytes.data()))) != 1) {
+    EVP_CIPHER_CTX_free(ctx);
+    return {};
+  }
+
+  if (EVP_DecryptUpdate(ctx, plaintext.data(), &len,
+                        reinterpret_cast<const unsigned char *>(ciphertext_bytes.data()),
+                        ciphertext_bytes.size()) != 1) {
+    EVP_CIPHER_CTX_free(ctx);
+    return {};
+  }
+  plaintext_len = len;
+
+  if (EVP_DecryptFinal_ex(ctx, plaintext.data() + len, &len) != 1) {
+    EVP_CIPHER_CTX_free(ctx);
+    return {};
+  }
+  plaintext_len += len;
+
+  EVP_CIPHER_CTX_free(ctx);
+
+  return std::string(reinterpret_cast<char *>(plaintext.data()), plaintext_len);
+}
+
 }  // namespace crypto

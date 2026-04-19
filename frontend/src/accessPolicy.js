@@ -5,35 +5,52 @@ export const normalizeRiskLevel = (value) => {
     : 'low';
 };
 
-export const describeResourcePolicy = (resource) => {
+const fallbackTranslate = (key, params = {}) => {
+  const dictionary = {
+    'policy.risk': `Risk ${params.level}`,
+    'policy.reasonRequired': 'Reason required',
+    'policy.dualApproval': 'Dual approval',
+    'policy.adaptiveControls': 'Adaptive controls',
+    'policy.sshGuard': 'SSH guard',
+    'policy.tunnelLimit': `Tunnel limit ${params.limit}/min`,
+    'policy.mfaSensitive': 'MFA-sensitive',
+    'policy.requestApproval': 'Request approval',
+    'policy.connectNow': 'Connect now',
+    'policy.ticketOrPurposeLikely': 'Ticket or purpose likely',
+    'policy.purposeRequired': 'Purpose required'
+  };
+  return dictionary[key] || key;
+};
+
+export const describeResourcePolicy = (resource, translate = fallbackTranslate) => {
   const riskLevel = normalizeRiskLevel(resource?.riskLevel);
-  const items = [`Risk ${riskLevel}`];
+  const items = [translate('policy.risk', { level: riskLevel })];
   const tunnelLimit = Math.max(0, Number(resource?.tunnelTicketRateLimitMaxAttempts) || 0);
   const protocol = String(resource?.protocol || '').toLowerCase();
-  if (resource?.requireAccessJustification) items.push('Reason required');
-  if (resource?.requireDualApproval) items.push('Dual approval');
-  if (resource?.adaptiveAccessPolicy) items.push('Adaptive controls');
-  if (resource?.enableCommandGuard) items.push('SSH guard');
-  if (['agent', 'rdp', 'vnc'].includes(protocol) && tunnelLimit > 0) {
-    items.push(`Tunnel limit ${tunnelLimit}/min`);
+  if (resource?.requireAccessJustification) items.push(translate('policy.reasonRequired'));
+  if (resource?.requireDualApproval) items.push(translate('policy.dualApproval'));
+  if (resource?.adaptiveAccessPolicy) items.push(translate('policy.adaptiveControls'));
+  if (resource?.enableCommandGuard) items.push(translate('policy.sshGuard'));
+  if (['agent', 'rdp'].includes(protocol) && tunnelLimit > 0) {
+    items.push(translate('policy.tunnelLimit', { limit: tunnelLimit }));
   }
-  if (riskLevel === 'high' || riskLevel === 'critical') items.push('MFA-sensitive');
+  if (riskLevel === 'high' || riskLevel === 'critical') items.push(translate('policy.mfaSensitive'));
   return items;
 };
 
-export const describeAccessOutcome = (resource) => {
+export const describeAccessOutcome = (resource, translate = fallbackTranslate) => {
   const riskLevel = normalizeRiskLevel(resource?.riskLevel);
   const checks = [];
   if (resource?.requireDualApproval) {
-    checks.push('Request approval');
+    checks.push(translate('policy.requestApproval'));
   } else {
-    checks.push('Connect now');
+    checks.push(translate('policy.connectNow'));
   }
-  if (resource?.requireAccessJustification) checks.push('Reason required');
+  if (resource?.requireAccessJustification) checks.push(translate('policy.reasonRequired'));
   if (resource?.adaptiveAccessPolicy && (riskLevel === 'high' || riskLevel === 'critical')) {
-    checks.push('Ticket or purpose likely');
+    checks.push(translate('policy.ticketOrPurposeLikely'));
   } else if (riskLevel === 'high' || riskLevel === 'critical') {
-    checks.push('Purpose required');
+    checks.push(translate('policy.purposeRequired'));
   }
   return checks;
 };
