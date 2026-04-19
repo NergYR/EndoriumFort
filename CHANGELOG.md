@@ -1,10 +1,217 @@
 # Changelog
 
+## v1.1.1-dev - 2026-04-19
+### Build Stability (WSL / Low-Memory Environments)
+- Updated `build-all.sh` with WSL-safe defaults to reduce crash/OOM risk during full builds.
+- Added configurable build throttling controls:
+  - `ENDORIUMFORT_BUILD_JOBS` to cap CMake/Go parallelism.
+  - `ENDORIUMFORT_BUILD_TESTING` (`ON`/`OFF`) to control backend test target builds during normal build flow.
+  - `ENDORIUMFORT_AGENT_CROSS_COMPILE` (`0`/`1`) to control cross-platform agent binary generation.
+- Default behavior under WSL now uses lower pressure settings (`BUILD_TESTING=OFF`, 2 build jobs, agent cross-compilation disabled).
+- Updated `run-dev.sh` backend bootstrap build to use the same configurable `BUILD_TESTING` and `BUILD_JOBS` controls.
+
 ## v1.1.0-dev - 2026-03-11
 ### Go Toolchain Security Patch
 - Upgraded Go toolchain baseline to `1.25.9` across agent and CI workflows to address `govulncheck` findings in Go standard library (`GO-2026-4947`, `GO-2026-4946`, `GO-2026-4870`).
 - Updated `actions/setup-go` references in CI/release workflows and `agent/go.mod` toolchain directive to `1.25.9`.
 - Updated README Go version references to match the new minimum patched baseline.
+
+### LDAP / Active Directory Integration
+- Added LDAP runtime configuration parsing and bind validation helper in backend enterprise routes (`backend/src/routes.cc`) with support for environment-driven host/base DN/auth mode/default role settings.
+- Added enterprise directory endpoints:
+  - `GET /api/auth/directory/providers`
+  - `GET /api/auth/directory/ldap/config`
+  - `POST /api/auth/directory/ldap/test-bind`
+- Extended login flow with LDAP fallback: when local authentication does not resolve a user and LDAP is enabled, backend attempts directory bind and JIT-provisions a local shadow account for future governance/audit continuity.
+- Added LDAP role mapping controls for shadow-user provisioning and role sync:
+  - `ENDORIUMFORT_LDAP_ROLE_MAP` (exact username or directory identity match)
+  - `ENDORIUMFORT_LDAP_ROLE_ADMIN_MATCHERS` / `ENDORIUMFORT_LDAP_ROLE_AUDITOR_MATCHERS` (substring-based matchers)
+- Normalized LDAP runtime host parsing to accept both plain hostnames and full LDAP URIs (`ldap://` / `ldaps://`) with optional inline port extraction.
+- Added LDAP bind test audit events:
+  - `integration.directory.ldap.bind_test.success`
+  - `integration.directory.ldap.bind_test.failure`
+- Extended frontend enterprise API client (`frontend/src/api.js`) with directory providers/config/bind-test helpers.
+- Extended frontend Admin **Enterprise IAM** workspace (`frontend/src/App.jsx`):
+  - directory providers inventory card
+  - LDAP runtime visibility in KPI/header cards
+  - dedicated LDAP bind-test form and result panel
+- Extended backend in-memory enterprise integration tests (`backend/tests/scim_routes_test.cc`) with LDAP route contract checks (providers/config and disabled-path bind behavior).
+- Updated README enterprise capability documentation, endpoint matrix, LDAP quick-start configuration, and roadmap progress state.
+
+### VNC Browser Support
+- Added dedicated backend VNC browser bridge routes:
+  - `GET /api/vnc/capabilities`
+  - `WS /api/ws/vnc`
+- Added raw VNC-over-WebSocket proxy implementation (`backend/src/vnc.cc`) with token/cookie auth checks, RBAC guard (`vnc.connect`), session/resource validation, and audit events (`vnc.open`, `vnc.close`).
+- Added VNC connection RBAC capability in permission catalog/default operator profile.
+- Extended backend in-memory route tests (`backend/tests/scim_routes_test.cc`) with VNC capability endpoint contract assertions.
+- Added integrated frontend noVNC viewer modal (`frontend/src/components/sessions/VncViewerModal.jsx`) and wired VNC connect/open-live flows in `frontend/src/App.jsx`.
+- Updated frontend dependency graph with `@novnc/novnc` and added dedicated VNC viewer i18n/style coverage.
+
+### Sovereign JIT PAM Foundations
+- Added enterprise foundation API group `register_enterprise_routes` and registered it in backend startup.
+- Added SSO capability endpoints:
+  - `GET /api/auth/sso/providers`
+  - `GET /api/auth/sso/config`
+- Added SCIM foundation endpoints:
+  - `GET /api/scim/v2/ServiceProviderConfig`
+  - `GET /api/scim/v2/Users`
+  - `GET /api/scim/v2/Groups`
+- Added ITSM/SIEM integration endpoints with explicit fail-open/fail-closed decision semantics:
+  - `GET /api/integrations/itsm/providers`
+  - `POST /api/integrations/itsm/verify-ticket`
+  - `GET /api/integrations/siem/channels`
+  - `POST /api/integrations/siem/events`
+- Added new JIT audit events and routes:
+  - access grant expiration now emits `access.grant.expired`
+  - `POST /api/sessions/:id/elevation/start` emits `access.elevation.started`
+  - `POST /api/sessions/:id/elevation/end` emits `access.elevation.ended`
+  - `POST /api/sessions/:id/goal-review` emits `session.goal.match|session.goal.mismatch`
+- Added frontend API client support in `frontend/src/api.js` for SSO/SCIM/ITSM/SIEM and session elevation/goal-review flows.
+- Added missing development launcher script `run-dev.sh` (build-on-demand backend + frontend dev server orchestration).
+
+### Sovereign JIT PAM Roadmap Continuation (Q2)
+- Added OIDC login orchestration endpoints:
+  - `GET /api/auth/sso/oidc/start` (authorization redirect with state + PKCE)
+  - `GET /api/auth/sso/oidc/callback` (token exchange, JIT provisioning, role sync, local session bootstrap)
+- Added HTTPS support for backend OIDC token/userinfo exchanges with certificate validation against system trust store.
+- Added SSO audit coverage for enterprise federated flows:
+  - `auth.login.sso.start`
+  - `auth.login.sso.success`
+  - `auth.login.sso.failure`
+  - `identity.sso.provisioned`
+  - `identity.sso.role_synced`
+- Extended SCIM from read-only listing to provisioning lifecycle:
+  - `GET /api/scim/v2/Users` now supports strict SCIM pagination/filtering (`startIndex`, `count`, `filter`)
+  - `GET /api/scim/v2/Groups` now supports strict SCIM pagination/filtering (`startIndex`, `count`, `filter`)
+  - `GET /api/scim/v2/Users/:idOrUserName`
+  - `POST /api/scim/v2/Users`
+  - `PUT /api/scim/v2/Users/:idOrUserName` (supports deprovision when `active=false`)
+  - `PATCH /api/scim/v2/Users/:idOrUserName` (supports partial updates on `active`, `userName`, `role/roles`)
+  - `DELETE /api/scim/v2/Users/:idOrUserName`
+- Added SCIM patch audit event `user.scim.patched` for partial provisioning updates.
+- Added frontend hooks for enterprise IAM continuation:
+  - OIDC start trigger helper (`startOidcSso`) and login-page SSO action.
+  - SCIM provisioning client helpers (`fetchScimUser`, `createScimUser`, `updateScimUser`, `patchScimUser`, `deleteScimUser`).
+  - SCIM list helpers (`fetchScimUsers`, `fetchScimGroups`) now accept pagination/filter query options.
+- Added Admin UI **Enterprise IAM** workspace in `frontend/src/App.jsx`:
+  - dedicated admin section for SSO/SCIM/ITSM/SIEM operations
+  - SSO provider diagnostics with one-click OIDC sign-in test
+  - SCIM directory explorer for `Users` and `Groups` (`startIndex`, `count`, `filter`)
+  - SCIM PATCH operator workflow from the admin panel (`userName`, `role`, `active`)
+  - ITSM ticket verification drill form (provider/fail mode/simulated unavailability)
+  - SIEM event forwarding drill form (channel/delivery mode/simulated failure)
+
+### SCIM API Contract Hardening
+- Added in-memory SCIM route integration tests in `backend/tests/scim_routes_test.cc` covering:
+  - pagination/list metadata behavior for `GET /api/scim/v2/Users` and `GET /api/scim/v2/Groups` (`totalResults`, `startIndex`, `itemsPerPage`)
+  - `count` clamp behavior and out-of-range `startIndex` semantics
+  - strict HTTP 400 validation for unsupported SCIM operators and filter attributes
+  - SCIM user lifecycle contract checks for `POST` / `PUT` / `PATCH` / `DELETE` on `/api/scim/v2/Users` (create, conflict validation, role/username updates, deprovision, and session invalidation on deprovision)
+  - SCIM audit contract assertions (`user.scim.provisioned|updated|patched|deprovisioned`) including actor/role and payload coherence
+  - SCIM schema/shape contract checks for `GET /api/scim/v2/ServiceProviderConfig`, `GET /api/scim/v2/Users`, `GET /api/scim/v2/Users/:idOrUserName`, and `GET /api/scim/v2/Groups` (`ListResponse` and resource-level `schemas`, expected capability fields, and JSON response header presence)
+  - strict middleware hardening-header assertions on SCIM responses (`X-Content-Type-Options`, `X-Frame-Options`, `Cache-Control`)
+  - SCIM error-envelope contract checks (`urn:ietf:params:scim:api:messages:2.0:Error`, `status`, `detail`, `scimType`) on representative `400/401/403/404/409` failure paths
+  - SCIM `PATCH` path validation now emits `scimType=invalidPath` on unsupported SCIM paths
+  - explicit negative-path coverage for malformed JSON and missing required SCIM fields on mutation endpoints
+  - additional negative-path contract checks for SCIM unknown target updates (`PUT`/`PATCH` -> `404 noTarget`) and PATCH payload-shape validation (`Missing Operations`, empty `Operations`, missing `op`, `remove` without `path`, `remove userName`, empty `userName`, `active` non-boolean value, `role` missing `value`, invalid `role` value, and unsupported value-object fields)
+  - added compatibility coverage for pathless PATCH role payload fallback behavior (unsupported role value normalizes to `operator`)
+  - added PUT compatibility coverage for incoherent payloads (`active` non-boolean ignored, blank `userName` treated as absent field)
+  - extended PUT compatibility checks with non-string payload types (`userName` object ignored, `role` object coerced to fallback `operator`) and stricter `user.scim.updated` audit assertions
+  - added PUT compatibility coverage for malformed `roles` arrays (`[]`, `[{}]` -> fallback `operator`) and explicit success contract checks for SCIM `schemas`/`meta.resourceType`
+  - added PUT mixed `roles` array coverage (`["auditor",{"value":"admin"}]` resolves first string item; `[{},"admin"]` still falls back to `operator`) and stricter audit checks on malformed `roles` fallback cases
+  - extended mixed `roles` edge-case coverage (`[{"value":"   "},"admin"]`, `[1,"admin"]`) to lock fallback behavior when first array item is blank/unsupported, and added strict payload assertions on mixed-array audit events
+  - added PUT precedence coverage to lock "first valid roles item wins" semantics (`["admin",{}]`, `[{"value":"auditor"},1]`) and aligned success-contract checks (`schemas`, `meta.resourceType`) on aggressive mixed-role payloads
+  - tightened `user.scim.updated` audit assertions for first-valid precedence cases (actor/role and payload fragments for `username` and resolved `role`)
+  - added PATCH multi-operation precedence coverage (last-write-wins on repeated `role`, `active=false` then `active=true` cancels deprovision) and atomicity coverage (later invalid op rejects whole request without partial persistence/audit)
+  - tightened PATCH success-audit assertions on multi-operation precedence paths and added atomicity coverage for later `invalidPath` failures (no partial persistence or `user.scim.patched` emission)
+  - added PATCH precedence coverage for repeated `userName` operations (last-write-wins with strict audit payload checks) and atomicity coverage for later `invalidValue` failures (no partial persistence/audit)
+  - added PATCH atomicity coverage for repeated `userName` operations followed by `invalidPath`, plus explicit last-op-wins deprovision coverage for `active=true` then `active=false`
+  - extended PATCH active precedence coverage with triplet ordering (`active=true`, `false`, `true` keeps user/session and emits no `patched`/`deprovisioned` audit) and tightened deprovision audit payload checks on temporary-user deprovision paths
+  - added mirrored PATCH active triplet coverage (`active=false`, `true`, `false` deprovisions on last op) with strict deprovisioned audit payload assertions (`userId`, `username`, `role`)
+  - added PATCH active quadruplet coverage (`active=true`, `false`, `true`, `false` deprovisions on last op) and explicit anti-leak assertions (temporary username lookup + session token must be absent after deprovision)
+  - added mirrored keep-user quadruplet coverage (`active=false`, `true`, `false`, `true` keeps user/session on last op) and a consolidated anti-leak check for all temporary deprovisioned PATCH accounts/sessions
+  - added 5-step PATCH active alternation coverage (`active=false`, `true`, `false`, `true`, `false` deprovisions on last op) with strict deprovisioned audit payload assertions and anti-leak consolidation for the new temporary account/session
+  - added SCIM User resource metadata contract support in backend responses with deterministic `meta.location` (`/api/scim/v2/Users/:id`) and weak validator `meta.version`
+  - added `ETag` header emission on single-resource SCIM User responses (`GET /Users/:idOrUserName`, `POST /Users`, `PUT /Users/:idOrUserName`, `PATCH /Users/:idOrUserName`) with test assertions for `ETag == meta.version`
+  - updated `ServiceProviderConfig` to advertise SCIM `etag.supported=true`
+- Added CTest target `backend_scim_routes_test` and CMake target `endoriumfort_backend_scim_routes_tests`.
+
+### Vault Encryption (AES-256-GCM)
+- Implemented at-rest encryption for resource credentials using **AES-256-GCM**.
+- Added `crypto::aes256_encrypt()` and `crypto::aes256_decrypt()` helpers in `backend/src/crypto.h` with support for:
+  - 256-bit encryption key sourced from `ENDORIUMFORT_VAULT_KEY` environment variable (hex-encoded 64 chars / 32 bytes)
+  - unique IV (initialization vector) per credential, included in ciphertext format: `aes256:v1:iv:tag:ciphertext` (all hex)
+  - backward-compatible plaintext fallback when key is not configured
+  - seamless decryption of legacy plaintext credentials (key is optional)
+- Modified `AppContext::load_resources_from_db()` to decrypt `httpPassword` and `sshPassword` on resource load.
+- Modified `AppContext::insert_resource()` and `AppContext::update_resource_db()` to encrypt passwords before persistence.
+- Added vault encryption test coverage in `backend/tests/utils_test.cc`.
+- Updated README with encryption setup guide and behavior documentation.
+- No database schema changes required; encryption is transparent at the application layer.
+
+### Rate Limiting & Brute-Force Protection
+- Implemented dual-track rate limiting to protect against brute-force attacks on authentication endpoints.
+- Added **username-based rate limiting**: tracks failed attempts per username across a 5-minute sliding window (max 10 attempts).
+- Added **IP-based rate limiting**: tracks failed attempts per source IP across a 5-minute sliding window (max 10 attempts), protecting against distributed attacks.
+- Implemented **exponential backoff**:
+  - 10 failed attempts: 30-second lockout
+  - 20 failed attempts: 5-minute lockout
+  - 30+ failed attempts: 30-minute lockout
+- Added `AppContext::record_failed_login_attempt()` to increment failure counters and apply exponential backoff delays.
+- Added `AppContext::is_login_blocked()` to check if an IP/user is currently in a temporary block period.
+- Added `AppContext::clear_login_attempts()` to reset counters on successful login, enabling immediate re-use.
+- Enhanced `RateLimitEntry` structure with `consecutive_failures`, `last_failure_time`, and `block_until` fields for tracking block state.
+- Updated `AppContext::check_rate_limit()` to respect temporary block periods (exponential backoff).
+- Added `get_client_ip()` utility in `backend/src/utils.h` to extract client IP from requests, respecting `X-Forwarded-For` header for reverse proxy scenarios.
+- Updated `/api/auth/login` route to:
+  - Extract client IP using `get_client_ip(request)`
+  - Check both username and IP rate limits before authentication
+  - Record failed attempts for both username and IP on password verification failure
+  - Clear both counters on successful login
+  - Emit detailed audit events with rate limit reason (`username_rate_limit` vs `ip_rate_limit`) and IP address
+- Added comprehensive rate limiting test coverage in `backend/tests/scim_routes_test.cc`:
+  - username-based rate limiting with 10 attempts threshold
+  - IP-based rate limiting with cross-username attack scenarios
+  - exponential backoff blocking during rate limit lockout
+  - successful login clearing both username and IP attempt counters
+- All rate limit events emitted to audit trail with type `auth.login.rate_limited` for security monitoring.
+
+### CSP Headers & Security Hardening
+- Strengthened global backend security middleware in `backend/src/security_middleware.h`.
+- Expanded `Content-Security-Policy` with explicit hardening directives (`base-uri 'self'`, `object-src 'none'`, `frame-ancestors 'self'`, `form-action 'self'`, `worker-src 'self' blob:`).
+- Added cross-origin isolation headers:
+  - `Cross-Origin-Opener-Policy: same-origin`
+  - `Cross-Origin-Resource-Policy: same-origin`
+  - `X-Permitted-Cross-Domain-Policies: none`
+- Hardened cache semantics with `Cache-Control: no-store, no-cache, must-revalidate, private`.
+- Updated legacy XSS header handling to `X-XSS-Protection: 0` (modern browser-compatible behavior).
+- Added conditional HSTS support:
+  - emits `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload` when requests are received as HTTPS via proxy headers
+  - intentionally skips HSTS on localhost hosts for safer local development workflows
+- Replaced SCIM hardening-header test stub with real assertions in `backend/tests/scim_routes_test.cc`.
+- Added test coverage for HSTS behavior (enabled in HTTPS proxy mode, disabled on localhost).
+- Updated README with a dedicated hardening section and marked roadmap item `CSP headers & security hardening` as complete.
+
+### Anomaly Detection & Alerting
+- Added correlated anomaly signal tracking in `AppContext` with rolling-window counters and cooldown-based deduplication:
+  - `record_anomaly_signal(...)`
+  - `should_emit_anomaly_signal(...)`
+  - `clear_anomaly_signal(...)`
+- Extended auth flow in `backend/src/routes.cc` to emit `behavior.anomaly.auth_failure_burst` when repeated login failures/rate-limited attempts cross configured thresholds (per username and per source IP).
+- Extended security-alert flow to emit `behavior.anomaly.stale_session` for long-running active sessions before responding from `GET /api/security/alerts`.
+- Added dedicated alert classification mapping:
+  - auth failure burst -> `critical` (`Brute-Force Burst Detected`)
+  - stale session -> `warning` (`Stale Active Session`)
+- Added tunable environment variables for anomaly thresholds/cooldowns:
+  - `ENDORIUMFORT_ALERT_AUTH_WINDOW_SECONDS`
+  - `ENDORIUMFORT_ALERT_AUTH_FAILURE_THRESHOLD`
+  - `ENDORIUMFORT_ALERT_AUTH_IP_THRESHOLD`
+  - `ENDORIUMFORT_ALERT_AUTH_COOLDOWN_SECONDS`
+  - `ENDORIUMFORT_ALERT_STALE_SESSION_SECONDS`
+  - `ENDORIUMFORT_ALERT_STALE_SESSION_COOLDOWN_SECONDS`
+- Added backend integration test file `backend/tests/security_alerts_test.cc` and CTest target `backend_security_alerts_test`.
+- Updated README and marked roadmap item `Anomaly detection & alerting` as complete.
 
 ### Resource Tile UX Refresh
 - Redesigned the access workspace resource tiles to improve readability and reduce truncation under dense metadata.

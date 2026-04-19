@@ -21,7 +21,6 @@ import {
   reportSecurityIncidentEscalation,
   fetchSecurityAlerts,
   fetchSessionDna,
-  fetchResourceCredentials,
   issueEphemeralCredential,
   consumeEphemeralCredential,
   previewSessionRisk,
@@ -32,6 +31,7 @@ import {
   get2FAStatus,
   login,
   logout,
+  startOidcSso,
   setAuthToken,
   setup2FA,
   terminateSession,
@@ -44,8 +44,12 @@ import {
   verify2FA,
   fetchAccessRequests,
   createAccessRequest,
+  createAccessPolicy,
+  createAccessProfile,
   approveAccessRequest,
   denyAccessRequest,
+  deleteAccessPolicy,
+  deleteAccessProfile,
   setContainmentMode,
   fetchRelays,
   fetchRelayConfig,
@@ -57,10 +61,33 @@ import {
   beginWebAuthnRegistration,
   verifyWebAuthnRegistration,
   deleteWebAuthnCredential,
-  setMfaPreference
+  setMfaPreference,
+  fetchAccessPolicies,
+  fetchAccessProfiles,
+  fetchAccessGrants,
+  fetchSessionEvidencePack,
+  getUserAccessProfiles,
+  grantAccessProfile,
+  revokeAccessProfile,
+  updateAccessPolicy,
+  updateAccessProfile,
+  fetchDirectoryProviders,
+  fetchLdapConfig,
+  fetchSsoProviders,
+  fetchSsoConfig,
+  testLdapBind,
+  fetchScimServiceProviderConfig,
+  fetchScimUsers,
+  fetchScimGroups,
+  patchScimUser,
+  fetchItsmProviders,
+  verifyItsmTicket,
+  fetchSiemChannels,
+  forwardSiemEvent
 } from './api.js';
 import { describeAccessOutcome, describeResourcePolicy, normalizeRiskLevel } from './accessPolicy.js';
 import AdminSectionNav from './components/admin/AdminSectionNav.jsx';
+import VncViewerModal from './components/sessions/VncViewerModal.jsx';
 import { EmptyState, InlineAlert, MetricTile, SectionCard, StatusBadge } from './components/ui/primitives.jsx';
 import { useI18n } from './i18n.jsx';
 
@@ -289,6 +316,12 @@ const DEFAULT_SSH_SNIPPETS = [
 const ACCESS_PLAYBOOK_STORAGE_KEY = 'endoriumfort_access_playbooks';
 const SESSION_WATCHLIST_STORAGE_KEY = 'endoriumfort_session_watchlist';
 
+const clampInteger = (value, fallback, min, max) => {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+};
+
 export default function App() {
   const { locale, setLocale, t, raw } = useI18n();
   const [status, setStatus] = useState('loading');
@@ -352,6 +385,8 @@ export default function App() {
     description: '',
     imageUrl: '',
     imageData: '', // base64 locale
+    tagsCsv: '',
+    credentialSource: 'vaulted',
     httpUsername: '',
     httpPassword: '',
     sshUsername: '',
@@ -375,14 +410,97 @@ export default function App() {
   const [editingUserId, setEditingUserId] = useState(null);
   const [selectedUserForAccessScope, setSelectedUserForAccessScope] = useState(null);
   const [userResourceScope, setUserResourceScope] = useState([]);
+  const [userAccessProfiles, setUserAccessProfiles] = useState([]);
   const [loadingAccessScope, setLoadingAccessScope] = useState(false);
   const [accessScopeError, setAccessScopeError] = useState('');
+  const [accessPolicies, setAccessPolicies] = useState([]);
+  const [loadingAccessPolicies, setLoadingAccessPolicies] = useState(false);
+  const [accessPolicyError, setAccessPolicyError] = useState('');
+  const [editingAccessPolicyId, setEditingAccessPolicyId] = useState(null);
+  const [accessPolicyForm, setAccessPolicyForm] = useState({
+    name: '',
+    description: '',
+    identityPattern: '',
+    groupName: '',
+    role: '',
+    resourceTagsCsv: '',
+    riskLevel: 'any',
+    ticketRequired: false,
+    requireJustification: false,
+    approvalMode: 'inherit',
+    mfaRequirement: 'any',
+    timeWindow: 'any',
+    maxDurationSeconds: '3600',
+    routingConstraint: 'any',
+    enabled: true
+  });
+  const [accessProfiles, setAccessProfiles] = useState([]);
+  const [loadingAccessProfiles, setLoadingAccessProfiles] = useState(false);
+  const [accessProfileError, setAccessProfileError] = useState('');
+  const [editingAccessProfileId, setEditingAccessProfileId] = useState(null);
+  const [accessProfileForm, setAccessProfileForm] = useState({
+    name: '',
+    description: '',
+    resourceTagsCsv: '',
+    resourceIdsCsv: '',
+    policyId: '0'
+  });
+  const [accessGrants, setAccessGrants] = useState([]);
+  const [loadingAccessGrants, setLoadingAccessGrants] = useState(false);
+  const [accessGrantError, setAccessGrantError] = useState('');
+  const [enterpriseLoading, setEnterpriseLoading] = useState(false);
+  const [enterpriseError, setEnterpriseError] = useState('');
+  const [enterpriseDirectoryProviders, setEnterpriseDirectoryProviders] = useState([]);
+  const [enterpriseLdapConfig, setEnterpriseLdapConfig] = useState(null);
+  const [enterpriseLdapTestUsername, setEnterpriseLdapTestUsername] = useState('');
+  const [enterpriseLdapTestPassword, setEnterpriseLdapTestPassword] = useState('');
+  const [enterpriseLdapTesting, setEnterpriseLdapTesting] = useState(false);
+  const [enterpriseLdapTestResult, setEnterpriseLdapTestResult] = useState(null);
+  const [enterpriseSsoProviders, setEnterpriseSsoProviders] = useState([]);
+  const [enterpriseSsoProvider, setEnterpriseSsoProvider] = useState('');
+  const [enterpriseSsoConfig, setEnterpriseSsoConfig] = useState(null);
+  const [enterpriseScimConfig, setEnterpriseScimConfig] = useState(null);
+  const [enterpriseScimUsers, setEnterpriseScimUsers] = useState([]);
+  const [enterpriseScimGroups, setEnterpriseScimGroups] = useState([]);
+  const [enterpriseScimMeta, setEnterpriseScimMeta] = useState({
+    users: { totalResults: 0, startIndex: 1, itemsPerPage: 0 },
+    groups: { totalResults: 0, startIndex: 1, itemsPerPage: 0 }
+  });
+  const [enterpriseScimFilter, setEnterpriseScimFilter] = useState('');
+  const [enterpriseScimStartIndex, setEnterpriseScimStartIndex] = useState('1');
+  const [enterpriseScimCount, setEnterpriseScimCount] = useState('20');
+  const [enterpriseScimLoading, setEnterpriseScimLoading] = useState(false);
+  const [enterpriseScimError, setEnterpriseScimError] = useState('');
+  const [enterpriseScimPatchId, setEnterpriseScimPatchId] = useState('');
+  const [enterpriseScimPatchUsername, setEnterpriseScimPatchUsername] = useState('');
+  const [enterpriseScimPatchRole, setEnterpriseScimPatchRole] = useState('');
+  const [enterpriseScimPatchActive, setEnterpriseScimPatchActive] = useState('unchanged');
+  const [enterpriseScimPatchLoading, setEnterpriseScimPatchLoading] = useState(false);
+  const [enterpriseScimPatchResult, setEnterpriseScimPatchResult] = useState('');
+  const [enterpriseItsmProviders, setEnterpriseItsmProviders] = useState([]);
+  const [enterpriseItsmProvider, setEnterpriseItsmProvider] = useState('servicenow');
+  const [enterpriseItsmTicketId, setEnterpriseItsmTicketId] = useState('');
+  const [enterpriseItsmFailMode, setEnterpriseItsmFailMode] = useState('fail-closed');
+  const [enterpriseItsmUnavailable, setEnterpriseItsmUnavailable] = useState(false);
+  const [enterpriseItsmLoading, setEnterpriseItsmLoading] = useState(false);
+  const [enterpriseItsmResult, setEnterpriseItsmResult] = useState(null);
+  const [enterpriseSiemChannels, setEnterpriseSiemChannels] = useState([]);
+  const [enterpriseSiemChannel, setEnterpriseSiemChannel] = useState('json_webhook');
+  const [enterpriseSiemEventType, setEnterpriseSiemEventType] = useState('security.event.test');
+  const [enterpriseSiemDeliveryMode, setEnterpriseSiemDeliveryMode] = useState('fail-open');
+  const [enterpriseSiemSimulateFailure, setEnterpriseSiemSimulateFailure] = useState(false);
+  const [enterpriseSiemLoading, setEnterpriseSiemLoading] = useState(false);
+  const [enterpriseSiemResult, setEnterpriseSiemResult] = useState(null);
+  const [sessionEvidencePack, setSessionEvidencePack] = useState(null);
+  const [sessionEvidenceLoading, setSessionEvidenceLoading] = useState(false);
+  const [sessionEvidenceError, setSessionEvidenceError] = useState('');
   const [route, setRoute] = useState(() =>
     window.location.pathname ? window.location.pathname : '/'
   );
   const [adminSection, setAdminSection] = useState('resources');
   const [mainTab, setMainTab] = useState('sessions');
   const [inlineWebResource, setInlineWebResource] = useState(null);
+  const [vncViewerSession, setVncViewerSession] = useState(null);
   const [accessPromptResource, setAccessPromptResource] = useState(null);
   const [accessPromptReason, setAccessPromptReason] = useState('');
   const [accessPromptTicketId, setAccessPromptTicketId] = useState('');
@@ -727,6 +845,25 @@ export default function App() {
         badgeTone: pendingRequests ? 'active' : 'ok'
       },
       {
+        id: 'jit',
+        label: 'JIT',
+        hint: 'Policies, profiles and grants',
+        badge: String(accessGrants.length),
+        badgeTone: loadingAccessGrants ? 'loading' : 'ok'
+      },
+      {
+        id: 'enterprise',
+        label: 'Enterprise IAM',
+        hint: 'LDAP/AD, SSO, SCIM, ITSM, SIEM',
+        badge: String(
+          enterpriseDirectoryProviders.length +
+          enterpriseSsoProviders.length +
+          enterpriseItsmProviders.length +
+          enterpriseSiemChannels.length
+        ),
+        badgeTone: enterpriseLoading ? 'loading' : 'ok'
+      },
+      {
         id: 'security',
         label: t('admin.security'),
         hint: t('admin.mfaAndPosture'),
@@ -734,7 +871,7 @@ export default function App() {
         badgeTone: adminsWithoutMfa ? 'loading' : 'ok'
       }
     ];
-  }, [accessRequests, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, t, users.length]);
+  }, [accessGrants.length, accessRequests, enterpriseDirectoryProviders.length, enterpriseItsmProviders.length, enterpriseLoading, enterpriseSiemChannels.length, enterpriseSsoProviders.length, loadingAccessGrants, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, t, users.length]);
 
   const activeAdminSection = useMemo(
     () => adminSections.find((section) => section.id === adminSection) || null,
@@ -958,6 +1095,87 @@ export default function App() {
       active = false;
     };
   }, [auth.token, canManagePlatform]);
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform) {
+      setAccessPolicies([]);
+      setLoadingAccessPolicies(false);
+      return;
+    }
+    let active = true;
+    setLoadingAccessPolicies(true);
+    fetchAccessPolicies()
+      .then((data) => {
+        if (!active) return;
+        setAccessPolicies(Array.isArray(data.items) ? data.items : []);
+        setAccessPolicyError('');
+      })
+      .catch((error) => {
+        if (!active) return;
+        setAccessPolicyError(error.message || 'Unable to load access policies');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoadingAccessPolicies(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth.token, canManagePlatform]);
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform) {
+      setAccessProfiles([]);
+      setLoadingAccessProfiles(false);
+      return;
+    }
+    let active = true;
+    setLoadingAccessProfiles(true);
+    fetchAccessProfiles()
+      .then((data) => {
+        if (!active) return;
+        setAccessProfiles(Array.isArray(data.items) ? data.items : []);
+        setAccessProfileError('');
+      })
+      .catch((error) => {
+        if (!active) return;
+        setAccessProfileError(error.message || 'Unable to load access profiles');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoadingAccessProfiles(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth.token, canManagePlatform]);
+
+  useEffect(() => {
+    if (!auth.token) {
+      setAccessGrants([]);
+      setLoadingAccessGrants(false);
+      return;
+    }
+    let active = true;
+    setLoadingAccessGrants(true);
+    fetchAccessGrants()
+      .then((data) => {
+        if (!active) return;
+        setAccessGrants(Array.isArray(data.items) ? data.items : []);
+        setAccessGrantError('');
+      })
+      .catch((error) => {
+        if (!active) return;
+        setAccessGrantError(error.message || 'Unable to load access grants');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoadingAccessGrants(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth.token]);
 
   useEffect(() => {
     if (!auth.token || !canManagePlatform) {
@@ -1490,6 +1708,19 @@ export default function App() {
     setUserForm((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
   };
 
+  const onAccessPolicyFieldChange = (event) => {
+    const { name, value, type, checked } = event.target;
+    setAccessPolicyForm((prev) => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value
+    }));
+  };
+
+  const onAccessProfileFieldChange = (event) => {
+    const { name, value } = event.target;
+    setAccessProfileForm((prev) => ({ ...prev, [name]: value }));
+  };
+
   const onLogin = async (event) => {
     event.preventDefault();
     try {
@@ -1552,6 +1783,11 @@ export default function App() {
     } catch (error) {
       setAuthError(error.message || t('auth.loginFailed'));
     }
+  };
+
+  const onStartSsoLogin = () => {
+    setAuthError('');
+    startOidcSso({ postLoginRedirect: '/' });
   };
 
   const onLoginWithPasskey = async () => {
@@ -1704,6 +1940,20 @@ export default function App() {
           setAuditItems(items);
         }
       }
+      try {
+        const grantsData = await fetchAccessGrants();
+        setAccessGrants(Array.isArray(grantsData?.items) ? grantsData.items : []);
+      } catch (_) {}
+      if (canManagePlatform) {
+        try {
+          const [policyData, profileData] = await Promise.all([
+            fetchAccessPolicies(),
+            fetchAccessProfiles()
+          ]);
+          setAccessPolicies(Array.isArray(policyData?.items) ? policyData.items : []);
+          setAccessProfiles(Array.isArray(profileData?.items) ? profileData.items : []);
+        } catch (_) {}
+      }
       setSessionError('');
       setResourceError('');
       setUserError('');
@@ -1714,6 +1964,303 @@ export default function App() {
       setQuickRefreshing(false);
     }
   };
+
+  const loadEnterpriseFoundations = async () => {
+    setEnterpriseLoading(true);
+    setEnterpriseError('');
+    try {
+      const [directoryData, ldapConfigData, providersData, configData, scimConfigData, itsmData, siemData] = await Promise.all([
+        fetchDirectoryProviders(),
+        fetchLdapConfig(),
+        fetchSsoProviders(),
+        fetchSsoConfig(),
+        fetchScimServiceProviderConfig(),
+        fetchItsmProviders(),
+        fetchSiemChannels()
+      ]);
+
+      const nextDirectoryProviders = Array.isArray(directoryData?.items) ? directoryData.items : [];
+      const nextSsoProviders = Array.isArray(providersData?.items) ? providersData.items : [];
+      const nextItsmProviders = Array.isArray(itsmData?.items) ? itsmData.items : [];
+      const nextSiemChannels = Array.isArray(siemData?.items) ? siemData.items : [];
+
+      setEnterpriseDirectoryProviders(nextDirectoryProviders);
+      setEnterpriseLdapConfig(ldapConfigData?.config || null);
+      setEnterpriseSsoProviders(nextSsoProviders);
+      setEnterpriseSsoConfig(configData || null);
+      setEnterpriseScimConfig(scimConfigData || null);
+      setEnterpriseItsmProviders(nextItsmProviders);
+      setEnterpriseSiemChannels(nextSiemChannels);
+
+      const defaultSsoProvider = String(configData?.defaultProvider || nextSsoProviders[0]?.id || '');
+      setEnterpriseSsoProvider((prev) =>
+        prev && nextSsoProviders.some((item) => String(item.id) === prev)
+          ? prev
+          : defaultSsoProvider
+      );
+
+      const defaultItsmProvider = String(nextItsmProviders[0]?.id || 'servicenow');
+      setEnterpriseItsmProvider((prev) =>
+        nextItsmProviders.some((item) => String(item.id) === prev)
+          ? prev
+          : defaultItsmProvider
+      );
+
+      const defaultSiemChannel = String(nextSiemChannels[0]?.id || 'json_webhook');
+      setEnterpriseSiemChannel((prev) =>
+        nextSiemChannels.some((item) => String(item.id) === prev)
+          ? prev
+          : defaultSiemChannel
+      );
+
+      const deliveryMode = String(siemData?.defaultDeliveryMode || '').toLowerCase();
+      if (deliveryMode === 'fail-open' || deliveryMode === 'fail-closed') {
+        setEnterpriseSiemDeliveryMode(deliveryMode);
+      }
+      setEnterpriseError('');
+    } catch (error) {
+      setEnterpriseError(error.message || (locale === 'fr'
+        ? 'Impossible de charger les fondations Enterprise IAM.'
+        : 'Unable to load enterprise IAM foundations.'));
+    } finally {
+      setEnterpriseLoading(false);
+    }
+  };
+
+  const loadEnterpriseScimDirectory = async (override = {}) => {
+    const startIndex = clampInteger(override.startIndex ?? enterpriseScimStartIndex, 1, 1, 1000000);
+    const count = clampInteger(override.count ?? enterpriseScimCount, 20, 0, 200);
+    const filter = String(override.filter ?? enterpriseScimFilter).trim();
+    const params = { startIndex, count };
+    if (filter) {
+      params.filter = filter;
+    }
+
+    setEnterpriseScimLoading(true);
+    setEnterpriseScimError('');
+    try {
+      const [usersData, groupsData] = await Promise.all([
+        fetchScimUsers(params),
+        fetchScimGroups(params)
+      ]);
+      setEnterpriseScimUsers(Array.isArray(usersData?.Resources) ? usersData.Resources : []);
+      setEnterpriseScimGroups(Array.isArray(groupsData?.Resources) ? groupsData.Resources : []);
+      setEnterpriseScimMeta({
+        users: {
+          totalResults: Number(usersData?.totalResults) || 0,
+          startIndex: Number(usersData?.startIndex) || startIndex,
+          itemsPerPage: Number(usersData?.itemsPerPage) || 0
+        },
+        groups: {
+          totalResults: Number(groupsData?.totalResults) || 0,
+          startIndex: Number(groupsData?.startIndex) || startIndex,
+          itemsPerPage: Number(groupsData?.itemsPerPage) || 0
+        }
+      });
+      setEnterpriseScimStartIndex(String(startIndex));
+      setEnterpriseScimCount(String(count));
+    } catch (error) {
+      setEnterpriseScimError(error.message || (locale === 'fr'
+        ? 'Impossible d’interroger le répertoire SCIM.'
+        : 'Unable to query SCIM directory.'));
+    } finally {
+      setEnterpriseScimLoading(false);
+    }
+  };
+
+  const refreshEnterpriseWorkspace = async () => {
+    await loadEnterpriseFoundations();
+    await loadEnterpriseScimDirectory();
+  };
+
+  const onStartEnterpriseSso = () => {
+    const selectedProvider = String(enterpriseSsoProvider || enterpriseSsoConfig?.defaultProvider || '');
+    startOidcSso({
+      provider: selectedProvider || undefined,
+      postLoginRedirect: '/'
+    });
+  };
+
+  const onSubmitEnterpriseLdapTest = async (event) => {
+    event.preventDefault();
+    const username = String(enterpriseLdapTestUsername || '').trim();
+    const password = String(enterpriseLdapTestPassword || '');
+    if (!username || !password) {
+      setEnterpriseLdapTestResult({
+        error: true,
+        message: locale === 'fr'
+          ? 'Renseignez un utilisateur et un mot de passe LDAP.'
+          : 'Provide LDAP username and password.'
+      });
+      return;
+    }
+
+    setEnterpriseLdapTesting(true);
+    try {
+      const payload = await testLdapBind({ username, password });
+      setEnterpriseLdapTestResult(payload || null);
+    } catch (error) {
+      setEnterpriseLdapTestResult({
+        error: true,
+        message: error.message || (locale === 'fr'
+          ? 'Le test de bind LDAP a échoué.'
+          : 'LDAP bind test failed.')
+      });
+    } finally {
+      setEnterpriseLdapTesting(false);
+    }
+  };
+
+  const onSubmitEnterpriseScimFilter = async (event) => {
+    event.preventDefault();
+    await loadEnterpriseScimDirectory();
+  };
+
+  const onSubmitEnterpriseScimPatch = async (event) => {
+    event.preventDefault();
+    const target = String(enterpriseScimPatchId || '').trim();
+    if (!target) {
+      setEnterpriseScimPatchResult(locale === 'fr'
+        ? 'Renseignez un identifiant SCIM (ID ou userName).'
+        : 'Provide a SCIM target (id or userName).');
+      return;
+    }
+
+    const operations = [];
+    const nextUserName = String(enterpriseScimPatchUsername || '').trim();
+    const nextRole = String(enterpriseScimPatchRole || '').trim();
+    if (nextUserName) {
+      operations.push({ op: 'replace', path: 'userName', value: nextUserName });
+    }
+    if (nextRole) {
+      operations.push({ op: 'replace', path: 'role', value: nextRole });
+    }
+    if (enterpriseScimPatchActive === 'active') {
+      operations.push({ op: 'replace', path: 'active', value: true });
+    }
+    if (enterpriseScimPatchActive === 'inactive') {
+      operations.push({ op: 'replace', path: 'active', value: false });
+    }
+
+    if (!operations.length) {
+      setEnterpriseScimPatchResult(locale === 'fr'
+        ? 'Aucune opération PATCH à appliquer.'
+        : 'No PATCH operation to apply.');
+      return;
+    }
+
+    setEnterpriseScimPatchLoading(true);
+    try {
+      const response = await patchScimUser(target, operations);
+      if (response && response.userName) {
+        setEnterpriseScimPatchResult(locale === 'fr'
+          ? `Utilisateur SCIM mis à jour: ${response.userName}`
+          : `SCIM user updated: ${response.userName}`);
+      } else {
+        setEnterpriseScimPatchResult(locale === 'fr'
+          ? 'Patch SCIM appliqué avec succès.'
+          : 'SCIM patch applied successfully.');
+      }
+      await loadEnterpriseScimDirectory();
+    } catch (error) {
+      setEnterpriseScimPatchResult(error.message || (locale === 'fr'
+        ? 'Le patch SCIM a échoué.'
+        : 'SCIM patch failed.'));
+    } finally {
+      setEnterpriseScimPatchLoading(false);
+    }
+  };
+
+  const onSubmitEnterpriseItsmVerification = async (event) => {
+    event.preventDefault();
+    const ticketId = String(enterpriseItsmTicketId || '').trim();
+    if (!ticketId) {
+      setEnterpriseItsmResult({
+        error: true,
+        message: locale === 'fr' ? 'Renseignez un ticket ITSM.' : 'Provide an ITSM ticket id.'
+      });
+      return;
+    }
+    setEnterpriseItsmLoading(true);
+    try {
+      const payload = await verifyItsmTicket({
+        provider: enterpriseItsmProvider,
+        ticketId,
+        failMode: enterpriseItsmFailMode,
+        simulateUnavailable: !!enterpriseItsmUnavailable
+      });
+      setEnterpriseItsmResult(payload || null);
+    } catch (error) {
+      setEnterpriseItsmResult({
+        error: true,
+        message: error.message || (locale === 'fr' ? 'Vérification ITSM impossible.' : 'Unable to verify ITSM ticket.')
+      });
+    } finally {
+      setEnterpriseItsmLoading(false);
+    }
+  };
+
+  const onSubmitEnterpriseSiemDispatch = async (event) => {
+    event.preventDefault();
+    const eventType = String(enterpriseSiemEventType || '').trim();
+    if (!eventType) {
+      setEnterpriseSiemResult({
+        error: true,
+        message: locale === 'fr' ? 'Renseignez un type d’événement SIEM.' : 'Provide a SIEM event type.'
+      });
+      return;
+    }
+    setEnterpriseSiemLoading(true);
+    try {
+      const payload = await forwardSiemEvent({
+        channel: enterpriseSiemChannel,
+        eventType,
+        deliveryMode: enterpriseSiemDeliveryMode,
+        simulateFailure: !!enterpriseSiemSimulateFailure
+      });
+      setEnterpriseSiemResult(payload || null);
+    } catch (error) {
+      setEnterpriseSiemResult({
+        error: true,
+        message: error.message || (locale === 'fr' ? 'Forward SIEM impossible.' : 'Unable to forward SIEM event.')
+      });
+    } finally {
+      setEnterpriseSiemLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform) {
+      setEnterpriseLoading(false);
+      setEnterpriseError('');
+      setEnterpriseDirectoryProviders([]);
+      setEnterpriseLdapConfig(null);
+      setEnterpriseLdapTestUsername('');
+      setEnterpriseLdapTestPassword('');
+      setEnterpriseLdapTestResult(null);
+      setEnterpriseSsoProviders([]);
+      setEnterpriseSsoProvider('');
+      setEnterpriseSsoConfig(null);
+      setEnterpriseScimConfig(null);
+      setEnterpriseScimUsers([]);
+      setEnterpriseScimGroups([]);
+      setEnterpriseScimMeta({
+        users: { totalResults: 0, startIndex: 1, itemsPerPage: 0 },
+        groups: { totalResults: 0, startIndex: 1, itemsPerPage: 0 }
+      });
+      setEnterpriseScimError('');
+      setEnterpriseScimPatchResult('');
+      setEnterpriseItsmProviders([]);
+      setEnterpriseItsmResult(null);
+      setEnterpriseSiemChannels([]);
+      setEnterpriseSiemResult(null);
+      return;
+    }
+    if (adminSection !== 'enterprise') {
+      return;
+    }
+    refreshEnterpriseWorkspace().catch(() => {});
+  }, [adminSection, auth.token, canManagePlatform]);
 
   const onTerminate = async (sessionId) => {
     try {
@@ -1946,6 +2493,12 @@ export default function App() {
       return;
     }
 
+    if ((resource.credentialSource || session.credentialSource || 'vaulted') !== 'vaulted') {
+      setAutoConnectSessionId(session.id);
+      setTerminalInfo('Brokered session ready. Credentials stay on the bastion.');
+      return;
+    }
+
     setTerminalInfo(t('feedback.autoReconnectAttempt'));
 
     try {
@@ -1957,16 +2510,7 @@ export default function App() {
         setTerminalInfo(t('feedback.vaultCredentialsLoaded'));
       }
     } catch (_) {
-      try {
-        const creds = await fetchResourceCredentials(resource.id);
-        if (creds.sshPassword) {
-          setSshPassword(creds.sshPassword);
-          setAutoConnectSessionId(session.id);
-          setTerminalInfo(t('feedback.vaultCredentialsLoaded'));
-        }
-      } catch (_) {
-        setTerminalInfo(t('feedback.automaticCredentialRecoveryFailed'));
-      }
+      setTerminalInfo(t('feedback.automaticCredentialRecoveryFailed'));
     }
   };
 
@@ -2141,7 +2685,7 @@ export default function App() {
 
   const isAgentTunnelProtocol = (protocol) => {
     const normalized = String(protocol || '').toLowerCase();
-    return normalized === 'agent' || normalized === 'rdp' || normalized === 'vnc';
+    return normalized === 'agent' || normalized === 'rdp';
   };
 
   const resolveAgentInstallGuide = () => {
@@ -2237,11 +2781,48 @@ export default function App() {
       return false;
     }
 
+    const protocol = String(resource.protocol || '').toLowerCase();
+
     // Handle web resources via proxy
-    if (resource.protocol === 'http' || resource.protocol === 'https') {
+    if (protocol === 'http' || protocol === 'https') {
       setInlineWebResource(resource);
+      setVncViewerSession(null);
       setMainTab('sessions');
       return true;
+    }
+
+    if (protocol === 'vnc') {
+      try {
+        const payload = {
+          resourceId: resource.id,
+          target: resource.target,
+          user: resource.sshUsername || auth.user,
+          protocol: resource.protocol,
+          port: resource.port,
+          justification: (accessMeta.justification || '').trim(),
+          ticketId: (accessMeta.ticketId || '').trim(),
+          purpose: (accessMeta.purpose || '').trim(),
+          purposeEvidence: (accessMeta.purposeEvidence || '').trim(),
+          accessRequestId: accessMeta.accessRequestId || undefined
+        };
+        const created = await createSession(payload);
+        setSessions((prev) => [created, ...prev]);
+        if (created?.accessGrantId) {
+          fetchAccessGrants()
+            .then((data) => {
+              setAccessGrants(Array.isArray(data?.items) ? data.items : []);
+            })
+            .catch(() => {});
+        }
+        setSessionError('');
+        setInlineWebResource(null);
+        setVncViewerSession(created);
+        setMainTab('sessions');
+        return true;
+      } catch (error) {
+        setSessionError(error.message || 'Unable to create session');
+        return false;
+      }
     }
 
     // Handle protocols that should use local TCP tunnel through the agent
@@ -2269,12 +2850,19 @@ export default function App() {
       };
       const created = await createSession(payload);
       setSessions((prev) => [created, ...prev]);
+      if (created?.accessGrantId) {
+        fetchAccessGrants()
+          .then((data) => {
+            setAccessGrants(Array.isArray(data?.items) ? data.items : []);
+          })
+          .catch(() => {});
+      }
       setSessionError('');
       setInlineWebResource(null);
       openTerminal(created);
 
-      // Auto-inject credentials if stored in the vault
-      if (resource.hasCredentials) {
+      // Auto-inject credentials only for vaulted mode.
+      if (resource.hasCredentials && (resource.credentialSource || 'vaulted') === 'vaulted') {
         try {
           const lease = await issueEphemeralCredential(resource.id);
           const creds = await consumeEphemeralCredential(lease.leaseId);
@@ -2284,18 +2872,12 @@ export default function App() {
             setAutoConnectSessionId(created.id);
           }
         } catch (_) {
-          // Fallback to static vault credentials if ephemeral lease fails.
-          try {
-            const creds = await fetchResourceCredentials(resource.id);
-            if (creds.sshPassword) {
-              setSshPassword(creds.sshPassword);
-              setMainTab('sessions');
-              setAutoConnectSessionId(created.id);
-            }
-          } catch (_) {
-            // Silently fallback to manual password entry
-          }
+          // JIT-first: if lease issuance fails, fall back to manual password entry.
         }
+      } else if ((resource.credentialSource || 'vaulted') !== 'vaulted') {
+        setSshPassword('');
+        setMainTab('sessions');
+        setAutoConnectSessionId(created.id);
       }
       return true;
     } catch (error) {
@@ -2347,7 +2929,7 @@ export default function App() {
       return;
     }
 
-    if (resource.requireAccessJustification || (containmentEnabled && sessionBackedProtocol)) {
+    if (sessionBackedProtocol) {
       const existingPlaybook =
         accessPlaybooks.find((item) => Number(item.resourceId) === Number(resource.id)) || null;
       setAccessPromptMode('connect');
@@ -2361,6 +2943,16 @@ export default function App() {
       return;
     }
     await connectToResource(resource);
+  };
+
+  const openLiveSession = async (session) => {
+    const protocol = String(session?.protocol || '').toLowerCase();
+    if (protocol === 'vnc') {
+      setVncViewerSession(session);
+      setMainTab('sessions');
+      return;
+    }
+    await openTerminal(session);
   };
 
   const applyCurrentAccessPlaybook = () => {
@@ -2559,6 +3151,8 @@ export default function App() {
       description: resourceForm.description.trim(),
       imageUrl: resourceForm.imageUrl.trim(),
       imageData: resourceForm.imageData || '',
+      tagsCsv: resourceForm.tagsCsv.trim(),
+      credentialSource: resourceForm.credentialSource || 'vaulted',
       httpUsername: resourceForm.httpUsername.trim(),
       httpPassword: resourceForm.httpPassword,
       sshUsername: resourceForm.sshUsername.trim(),
@@ -2589,6 +3183,9 @@ export default function App() {
         tunnelTicketRateLimitMaxAttempts: '0',
         description: '',
         imageUrl: '',
+        imageData: '',
+        tagsCsv: '',
+        credentialSource: 'vaulted',
         httpUsername: '',
         httpPassword: '',
         sshUsername: '',
@@ -2619,6 +3216,8 @@ export default function App() {
       description: resource.description || '',
       imageUrl: resource.imageUrl || '',
       imageData: resource.imageData || '',
+      tagsCsv: resource.tagsCsv || '',
+      credentialSource: resource.credentialSource || 'vaulted',
       httpUsername: resource.httpUsername || '',
       httpPassword: '',
       sshUsername: resource.sshUsername || '',
@@ -2637,6 +3236,168 @@ export default function App() {
       setResources((prev) => prev.filter((item) => item.id !== resourceId));
     } catch (error) {
       setResourceError(error.message || t('feedback.unableDeleteResource'));
+    }
+  };
+
+  const resetAccessPolicyForm = () => {
+    setEditingAccessPolicyId(null);
+    setAccessPolicyForm({
+      name: '',
+      description: '',
+      identityPattern: '',
+      groupName: '',
+      role: '',
+      resourceTagsCsv: '',
+      riskLevel: 'any',
+      ticketRequired: false,
+      requireJustification: false,
+      approvalMode: 'inherit',
+      mfaRequirement: 'any',
+      timeWindow: 'any',
+      maxDurationSeconds: '3600',
+      routingConstraint: 'any',
+      enabled: true
+    });
+  };
+
+  const onSubmitAccessPolicy = async (event) => {
+    event.preventDefault();
+    const payload = {
+      name: accessPolicyForm.name.trim(),
+      description: accessPolicyForm.description.trim(),
+      identityPattern: accessPolicyForm.identityPattern.trim(),
+      groupName: accessPolicyForm.groupName.trim(),
+      role: accessPolicyForm.role.trim(),
+      resourceTagsCsv: accessPolicyForm.resourceTagsCsv.trim(),
+      riskLevel: accessPolicyForm.riskLevel || 'any',
+      ticketRequired: !!accessPolicyForm.ticketRequired,
+      requireJustification: !!accessPolicyForm.requireJustification,
+      approvalMode: accessPolicyForm.approvalMode || 'inherit',
+      mfaRequirement: accessPolicyForm.mfaRequirement || 'any',
+      timeWindow: accessPolicyForm.timeWindow.trim() || 'any',
+      maxDurationSeconds: Number.parseInt(accessPolicyForm.maxDurationSeconds, 10) || 3600,
+      routingConstraint: accessPolicyForm.routingConstraint || 'any',
+      enabled: !!accessPolicyForm.enabled
+    };
+    try {
+      const saved = editingAccessPolicyId
+        ? await updateAccessPolicy(editingAccessPolicyId, payload)
+        : await createAccessPolicy(payload);
+      setAccessPolicies((prev) => {
+        if (editingAccessPolicyId) {
+          return prev.map((item) => (item.id === editingAccessPolicyId ? saved : item));
+        }
+        return [...prev, saved];
+      });
+      setAccessPolicyError('');
+      resetAccessPolicyForm();
+    } catch (error) {
+      setAccessPolicyError(error.message || 'Unable to save access policy');
+    }
+  };
+
+  const onEditAccessPolicy = (policy) => {
+    setEditingAccessPolicyId(policy.id);
+    setAccessPolicyForm({
+      name: policy.name || '',
+      description: policy.description || '',
+      identityPattern: policy.identityPattern || '',
+      groupName: policy.groupName || '',
+      role: policy.role || '',
+      resourceTagsCsv: policy.resourceTagsCsv || '',
+      riskLevel: policy.riskLevel || 'any',
+      ticketRequired: !!policy.ticketRequired,
+      requireJustification: !!policy.requireJustification,
+      approvalMode: policy.approvalMode || 'inherit',
+      mfaRequirement: policy.mfaRequirement || 'any',
+      timeWindow: policy.timeWindow || 'any',
+      maxDurationSeconds: String(policy.maxDurationSeconds || 3600),
+      routingConstraint: policy.routingConstraint || 'any',
+      enabled: !!policy.enabled
+    });
+  };
+
+  const onDeleteAccessPolicy = async (policyId) => {
+    try {
+      await deleteAccessPolicy(policyId);
+      setAccessPolicies((prev) => prev.filter((item) => item.id !== policyId));
+      setAccessPolicyError('');
+      if (editingAccessPolicyId === policyId) resetAccessPolicyForm();
+    } catch (error) {
+      setAccessPolicyError(error.message || 'Unable to delete access policy');
+    }
+  };
+
+  const resetAccessProfileForm = () => {
+    setEditingAccessProfileId(null);
+    setAccessProfileForm({
+      name: '',
+      description: '',
+      resourceTagsCsv: '',
+      resourceIdsCsv: '',
+      policyId: '0'
+    });
+  };
+
+  const onSubmitAccessProfile = async (event) => {
+    event.preventDefault();
+    const payload = {
+      name: accessProfileForm.name.trim(),
+      description: accessProfileForm.description.trim(),
+      resourceTagsCsv: accessProfileForm.resourceTagsCsv.trim(),
+      resourceIdsCsv: accessProfileForm.resourceIdsCsv.trim(),
+      policyId: Number.parseInt(accessProfileForm.policyId, 10) || 0
+    };
+    try {
+      const saved = editingAccessProfileId
+        ? await updateAccessProfile(editingAccessProfileId, payload)
+        : await createAccessProfile(payload);
+      setAccessProfiles((prev) => {
+        if (editingAccessProfileId) {
+          return prev.map((item) => (item.id === editingAccessProfileId ? saved : item));
+        }
+        return [...prev, saved];
+      });
+      setAccessProfileError('');
+      resetAccessProfileForm();
+    } catch (error) {
+      setAccessProfileError(error.message || 'Unable to save access profile');
+    }
+  };
+
+  const onEditAccessProfile = (profile) => {
+    setEditingAccessProfileId(profile.id);
+    setAccessProfileForm({
+      name: profile.name || '',
+      description: profile.description || '',
+      resourceTagsCsv: profile.resourceTagsCsv || '',
+      resourceIdsCsv: profile.resourceIdsCsv || '',
+      policyId: String(profile.policyId || 0)
+    });
+  };
+
+  const onDeleteAccessProfile = async (profileId) => {
+    try {
+      await deleteAccessProfile(profileId);
+      setAccessProfiles((prev) => prev.filter((item) => item.id !== profileId));
+      setAccessProfileError('');
+      if (editingAccessProfileId === profileId) resetAccessProfileForm();
+    } catch (error) {
+      setAccessProfileError(error.message || 'Unable to delete access profile');
+    }
+  };
+
+  const onOpenSessionEvidence = async (sessionId) => {
+    setSessionEvidenceLoading(true);
+    setSessionEvidencePack(null);
+    setSessionEvidenceError('');
+    try {
+      const data = await fetchSessionEvidencePack(sessionId);
+      setSessionEvidencePack(data);
+    } catch (error) {
+      setSessionEvidenceError(error.message || 'Unable to load evidence pack');
+    } finally {
+      setSessionEvidenceLoading(false);
     }
   };
 
@@ -2698,8 +3459,12 @@ export default function App() {
     try {
       setLoadingAccessScope(true);
       setSelectedUserForAccessScope(user);
-      const resourceResponse = await getUserResourcePermissions(user.id);
+      const [resourceResponse, profileResponse] = await Promise.all([
+        getUserResourcePermissions(user.id),
+        getUserAccessProfiles(user.id)
+      ]);
       setUserResourceScope(resourceResponse.resourceIds || []);
+      setUserAccessProfiles(profileResponse.profileIds || []);
       setAccessScopeError('');
     } catch (error) {
       setAccessScopeError(error.message || t('feedback.unableLoadAccessScope'));
@@ -2723,6 +3488,25 @@ export default function App() {
       setAccessScopeError('');
     } catch (error) {
       setAccessScopeError(error.message || t('feedback.unableModifyResourceScope'));
+    }
+  };
+
+  const onToggleAccessProfile = async (profileId) => {
+    if (!selectedUserForAccessScope) return;
+    const hasProfile = userAccessProfiles.includes(profileId);
+    try {
+      if (hasProfile) {
+        await revokeAccessProfile(selectedUserForAccessScope.id, profileId);
+        setUserAccessProfiles((prev) => prev.filter((id) => id !== profileId));
+      } else {
+        await grantAccessProfile(selectedUserForAccessScope.id, profileId);
+        setUserAccessProfiles((prev) => [...prev, profileId]);
+      }
+      const refreshedResources = await getUserResourcePermissions(selectedUserForAccessScope.id);
+      setUserResourceScope(refreshedResources.resourceIds || []);
+      setAccessScopeError('');
+    } catch (error) {
+      setAccessScopeError(error.message || 'Unable to modify access profile assignment');
     }
   };
 
@@ -3762,6 +4546,11 @@ export default function App() {
           <button type="submit">
             {twoFARequired ? t('auth.verifyAndSignIn') : t('auth.signIn')}
           </button>
+          {!twoFARequired && (
+            <button type="button" className="ghost" onClick={onStartSsoLogin}>
+              {locale === 'fr' ? 'Se connecter via SSO (OIDC)' : 'Sign in with SSO (OIDC)'}
+            </button>
+          )}
           {twoFARequired && (
             <button
               type="button"
@@ -3881,6 +4670,15 @@ export default function App() {
                       placeholder="Short usage note"
                     />
                   </label>
+                  <label>
+                    Tags
+                    <input
+                      name="tagsCsv"
+                      value={resourceForm.tagsCsv}
+                      onChange={onResourceFieldChange}
+                      placeholder="prod, linux, db"
+                    />
+                  </label>
                   <label className="full">
                     Image URL
                     <input
@@ -3959,7 +4757,7 @@ export default function App() {
                       onChange={onResourceFieldChange}
                     />
                   </label>
-                  {(resourceForm.protocol === 'agent' || resourceForm.protocol === 'rdp' || resourceForm.protocol === 'vnc') && (
+                  {(resourceForm.protocol === 'agent' || resourceForm.protocol === 'rdp') && (
                     <label>
                       Tunnel ticket limit / min
                       <input
@@ -4001,6 +4799,18 @@ export default function App() {
                   )}
                   {resourceForm.protocol === 'ssh' && (
                     <>
+                      <label>
+                        Credential flow
+                        <select
+                          name="credentialSource"
+                          value={resourceForm.credentialSource}
+                          onChange={onResourceFieldChange}
+                        >
+                          <option value="vaulted">vaulted lease</option>
+                          <option value="brokered">brokered (secret stays server-side)</option>
+                          <option value="ephemeral_account">ephemeral account (brokered fallback)</option>
+                        </select>
+                      </label>
                       <label>
                         SSH Username (vault)
                         <input
@@ -4156,6 +4966,9 @@ export default function App() {
                         tunnelTicketRateLimitMaxAttempts: '0',
                         description: '',
                         imageUrl: '',
+                        imageData: '',
+                        tagsCsv: '',
+                        credentialSource: 'vaulted',
                         httpUsername: '',
                         httpPassword: '',
                         sshUsername: '',
@@ -4197,6 +5010,12 @@ export default function App() {
                       </p>
                       {resource.description && (
                         <p className="muted">{resource.description}</p>
+                      )}
+                      {resource.tagsCsv && (
+                        <p className="muted">Tags: {resource.tagsCsv}</p>
+                      )}
+                      {resource.protocol === 'ssh' && (
+                        <p className="muted">Credential flow: {resource.credentialSource || 'vaulted'}</p>
                       )}
                       <div className="policy-chip-row">
                         {describeResourcePolicy(resource, t).map((item) => (
@@ -4599,6 +5418,7 @@ export default function App() {
                   onClick={() => {
                     setSelectedUserForAccessScope(null);
                     setUserResourceScope([]);
+                    setUserAccessProfiles([]);
                     setAccessScopeError('');
                   }}
                 >
@@ -4653,6 +5473,44 @@ export default function App() {
 
                 <div className="panel-header" style={{ marginTop: '1rem' }}>
                   <div>
+                    <h3>Access Profiles</h3>
+                  </div>
+                </div>
+                <div className="resource-list permissions-resources-list">
+                  {accessProfiles.length ? (
+                    accessProfiles.map((profile) => (
+                      <article className="resource-row compact-perm-row" key={`profile-${profile.id}`}>
+                        <div>
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '12px'
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={userAccessProfiles.includes(profile.id)}
+                              onChange={() => onToggleAccessProfile(profile.id)}
+                              style={{ cursor: 'pointer' }}
+                            />
+                            <div>
+                              <h4>{profile.name}</h4>
+                              <p className="muted">
+                                Policy #{profile.policyId || 0} • {profile.resourceTagsCsv || profile.resourceIdsCsv || 'all assigned resources'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </article>
+                    ))
+                  ) : (
+                    <p className="muted">No access profiles yet.</p>
+                  )}
+                </div>
+
+                <div className="panel-header" style={{ marginTop: '1rem' }}>
+                  <div>
                     <h3>Role Policy</h3>
                   </div>
                 </div>
@@ -4670,6 +5528,740 @@ export default function App() {
                     ))}
                 </div>
               </>
+            )}
+          </div>
+          )}
+
+          {adminSection === 'jit' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>{editingAccessPolicyId ? 'Edit access policy' : 'New access policy'}</h3>
+              </div>
+              {loadingAccessPolicies && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitAccessPolicy}>
+              <label>
+                Name
+                <input name="name" value={accessPolicyForm.name} onChange={onAccessPolicyFieldChange} />
+              </label>
+              <label>
+                Identity
+                <input name="identityPattern" value={accessPolicyForm.identityPattern} onChange={onAccessPolicyFieldChange} placeholder="user or *" />
+              </label>
+              <label>
+                Role
+                <input name="role" value={accessPolicyForm.role} onChange={onAccessPolicyFieldChange} placeholder="operator/admin" />
+              </label>
+              <label>
+                Group
+                <input name="groupName" value={accessPolicyForm.groupName} onChange={onAccessPolicyFieldChange} placeholder="optional local group alias" />
+              </label>
+              <label className="full">
+                Resource tags
+                <input name="resourceTagsCsv" value={accessPolicyForm.resourceTagsCsv} onChange={onAccessPolicyFieldChange} placeholder="prod, db, linux" />
+              </label>
+              <label className="full">
+                Description
+                <input name="description" value={accessPolicyForm.description} onChange={onAccessPolicyFieldChange} />
+              </label>
+              <label>
+                Risk
+                <select name="riskLevel" value={accessPolicyForm.riskLevel} onChange={onAccessPolicyFieldChange}>
+                  <option value="any">any</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="critical">critical</option>
+                </select>
+              </label>
+              <label>
+                Approval mode
+                <select name="approvalMode" value={accessPolicyForm.approvalMode} onChange={onAccessPolicyFieldChange}>
+                  <option value="inherit">inherit</option>
+                  <option value="none">none</option>
+                  <option value="required">required</option>
+                </select>
+              </label>
+              <label>
+                MFA
+                <select name="mfaRequirement" value={accessPolicyForm.mfaRequirement} onChange={onAccessPolicyFieldChange}>
+                  <option value="any">any</option>
+                  <option value="required">required</option>
+                  <option value="totp">totp</option>
+                  <option value="webauthn">webauthn</option>
+                </select>
+              </label>
+              <label>
+                Routing
+                <select name="routingConstraint" value={accessPolicyForm.routingConstraint} onChange={onAccessPolicyFieldChange}>
+                  <option value="any">any</option>
+                  <option value="direct">direct</option>
+                  <option value="relay">relay</option>
+                </select>
+              </label>
+              <label>
+                Time window (UTC)
+                <input name="timeWindow" value={accessPolicyForm.timeWindow} onChange={onAccessPolicyFieldChange} placeholder="any or 08:00-18:00" />
+              </label>
+              <label>
+                Max duration (s)
+                <input name="maxDurationSeconds" type="number" min="300" step="60" value={accessPolicyForm.maxDurationSeconds} onChange={onAccessPolicyFieldChange} />
+              </label>
+              <label className="checkbox-row">
+                <input name="ticketRequired" type="checkbox" checked={!!accessPolicyForm.ticketRequired} onChange={onAccessPolicyFieldChange} />
+                <span>Ticket required</span>
+              </label>
+              <label className="checkbox-row">
+                <input name="requireJustification" type="checkbox" checked={!!accessPolicyForm.requireJustification} onChange={onAccessPolicyFieldChange} />
+                <span>Justification required</span>
+              </label>
+              <label className="checkbox-row">
+                <input name="enabled" type="checkbox" checked={!!accessPolicyForm.enabled} onChange={onAccessPolicyFieldChange} />
+                <span>Enabled</span>
+              </label>
+              <div className="resource-actions">
+                <button type="submit">{editingAccessPolicyId ? 'Update' : 'Create'} policy</button>
+                {editingAccessPolicyId && (
+                  <button type="button" className="ghost" onClick={resetAccessPolicyForm}>
+                    {t('common.cancel')}
+                  </button>
+                )}
+              </div>
+            </form>
+            {accessPolicyError && <p className="error">{accessPolicyError}</p>}
+            <div className="resource-list">
+              {accessPolicies.length ? accessPolicies.map((policy) => (
+                <article className="resource-row" key={`policy-${policy.id}`}>
+                  <div>
+                    <h4>{policy.name}</h4>
+                    <p className="muted">
+                      {policy.resourceTagsCsv || 'all resources'} • {policy.approvalMode} • {policy.mfaRequirement} • TTL {policy.maxDurationSeconds}s
+                    </p>
+                  </div>
+                  <div className="resource-actions">
+                    <button type="button" className="secondary" onClick={() => onEditAccessPolicy(policy)}>Edit</button>
+                    <button type="button" className="ghost" onClick={() => onDeleteAccessPolicy(policy.id)}>Delete</button>
+                  </div>
+                </article>
+              )) : <p className="muted">No access policies yet.</p>}
+            </div>
+          </div>
+          )}
+
+          {adminSection === 'jit' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>{editingAccessProfileId ? 'Edit access profile' : 'New access profile'}</h3>
+              </div>
+              {loadingAccessProfiles && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitAccessProfile}>
+              <label>
+                Name
+                <input name="name" value={accessProfileForm.name} onChange={onAccessProfileFieldChange} />
+              </label>
+              <label>
+                Policy
+                <select name="policyId" value={accessProfileForm.policyId} onChange={onAccessProfileFieldChange}>
+                  <option value="0">none</option>
+                  {accessPolicies.map((policy) => (
+                    <option key={`profile-policy-${policy.id}`} value={policy.id}>{policy.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="full">
+                Resource IDs
+                <input name="resourceIdsCsv" value={accessProfileForm.resourceIdsCsv} onChange={onAccessProfileFieldChange} placeholder="1,2,3" />
+              </label>
+              <label className="full">
+                Resource tags
+                <input name="resourceTagsCsv" value={accessProfileForm.resourceTagsCsv} onChange={onAccessProfileFieldChange} placeholder="prod,windows" />
+              </label>
+              <label className="full">
+                Description
+                <input name="description" value={accessProfileForm.description} onChange={onAccessProfileFieldChange} />
+              </label>
+              <div className="resource-actions">
+                <button type="submit">{editingAccessProfileId ? 'Update' : 'Create'} profile</button>
+                {editingAccessProfileId && (
+                  <button type="button" className="ghost" onClick={resetAccessProfileForm}>
+                    {t('common.cancel')}
+                  </button>
+                )}
+              </div>
+            </form>
+            {accessProfileError && <p className="error">{accessProfileError}</p>}
+            <div className="resource-list">
+              {accessProfiles.length ? accessProfiles.map((profile) => (
+                <article className="resource-row" key={`profile-row-${profile.id}`}>
+                  <div>
+                    <h4>{profile.name}</h4>
+                    <p className="muted">
+                      Policy #{profile.policyId || 0} • {profile.resourceTagsCsv || profile.resourceIdsCsv || 'all assigned resources'}
+                    </p>
+                  </div>
+                  <div className="resource-actions">
+                    <button type="button" className="secondary" onClick={() => onEditAccessProfile(profile)}>Edit</button>
+                    <button type="button" className="ghost" onClick={() => onDeleteAccessProfile(profile.id)}>Delete</button>
+                  </div>
+                </article>
+              )) : <p className="muted">No access profiles yet.</p>}
+            </div>
+          </div>
+          )}
+
+          {adminSection === 'jit' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>Access Grants</h3>
+                <p>Issued JIT grants and their current TTL/status.</p>
+              </div>
+              {loadingAccessGrants && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            {accessGrantError && <p className="error">{accessGrantError}</p>}
+            <div className="resource-list">
+              {accessGrants.length ? accessGrants.map((grant) => (
+                <article className="resource-row" key={`grant-${grant.id}`}>
+                  <div>
+                    <h4>Grant #{grant.id}</h4>
+                    <p className="muted">
+                      {grant.subject} • resource #{grant.resourceId} • {grant.status}
+                    </p>
+                    <p className="muted">
+                      Expires {grant.expiresAt} • {grant.credentialSource} • {grant.routingConstraint}
+                    </p>
+                  </div>
+                </article>
+              )) : <p className="muted">No JIT grant issued yet.</p>}
+            </div>
+          </div>
+          )}
+
+          {adminSection === 'enterprise' && (
+          <div className="panel reveal relay-panel">
+            <div className="panel-header">
+              <div>
+                <h3>Enterprise IAM</h3>
+                <p>
+                  {locale === 'fr'
+                    ? 'Fédération d’identité, provisioning SCIM et validations d’intégrations.'
+                    : 'Identity federation, SCIM provisioning and integration validation workspace.'}
+                </p>
+              </div>
+              {enterpriseLoading && <span className="pill loading">{t('common.syncing')}</span>}
+            </div>
+            {enterpriseError && <p className="error">{enterpriseError}</p>}
+
+            <div className="relay-kpi-grid">
+              <article className="relay-kpi-card">
+                <span>Directory providers</span>
+                <strong>{enterpriseDirectoryProviders.length}</strong>
+              </article>
+              <article className={`relay-kpi-card ${enterpriseLdapConfig?.enabled ? 'ok' : ''}`}>
+                <span>LDAP/AD</span>
+                <strong>{enterpriseLdapConfig?.enabled ? 'enabled' : 'disabled'}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>SSO providers</span>
+                <strong>{enterpriseSsoProviders.length}</strong>
+              </article>
+              <article className="relay-kpi-card ok">
+                <span>SCIM PATCH</span>
+                <strong>{enterpriseScimConfig?.patch?.supported ? 'enabled' : 'disabled'}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>ITSM providers</span>
+                <strong>{enterpriseItsmProviders.length}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>SIEM channels</span>
+                <strong>{enterpriseSiemChannels.length}</strong>
+              </article>
+            </div>
+
+            <form className="resource-form" onSubmit={(event) => {
+              event.preventDefault();
+              onStartEnterpriseSso();
+            }}>
+              <label>
+                SSO provider
+                <select
+                  value={enterpriseSsoProvider}
+                  onChange={(event) => setEnterpriseSsoProvider(event.target.value)}
+                >
+                  {enterpriseSsoProviders.length ? enterpriseSsoProviders.map((provider) => (
+                    <option key={`sso-provider-${provider.id}`} value={provider.id}>
+                      {provider.name || provider.id} ({provider.protocol || 'oidc'})
+                    </option>
+                  )) : (
+                    <option value="">n/a</option>
+                  )}
+                </select>
+              </label>
+              <div className="resource-actions">
+                <button type="submit" className="secondary" disabled={!enterpriseSsoProviders.length}>
+                  {locale === 'fr' ? 'Tester la connexion OIDC' : 'Test OIDC sign-in'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    refreshEnterpriseWorkspace().catch(() => {});
+                  }}
+                  disabled={enterpriseLoading || enterpriseScimLoading}
+                >
+                  {locale === 'fr' ? 'Rafraichir les fondations IAM' : 'Refresh IAM foundations'}
+                </button>
+              </div>
+            </form>
+
+            <div className="relay-enroll-token-box">
+              <p>
+                <strong>Default provider</strong>: {enterpriseSsoConfig?.defaultProvider || 'n/a'}
+              </p>
+              <p>
+                <strong>LDAP host</strong>: {enterpriseLdapConfig?.host || 'n/a'}
+              </p>
+              <p>
+                <strong>LDAP base DN</strong>: {enterpriseLdapConfig?.baseDn || 'n/a'}
+              </p>
+              <p>
+                <strong>LDAP auth mode</strong>: {enterpriseLdapConfig?.authMode || 'n/a'}
+              </p>
+              <p>
+                <strong>LDAP default role</strong>: {enterpriseLdapConfig?.defaultRole || 'operator'}
+              </p>
+              <p>
+                <strong>LDAP role mapping</strong>: {enterpriseLdapConfig?.roleMappingEnabled
+                  ? `${locale === 'fr' ? 'active' : 'enabled'} (${enterpriseLdapConfig?.roleMapEntries || 0} ${locale === 'fr' ? 'regles' : 'rules'})`
+                  : (locale === 'fr' ? 'desactive' : 'disabled')}
+              </p>
+              <p>
+                <strong>Single tenant</strong>: {enterpriseSsoConfig?.singleTenant ? 'yes' : 'no'}
+              </p>
+              <p>
+                <strong>OIDC start</strong>: {enterpriseSsoConfig?.oidcStartPath || '/api/auth/sso/oidc/start'}
+              </p>
+              <p>
+                <strong>OIDC callback</strong>: {enterpriseSsoConfig?.oidcCallbackPath || '/api/auth/sso/oidc/callback'}
+              </p>
+              <p className="muted">
+                {locale === 'fr'
+                  ? 'Endpoints OIDC en HTTPS pris en charge avec validation de certificat système.'
+                  : 'OIDC endpoints support HTTPS with system trust-store certificate validation.'}
+              </p>
+            </div>
+          </div>
+          )}
+
+          {adminSection === 'enterprise' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>Directory Integrations</h3>
+                <p>
+                  {locale === 'fr'
+                    ? 'Inventaire des annuaires et test de bind LDAP/Active Directory.'
+                    : 'Directory inventory and LDAP/Active Directory bind-test workspace.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="resource-list">
+              {enterpriseDirectoryProviders.length ? enterpriseDirectoryProviders.map((provider) => (
+                <article className="resource-row" key={`directory-provider-${provider.id}`}>
+                  <div>
+                    <h4>{provider.name || provider.id}</h4>
+                    <p className="muted">
+                      id: {provider.id || 'n/a'} • jitProvisioning: {provider.jitProvisioning ? 'yes' : 'no'}
+                    </p>
+                  </div>
+                  <span className={`pill ${provider.enabled ? 'ok' : 'offline'}`}>
+                    {provider.enabled ? 'enabled' : 'disabled'}
+                  </span>
+                </article>
+              )) : (
+                <p className="muted">
+                  {locale === 'fr' ? 'Aucun provider annuaire déclaré.' : 'No directory provider available.'}
+                </p>
+              )}
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.8rem' }}>
+              <div>
+                <h3>LDAP bind test</h3>
+              </div>
+              {enterpriseLdapTesting && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitEnterpriseLdapTest}>
+              <label>
+                username
+                <input
+                  value={enterpriseLdapTestUsername}
+                  onChange={(event) => setEnterpriseLdapTestUsername(event.target.value)}
+                  placeholder={enterpriseLdapConfig?.userTemplate || 'uid={username},ou=People,dc=example,dc=org'}
+                />
+              </label>
+              <label>
+                password
+                <input
+                  type="password"
+                  value={enterpriseLdapTestPassword}
+                  onChange={(event) => setEnterpriseLdapTestPassword(event.target.value)}
+                  autoComplete="current-password"
+                  placeholder="••••••••"
+                />
+              </label>
+              <div className="resource-actions">
+                <button
+                  type="submit"
+                  className="secondary"
+                  disabled={enterpriseLdapTesting || !enterpriseLdapConfig?.enabled}
+                >
+                  {enterpriseLdapTesting
+                    ? (locale === 'fr' ? 'Test en cours...' : 'Testing...')
+                    : (locale === 'fr' ? 'Tester le bind LDAP' : 'Run LDAP bind test')}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    setEnterpriseLdapTestUsername('');
+                    setEnterpriseLdapTestPassword('');
+                    setEnterpriseLdapTestResult(null);
+                  }}
+                >
+                  {locale === 'fr' ? 'Effacer' : 'Clear'}
+                </button>
+              </div>
+            </form>
+            {enterpriseLdapTestResult && (
+              <div className="relay-enroll-token-box">
+                <p>
+                  <strong>LDAP bind result</strong>
+                </p>
+                <code className="relay-enroll-command">{JSON.stringify(enterpriseLdapTestResult, null, 2)}</code>
+              </div>
+            )}
+          </div>
+          )}
+
+          {adminSection === 'enterprise' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>SCIM Directory Explorer</h3>
+                <p>
+                  {locale === 'fr'
+                    ? 'Interrogez Users/Groups avec startIndex, count et filter (eq/co/sw).'
+                    : 'Query Users/Groups with startIndex, count and filter (eq/co/sw).'}
+                </p>
+              </div>
+              {enterpriseScimLoading && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+
+            <form className="resource-form" onSubmit={onSubmitEnterpriseScimFilter}>
+              <label className="full">
+                SCIM filter
+                <input
+                  value={enterpriseScimFilter}
+                  onChange={(event) => setEnterpriseScimFilter(event.target.value)}
+                  placeholder={'userName co "admin"'}
+                />
+              </label>
+              <label>
+                startIndex
+                <input
+                  type="number"
+                  min="1"
+                  value={enterpriseScimStartIndex}
+                  onChange={(event) => setEnterpriseScimStartIndex(event.target.value)}
+                />
+              </label>
+              <label>
+                count
+                <input
+                  type="number"
+                  min="0"
+                  max="200"
+                  value={enterpriseScimCount}
+                  onChange={(event) => setEnterpriseScimCount(event.target.value)}
+                />
+              </label>
+              <div className="resource-actions">
+                <button type="submit" className="secondary">
+                  {locale === 'fr' ? 'Rechercher SCIM' : 'Query SCIM'}
+                </button>
+              </div>
+            </form>
+
+            {enterpriseScimError && <p className="error">{enterpriseScimError}</p>}
+
+            <div className="relay-kpi-grid">
+              <article className="relay-kpi-card">
+                <span>Users total</span>
+                <strong>{enterpriseScimMeta.users.totalResults}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Users page</span>
+                <strong>{enterpriseScimMeta.users.itemsPerPage}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Groups total</span>
+                <strong>{enterpriseScimMeta.groups.totalResults}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Groups page</span>
+                <strong>{enterpriseScimMeta.groups.itemsPerPage}</strong>
+              </article>
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.9rem' }}>
+              <div>
+                <h3>SCIM Users</h3>
+              </div>
+            </div>
+            <div className="resource-list">
+              {enterpriseScimUsers.length ? enterpriseScimUsers.map((user) => {
+                const scimRole = Array.isArray(user?.roles) && user.roles.length
+                  ? String(user.roles[0]?.value || user.roles[0]?.display || '')
+                  : '';
+                return (
+                  <article className="resource-row" key={`scim-user-${user.id || user.userName}`}>
+                    <div>
+                      <h4>{user.userName || user.id}</h4>
+                      <p className="muted">id: {user.id || 'n/a'} • role: {scimRole || 'n/a'}</p>
+                    </div>
+                    <span className={`pill ${user.active ? 'ok' : 'offline'}`}>{user.active ? 'active' : 'inactive'}</span>
+                  </article>
+                );
+              }) : (
+                <p className="muted">
+                  {locale === 'fr' ? 'Aucun utilisateur SCIM trouvé pour ce filtre.' : 'No SCIM user matched this filter.'}
+                </p>
+              )}
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.9rem' }}>
+              <div>
+                <h3>SCIM Groups</h3>
+              </div>
+            </div>
+            <div className="resource-list">
+              {enterpriseScimGroups.length ? enterpriseScimGroups.map((group) => (
+                <article className="resource-row" key={`scim-group-${group.id || group.displayName}`}>
+                  <div>
+                    <h4>{group.displayName || group.id}</h4>
+                    <p className="muted">
+                      id: {group.id || 'n/a'} • members: {Array.isArray(group.members) ? group.members.length : 0}
+                    </p>
+                  </div>
+                </article>
+              )) : (
+                <p className="muted">
+                  {locale === 'fr' ? 'Aucun groupe SCIM trouvé pour ce filtre.' : 'No SCIM group matched this filter.'}
+                </p>
+              )}
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.9rem' }}>
+              <div>
+                <h3>SCIM PATCH Workspace</h3>
+              </div>
+              {enterpriseScimPatchLoading && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitEnterpriseScimPatch}>
+              <label>
+                user id / userName
+                <input
+                  value={enterpriseScimPatchId}
+                  onChange={(event) => setEnterpriseScimPatchId(event.target.value)}
+                  placeholder="admin"
+                />
+              </label>
+              <label>
+                new userName
+                <input
+                  value={enterpriseScimPatchUsername}
+                  onChange={(event) => setEnterpriseScimPatchUsername(event.target.value)}
+                  placeholder={locale === 'fr' ? 'optionnel' : 'optional'}
+                />
+              </label>
+              <label>
+                role
+                <select
+                  value={enterpriseScimPatchRole}
+                  onChange={(event) => setEnterpriseScimPatchRole(event.target.value)}
+                >
+                  <option value="">{locale === 'fr' ? 'inchangé' : 'unchanged'}</option>
+                  <option value="operator">operator</option>
+                  <option value="admin">admin</option>
+                  <option value="auditor">auditor</option>
+                </select>
+              </label>
+              <label>
+                active
+                <select
+                  value={enterpriseScimPatchActive}
+                  onChange={(event) => setEnterpriseScimPatchActive(event.target.value)}
+                >
+                  <option value="unchanged">{locale === 'fr' ? 'inchangé' : 'unchanged'}</option>
+                  <option value="active">true</option>
+                  <option value="inactive">false</option>
+                </select>
+              </label>
+              <div className="resource-actions">
+                <button type="submit" className="secondary" disabled={enterpriseScimPatchLoading}>
+                  {enterpriseScimPatchLoading
+                    ? (locale === 'fr' ? 'Patch en cours...' : 'Patching...')
+                    : 'Apply SCIM patch'}
+                </button>
+              </div>
+            </form>
+            {enterpriseScimPatchResult && <p className="muted">{enterpriseScimPatchResult}</p>}
+          </div>
+          )}
+
+          {adminSection === 'enterprise' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>Integration Drills</h3>
+                <p>
+                  {locale === 'fr'
+                    ? 'Validez les chemins ITSM fail-open/fail-closed et le forwarding SIEM.'
+                    : 'Validate ITSM fail-open/fail-closed and SIEM forwarding behavior.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.4rem' }}>
+              <div>
+                <h3>ITSM ticket verification</h3>
+              </div>
+              {enterpriseItsmLoading && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitEnterpriseItsmVerification}>
+              <label>
+                provider
+                <select
+                  value={enterpriseItsmProvider}
+                  onChange={(event) => setEnterpriseItsmProvider(event.target.value)}
+                >
+                  {enterpriseItsmProviders.length ? enterpriseItsmProviders.map((provider) => (
+                    <option key={`itsm-provider-${provider.id}`} value={provider.id}>
+                      {provider.name || provider.id}
+                    </option>
+                  )) : (
+                    <option value="servicenow">servicenow</option>
+                  )}
+                </select>
+              </label>
+              <label>
+                ticketId
+                <input
+                  value={enterpriseItsmTicketId}
+                  onChange={(event) => setEnterpriseItsmTicketId(event.target.value)}
+                  placeholder="INC-2026-0042"
+                />
+              </label>
+              <label>
+                failMode
+                <select
+                  value={enterpriseItsmFailMode}
+                  onChange={(event) => setEnterpriseItsmFailMode(event.target.value)}
+                >
+                  <option value="fail-closed">fail-closed</option>
+                  <option value="fail-open">fail-open</option>
+                </select>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={enterpriseItsmUnavailable}
+                  onChange={(event) => setEnterpriseItsmUnavailable(event.target.checked)}
+                />
+                <span>simulateUnavailable</span>
+              </label>
+              <div className="resource-actions">
+                <button type="submit" className="secondary" disabled={enterpriseItsmLoading}>
+                  {enterpriseItsmLoading
+                    ? (locale === 'fr' ? 'Vérification...' : 'Verifying...')
+                    : (locale === 'fr' ? 'Vérifier le ticket' : 'Verify ticket')}
+                </button>
+              </div>
+            </form>
+            {enterpriseItsmResult && (
+              <div className="relay-enroll-token-box">
+                <p><strong>ITSM result</strong></p>
+                <code className="relay-enroll-command">{JSON.stringify(enterpriseItsmResult, null, 2)}</code>
+              </div>
+            )}
+
+            <div className="panel-header" style={{ marginTop: '0.7rem' }}>
+              <div>
+                <h3>SIEM event forwarding</h3>
+              </div>
+              {enterpriseSiemLoading && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitEnterpriseSiemDispatch}>
+              <label>
+                channel
+                <select
+                  value={enterpriseSiemChannel}
+                  onChange={(event) => setEnterpriseSiemChannel(event.target.value)}
+                >
+                  {enterpriseSiemChannels.length ? enterpriseSiemChannels.map((channel) => (
+                    <option key={`siem-channel-${channel.id}`} value={channel.id}>
+                      {channel.name || channel.id}
+                    </option>
+                  )) : (
+                    <option value="json_webhook">json_webhook</option>
+                  )}
+                </select>
+              </label>
+              <label>
+                eventType
+                <input
+                  value={enterpriseSiemEventType}
+                  onChange={(event) => setEnterpriseSiemEventType(event.target.value)}
+                  placeholder="security.incident.escalated"
+                />
+              </label>
+              <label>
+                deliveryMode
+                <select
+                  value={enterpriseSiemDeliveryMode}
+                  onChange={(event) => setEnterpriseSiemDeliveryMode(event.target.value)}
+                >
+                  <option value="fail-open">fail-open</option>
+                  <option value="fail-closed">fail-closed</option>
+                </select>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={enterpriseSiemSimulateFailure}
+                  onChange={(event) => setEnterpriseSiemSimulateFailure(event.target.checked)}
+                />
+                <span>simulateFailure</span>
+              </label>
+              <div className="resource-actions">
+                <button type="submit" className="secondary" disabled={enterpriseSiemLoading}>
+                  {enterpriseSiemLoading
+                    ? (locale === 'fr' ? 'Envoi...' : 'Forwarding...')
+                    : (locale === 'fr' ? 'Transmettre l’événement' : 'Forward event')}
+                </button>
+              </div>
+            </form>
+            {enterpriseSiemResult && (
+              <div className="relay-enroll-token-box">
+                <p><strong>SIEM result</strong></p>
+                <code className="relay-enroll-command">{JSON.stringify(enterpriseSiemResult, null, 2)}</code>
+              </div>
             )}
           </div>
           )}
@@ -5460,6 +7052,37 @@ export default function App() {
             )}
           </div>
 
+          {(sessionEvidenceLoading || sessionEvidencePack || sessionEvidenceError) && (
+            <div className="watchlist-panel">
+              <div className="panel-header" style={{ marginBottom: '0.5rem' }}>
+                <div>
+                  <h3 style={{ fontSize: '1rem' }}>Evidence Pack</h3>
+                  <p>Signed JIT access proof for the selected session.</p>
+                </div>
+              </div>
+              {sessionEvidenceLoading && <p className="muted">Loading evidence pack...</p>}
+              {sessionEvidenceError && <p className="error">{sessionEvidenceError}</p>}
+              {sessionEvidencePack && (
+                <div className="resource-list">
+                  <article className="resource-row">
+                    <div>
+                      <h4>Session #{sessionEvidencePack.session?.id}</h4>
+                      <p className="muted">
+                        Digest: <code>{sessionEvidencePack.digest}</code>
+                      </p>
+                      <p className="muted">
+                        Signature: <code>{sessionEvidencePack.signature}</code>
+                      </p>
+                      <p className="muted">
+                        Grant #{sessionEvidencePack.accessGrant?.id || 'n/a'} • Policy #{sessionEvidencePack.accessGrant?.policyId || 0}
+                      </p>
+                    </div>
+                  </article>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="session-grid">
             {sessions.map((session) => (
               <article className="session-card" key={session.id}>
@@ -5500,6 +7123,12 @@ export default function App() {
                 </div>
                 <div className="session-meta">
                   <span>{t('app.openedAt', { value: session.createdAt })}</span>
+                  {session.accessGrantId ? (
+                    <span>Grant #{session.accessGrantId}</span>
+                  ) : null}
+                  {session.credentialSource ? (
+                    <span>{session.credentialSource}</span>
+                  ) : null}
                   {session.terminatedAt && (
                     <span>{t('app.closedAt', { value: session.terminatedAt })}</span>
                   )}
@@ -5533,6 +7162,15 @@ export default function App() {
                     <button
                       type="button"
                       className="ghost"
+                      onClick={() => onOpenSessionEvidence(session.id)}
+                    >
+                      Evidence pack
+                    </button>
+                  )}
+                  {canViewAudit && (
+                    <button
+                      type="button"
+                      className="ghost"
                       onClick={() => openRecordings(session.id)}
                     >
                       {t('app.recordings')}
@@ -5541,7 +7179,7 @@ export default function App() {
                   <button
                     type="button"
                     className="ghost"
-                    onClick={() => openTerminal(session)}
+                    onClick={() => openLiveSession(session)}
                     disabled={session.status !== 'active' || !canOperateSessions}
                   >
                     {t('app.openLive')}
@@ -5815,6 +7453,13 @@ export default function App() {
       </section>
       )}
 
+      {vncViewerSession && (
+        <VncViewerModal
+          session={vncViewerSession}
+          onClose={() => setVncViewerSession(null)}
+        />
+      )}
+
       {/* Shadow session panel */}
       {mainTab === 'sessions' && shadowSession && (
         <section className="panel terminal-panel shadow-panel reveal">
@@ -5876,6 +7521,20 @@ export default function App() {
                   <>
                     <p className="muted" style={{ marginBottom: '0.35rem' }}>
                       {t('app.score', { value: riskPreview.score, risk: riskPreview.effectiveRiskLevel })}
+                    </p>
+                    <p className="muted" style={{ marginBottom: '0.35rem' }}>
+                      {[
+                        riskPreview.justificationRequired ? 'justification' : null,
+                        riskPreview.ticketRequired ? 'ticket' : null,
+                        riskPreview.approvalRequired ? 'approval' : null,
+                        riskPreview.mfaRequirement && riskPreview.mfaRequirement !== 'any'
+                          ? `mfa:${riskPreview.mfaRequirement}`
+                          : null,
+                        riskPreview.routingConstraint && riskPreview.routingConstraint !== 'any'
+                          ? `route:${riskPreview.routingConstraint}`
+                          : null,
+                        riskPreview.maxDurationSeconds ? `ttl:${riskPreview.maxDurationSeconds}s` : null
+                      ].filter(Boolean).join(' • ')}
                     </p>
                     <p className="muted" style={{ margin: 0 }}>
                       {Array.isArray(riskPreview.factors)

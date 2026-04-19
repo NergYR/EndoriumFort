@@ -31,7 +31,7 @@ export const describeResourcePolicy = (resource, translate = fallbackTranslate) 
   if (resource?.requireDualApproval) items.push(translate('policy.dualApproval'));
   if (resource?.adaptiveAccessPolicy) items.push(translate('policy.adaptiveControls'));
   if (resource?.enableCommandGuard) items.push(translate('policy.sshGuard'));
-  if (['agent', 'rdp', 'vnc'].includes(protocol) && tunnelLimit > 0) {
+  if (['agent', 'rdp'].includes(protocol) && tunnelLimit > 0) {
     items.push(translate('policy.tunnelLimit', { limit: tunnelLimit }));
   }
   if (riskLevel === 'high' || riskLevel === 'critical') items.push(translate('policy.mfaSensitive'));

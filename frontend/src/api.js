@@ -150,12 +150,59 @@ export async function fetchSessionDna(sessionId) {
   return response.json();
 }
 
+export async function fetchSessionEvidencePack(sessionId) {
+  const response = await fetch(`/api/evidence-packs/sessions/${sessionId}`, {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch evidence pack');
+  return response.json();
+}
+
 export async function terminateSession(sessionId) {
   const response = await fetch(`/api/sessions/${sessionId}/terminate`, {
     method: 'POST',
     headers: withAuthHeaders()
   });
   await ensureResponseOk(response, 'Failed to terminate session');
+  return response.json();
+}
+
+export async function startSessionElevation(sessionId, payload = {}) {
+  const response = await fetch(`/api/sessions/${sessionId}/elevation/start`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to start session elevation');
+  return response.json();
+}
+
+export async function endSessionElevation(sessionId, payload = {}) {
+  const response = await fetch(`/api/sessions/${sessionId}/elevation/end`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to end session elevation');
+  return response.json();
+}
+
+export async function reviewSessionGoal(sessionId, payload = {}) {
+  const response = await fetch(`/api/sessions/${sessionId}/goal-review`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to review session goal');
   return response.json();
 }
 
@@ -352,6 +399,126 @@ export async function revokeResourcePermission(userId, resourceId) {
     headers: withAuthHeaders()
   });
   await ensureResponseOk(response, 'Failed to revoke permission');
+  return response.json();
+}
+
+export async function getUserAccessProfiles(userId) {
+  const response = await fetch(`/api/users/${userId}/access-profiles`, {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch access profiles');
+  return response.json();
+}
+
+export async function grantAccessProfile(userId, profileId) {
+  const response = await fetch(`/api/users/${userId}/access-profiles/${profileId}`, {
+    method: 'POST',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to assign access profile');
+  return response.json();
+}
+
+export async function revokeAccessProfile(userId, profileId) {
+  const response = await fetch(`/api/users/${userId}/access-profiles/${profileId}`, {
+    method: 'DELETE',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to revoke access profile');
+  return response.json();
+}
+
+export async function fetchAccessPolicies() {
+  const response = await fetch('/api/access-policies', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch access policies');
+  return response.json();
+}
+
+export async function createAccessPolicy(payload) {
+  const response = await fetch('/api/access-policies', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload)
+  });
+  await ensureResponseOk(response, 'Failed to create access policy');
+  return response.json();
+}
+
+export async function updateAccessPolicy(policyId, payload) {
+  const response = await fetch(`/api/access-policies/${policyId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload)
+  });
+  await ensureResponseOk(response, 'Failed to update access policy');
+  return response.json();
+}
+
+export async function deleteAccessPolicy(policyId) {
+  const response = await fetch(`/api/access-policies/${policyId}`, {
+    method: 'DELETE',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to delete access policy');
+  return response.json();
+}
+
+export async function fetchAccessProfiles() {
+  const response = await fetch('/api/access-profiles', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch access profiles');
+  return response.json();
+}
+
+export async function createAccessProfile(payload) {
+  const response = await fetch('/api/access-profiles', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload)
+  });
+  await ensureResponseOk(response, 'Failed to create access profile');
+  return response.json();
+}
+
+export async function updateAccessProfile(profileId, payload) {
+  const response = await fetch(`/api/access-profiles/${profileId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload)
+  });
+  await ensureResponseOk(response, 'Failed to update access profile');
+  return response.json();
+}
+
+export async function deleteAccessProfile(profileId) {
+  const response = await fetch(`/api/access-profiles/${profileId}`, {
+    method: 'DELETE',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to delete access profile');
+  return response.json();
+}
+
+export async function fetchAccessGrants() {
+  const response = await fetch('/api/access-grants', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch access grants');
   return response.json();
 }
 
@@ -621,5 +788,209 @@ export async function fetchRelayResolution(resourceId) {
     headers: withAuthHeaders()
   });
   await ensureResponseOk(response, 'Failed to resolve relay route');
+  return response.json();
+}
+
+// ── Enterprise Foundations ───────────────────────────────────────────
+
+export function startOidcSso(options = {}) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const params = new URLSearchParams();
+  if (options.provider) {
+    params.set('provider', String(options.provider));
+  }
+  if (options.postLoginRedirect) {
+    params.set('postLoginRedirect', String(options.postLoginRedirect));
+  }
+  const query = params.toString();
+  window.location.assign(`/api/auth/sso/oidc/start${query ? `?${query}` : ''}`);
+}
+
+export async function fetchSsoProviders() {
+  const response = await fetch('/api/auth/sso/providers', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch SSO providers');
+  return response.json();
+}
+
+export async function fetchSsoConfig() {
+  const response = await fetch('/api/auth/sso/config', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch SSO config');
+  return response.json();
+}
+
+export async function fetchDirectoryProviders() {
+  const response = await fetch('/api/auth/directory/providers', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch directory providers');
+  return response.json();
+}
+
+export async function fetchLdapConfig() {
+  const response = await fetch('/api/auth/directory/ldap/config', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch LDAP config');
+  return response.json();
+}
+
+export async function testLdapBind(payload) {
+  const response = await fetch('/api/auth/directory/ldap/test-bind', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to test LDAP bind');
+  return response.json();
+}
+
+export async function fetchScimServiceProviderConfig() {
+  const response = await fetch('/api/scim/v2/ServiceProviderConfig', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch SCIM service provider config');
+  return response.json();
+}
+
+function buildScimListQuery(params = {}) {
+  const query = new URLSearchParams();
+  if (typeof params.startIndex === 'number' && Number.isFinite(params.startIndex)) {
+    query.set('startIndex', String(Math.trunc(params.startIndex)));
+  }
+  if (typeof params.count === 'number' && Number.isFinite(params.count)) {
+    query.set('count', String(Math.trunc(params.count)));
+  }
+  if (params.filter) {
+    query.set('filter', String(params.filter));
+  }
+  const queryString = query.toString();
+  return queryString ? `?${queryString}` : '';
+}
+
+export async function fetchScimUsers(params = {}) {
+  const response = await fetch(`/api/scim/v2/Users${buildScimListQuery(params)}`, {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch SCIM users');
+  return response.json();
+}
+
+export async function fetchScimUser(userIdOrName) {
+  const response = await fetch(`/api/scim/v2/Users/${encodeURIComponent(String(userIdOrName))}`, {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch SCIM user');
+  return response.json();
+}
+
+export async function createScimUser(payload) {
+  const response = await fetch('/api/scim/v2/Users', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to create SCIM user');
+  return response.json();
+}
+
+export async function updateScimUser(userIdOrName, payload) {
+  const response = await fetch(`/api/scim/v2/Users/${encodeURIComponent(String(userIdOrName))}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to update SCIM user');
+  return response.json();
+}
+
+export async function patchScimUser(userIdOrName, operations) {
+  const response = await fetch(`/api/scim/v2/Users/${encodeURIComponent(String(userIdOrName))}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify({
+      schemas: ['urn:ietf:params:scim:api:messages:2.0:PatchOp'],
+      Operations: Array.isArray(operations) ? operations : []
+    })
+  });
+  await ensureResponseOk(response, 'Failed to patch SCIM user');
+  if (response.status === 204) {
+    return null;
+  }
+  return response.json();
+}
+
+export async function deleteScimUser(userIdOrName) {
+  const response = await fetch(`/api/scim/v2/Users/${encodeURIComponent(String(userIdOrName))}`, {
+    method: 'DELETE',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to delete SCIM user');
+}
+
+export async function fetchScimGroups(params = {}) {
+  const response = await fetch(`/api/scim/v2/Groups${buildScimListQuery(params)}`, {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch SCIM groups');
+  return response.json();
+}
+
+export async function fetchItsmProviders() {
+  const response = await fetch('/api/integrations/itsm/providers', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch ITSM providers');
+  return response.json();
+}
+
+export async function verifyItsmTicket(payload) {
+  const response = await fetch('/api/integrations/itsm/verify-ticket', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to verify ITSM ticket');
+  return response.json();
+}
+
+export async function fetchSiemChannels() {
+  const response = await fetch('/api/integrations/siem/channels', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch SIEM channels');
+  return response.json();
+}
+
+export async function forwardSiemEvent(payload) {
+  const response = await fetch('/api/integrations/siem/events', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...withAuthHeaders()
+    },
+    body: JSON.stringify(payload || {})
+  });
+  await ensureResponseOk(response, 'Failed to forward SIEM event');
   return response.json();
 }

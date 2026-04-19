@@ -16,6 +16,15 @@
 
 > **One gateway. Every protocol. Full audit trail.**
 
+## Product Positioning: Sovereign JIT PAM
+
+EndoriumFort is positioned as a **modern sovereign PAM platform** for self-hosted environments, not as a generic workforce IAM suite.
+
+- **Zero Standing Privilege first**: access is mediated through short-lived policy decisions and ephemeral grants.
+- **Sovereign by default**: single-tenant, self-hosted, air-gapped compatible deployment posture.
+- **Evidence-grade traceability**: Session DNA + signed evidence packs for compliance and investigations.
+- **Operator-ready controls**: dual approval, adaptive risk, MFA/WebAuthn, relay routing constraints, and mission-bound context.
+
 ---
 
 ## Highlights
@@ -144,9 +153,42 @@ chmod +x build-all.sh
 This will:
 1. Build the C++ backend with CMake
 2. Build the React frontend with Vite
-3. Build the Go agent (native + cross-compiled for Linux/macOS/Windows)
+3. Build the Go agent (native + relay, with optional cross-compilation for Linux/macOS/Windows)
 4. Auto-increment versions only when source code actually changes
 5. Create a git commit + tag if anything changed
+
+### WSL Build Stability
+
+`build-all.sh` and `run-dev.sh` now use safer defaults on WSL to reduce crash/OOM risk:
+- backend build uses `BUILD_TESTING=OFF` by default
+- parallel compilation is capped to `2` jobs by default
+- agent cross-compilation is disabled by default on WSL (`native` + `relay` only)
+
+You can override these defaults when needed:
+
+```bash
+# Force lower peak usage
+ENDORIUMFORT_BUILD_JOBS=1 ./build-all.sh
+
+# Re-enable backend tests during normal build
+ENDORIUMFORT_BUILD_TESTING=ON ./build-all.sh
+
+# Re-enable agent cross-compilation targets on WSL
+ENDORIUMFORT_AGENT_CROSS_COMPILE=1 ./build-all.sh
+```
+
+### Run Backend Tests
+
+```bash
+cmake -S backend -B backend/build -DBUILD_TESTING=ON
+cmake --build backend/build
+ctest --test-dir backend/build --output-on-failure
+```
+
+SCIM validation now includes both parser-level and route-level coverage:
+- `backend_scim_query_test` validates query/filter parser rules (`startIndex`, `count`, operator support).
+- `backend_scim_routes_test` validates in-memory SCIM API contract behavior for `/api/scim/v2/Users`, `/api/scim/v2/Groups`, and `/api/scim/v2/ServiceProviderConfig` (pagination metadata, count clamp, invalid filter handling, SCIM `schemas` list/resource shape checks, strict hardening headers via middleware, JSON response headers, and SCIM Error envelope fields including `scimType`) and SCIM user lifecycle mutations (`POST` / `PUT` / `PATCH` / `DELETE`) including malformed JSON/missing field negative paths, PUT compatibility behavior for incoherent payloads (non-boolean `active` ignored, blank/non-string `userName` treated as absent, non-string/malformed `role(s)` values coerced to fallback `operator`, mixed `roles` arrays normalized from the first supported item with fallback on blank/unsupported leading entries, and explicit first-valid-item precedence for mixed valid/invalid role lists) with explicit `schemas`/`meta.resourceType` success-contract assertions, SCIM User metadata/validator contract checks (`meta.location`, `meta.version`, `ETag` parity on single-resource responses), expanded PATCH parser-shape failures (missing/empty `Operations`, missing `op`, unsupported `remove userName`, empty `userName`, invalid `active` type, missing role payload value, and invalid role values), PATCH precedence/atomicity behavior (last-write-wins for repeated `role`/`userName` mutations, `active=false` then `active=true` cancels deprovision, `active=true` then `active=false` triggers deprovision, `active=true` then `active=false` then `active=true` keeps user/session, `active=false` then `active=true` then `active=false` deprovisions on last op, `active=true` then `active=false` then `active=true` then `active=false` deprovisions on last op, `active=false` then `active=true` then `active=false` then `active=true` keeps user/session, `active=false` then `active=true` then `active=false` then `active=true` then `active=false` deprovisions on last op, and later invalid `op`/`path`/`value` operations fail atomically including after repeated `userName` operations), pathless PATCH compatibility fallback for invalid role payload values (normalized to `operator`), deprovision session invalidation, and emitted SCIM audit events with strict actor/role/payload checks including temporary-user deprovision payload details, consolidated anti-leak assertions for temporary deprovisioned accounts/sessions, first-valid precedence mixed-role cases, and multi-operation PATCH success paths.
+- `backend_scim_routes_test` also validates enterprise LDAP routes (`/api/auth/directory/providers`, `/api/auth/directory/ldap/config`, `/api/auth/directory/ldap/test-bind`) including disabled-path contract behavior.
 
 ### Run in Development
 
@@ -204,6 +246,7 @@ export ENDORIUMFORT_WEBAUTHN_ORIGIN=http://localhost:5173
   - monitor **Session SLO Insights** (completion rate, average duration, stale active sessions)
   - pin critical sessions in **Watchlist** to track state transitions (active/closed/errors) faster
   - each session card now shows effective routing path (`direct route` or `via relay`) with relay label/status when applicable
+  - VNC sessions can now be opened directly in-browser with the integrated noVNC viewer
   - use **SSH Snippets Studio** to inject or execute recurring troubleshooting commands
   - save custom snippets per operator browser profile for faster interventions
   - open **Session DNA** to inspect integrity chain entries and verification status
@@ -218,6 +261,14 @@ export ENDORIUMFORT_WEBAUTHN_ORIGIN=http://localhost:5173
     - agent-first relay bootstrap guidance in UI (manual API bootstrap kept as advanced fallback)
     - direct relay bootstrap from UI with relay certificate + short-lived one-time enrollment token generation (advanced mode)
     - runtime relay policy visibility (certificate policy, enrollment enabled, token TTL, stale threshold)
+  - includes **Enterprise IAM** operations workspace:
+    - LDAP/Active Directory provider inventory with runtime capability visibility
+    - LDAP bind-test workspace (admin-triggered bind validation with audit trace)
+    - SSO provider diagnostics and default-provider visibility for OIDC start/callback paths
+    - SCIM directory explorer for `Users` and `Groups` with `startIndex`, `count`, `filter`
+    - SCIM PATCH operator workspace for partial updates (`userName`, `role`, `active`)
+    - ITSM verification drills with explicit fail-open/fail-closed behavior simulation
+    - SIEM forwarding drills to validate channel availability and delivery-mode behavior
 9. **Role + resource policy access model**:
   - role defines the global permission baseline
   - assigned resources define the user scope
@@ -308,6 +359,154 @@ Notes:
 - `localhost` and `127.0.0.1` are accepted for local development.
 - For non-localhost deployments, WebAuthn should use a real domain and `https`.
 - The backend now logs effective runtime config at startup without printing secrets.
+
+### Vault Encryption (AES-256-GCM)
+
+Resource credentials (SSH/HTTP passwords) are optionally encrypted at rest using **AES-256-GCM**. Encryption is transparent and backward-compatible:
+
+**Enabling vault encryption:**
+
+Generate a 256-bit (32-byte) encryption key:
+
+```bash
+openssl rand -hex 32
+# Example output: 3f8d2e1a9c7b4f6e5a3d2c1b9e8f7a6d5c4b3a2f1e9d8c7b6a5f4e3d2c1b9a
+```
+
+Set the environment variable **before starting the backend:**
+
+```bash
+export ENDORIUMFORT_VAULT_KEY=<your-hex-32-byte-key>
+./endoriumfort_backend
+```
+
+**Behavior:**
+
+- **With key set**: New credentials are encrypted with AES-256-GCM and stored in format `aes256:v1:iv:tag:ciphertext` (all hex).
+- **Without key**: Credentials are stored in plaintext (for backward compatibility). Existing encrypted data can still be decrypted if the key is later provided.
+- **Key rotation**: Currently not supported. Generate a new database if key change is required.
+
+**Notes:**
+
+- The IV (initialization vector) is unique per credential and embedded in the ciphertext.
+- If `ENDORIUMFORT_VAULT_KEY` is set but invalid (wrong size or bad hex), encryption falls back to plaintext.
+- All existing plaintext credentials remain readable. Only newly created/updated credentials are encrypted.
+
+### Rate Limiting & Brute-Force Protection
+
+EndoriumFort implements multi-layered rate limiting to protect against brute-force attacks:
+
+**Dual-Track Rate Limiting:**
+
+1. **Username-based tracking**: Limits failed attempts per username across a 5-minute sliding window
+2. **IP-based tracking**: Limits failed attempts per source IP across a 5-minute sliding window
+
+This dual approach protects against both single-source targeted attacks and distributed brute-force campaigns.
+
+**Exponential Backoff:**
+
+After reaching rate limits, progressive delays are applied:
+
+| Failed Attempts | Lockout Duration | Use Case |
+|-----------------|------------------|----------|
+| 10 attempts | 30 seconds | Normal typos/user errors |
+| 20 attempts | 5 minutes | Coordinated single-source attack |
+| 30+ attempts | 30 minutes | Distributed or persistent brute-force |
+
+**Configuration:**
+
+```bash
+# Default: 10 attempts per 5-minute window (300 seconds)
+# You can inspect the source code to adjust these values:
+# backend/src/app_context.h: rate_limit_max_attempts, rate_limit_window
+
+# No explicit environment variables yet; configuration is code-level
+```
+
+**Behavior:**
+
+- Failed login attempts (wrong password or unknown user) increment both username and IP counters
+- Successful login clears both counters, allowing immediate re-use
+- Rate-limited responses return HTTP 429 with a descriptive error message
+- All rate limit events are logged to the audit trail with type `auth.login.rate_limited`
+- X-Forwarded-For header is respected for reverse proxy deployments
+- If an IP/username is blocked, even a correct password will be rejected during the lockout period
+
+**Notes:**
+
+- Rate limits are in-memory; they reset on service restart
+- The sliding window uses a queue of recent attempt timestamps
+- Protected endpoints: `/api/auth/login`
+- Audit events include IP address, username, and rate limit reason for security monitoring
+
+### CSP Headers & Security Hardening
+
+EndoriumFort now applies a centralized security-header policy on every backend response through `SecurityHeadersMiddleware`.
+
+**Always-on headers:**
+
+- `Content-Security-Policy` with restrictive defaults:
+  - `default-src 'self'`
+  - `object-src 'none'`
+  - `frame-ancestors 'self'`
+  - `base-uri 'self'`
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: SAMEORIGIN`
+- `Referrer-Policy: strict-origin-when-cross-origin`
+- `Permissions-Policy` with sensitive APIs disabled (`camera`, `microphone`, `geolocation`, `payment`, `usb`)
+- `Cross-Origin-Opener-Policy: same-origin`
+- `Cross-Origin-Resource-Policy: same-origin`
+- `X-Permitted-Cross-Domain-Policies: none`
+- `Cache-Control: no-store, no-cache, must-revalidate, private`
+
+**HSTS behavior:**
+
+- `Strict-Transport-Security` is enabled when requests are identified as HTTPS (via reverse-proxy headers like `X-Forwarded-Proto: https`).
+- HSTS is intentionally skipped for localhost development hosts to avoid sticky local-browser TLS behavior.
+
+**Validation:**
+
+- SCIM integration tests now enforce hardening headers on API responses.
+- Tests also verify HSTS activation behind HTTPS proxy headers and non-activation on localhost.
+
+### Anomaly Detection & Alerting
+
+EndoriumFort now emits correlated anomaly alerts in addition to raw audit events, so suspicious patterns are surfaced directly in the live Security Center feed.
+
+**New correlated anomaly signals:**
+
+- `behavior.anomaly.auth_failure_burst`: emitted when repeated authentication failures/rate-limited attempts exceed a threshold in a short rolling window (per username and per source IP).
+- `behavior.anomaly.stale_session`: emitted when a session remains active beyond a configurable stale threshold.
+- Existing `behavior.anomaly.command_spike` session-telemetry signal remains active and is now complemented by the new auth/session correlation rules.
+
+**How it works:**
+
+- Correlation is integrated into existing runtime flows:
+  - `/api/auth/login` tracks auth-failure signals and emits burst anomalies with anti-spam cooldown.
+  - `/api/security/alerts` performs stale-session checks before building the live alert payload.
+- Alerts stay backward-compatible with the current `GET /api/security/alerts` contract (`id`, `eventType`, `createdAt`, `actor`, `severity`, `title`, `hint`, optional `sessionId`).
+- Alert classifications now include dedicated titles/severity for auth bursts (`critical`) and stale sessions (`warning`).
+
+**Environment variables:**
+
+```bash
+# Authentication anomaly correlation
+ENDORIUMFORT_ALERT_AUTH_WINDOW_SECONDS=180
+ENDORIUMFORT_ALERT_AUTH_FAILURE_THRESHOLD=5
+ENDORIUMFORT_ALERT_AUTH_IP_THRESHOLD=8
+ENDORIUMFORT_ALERT_AUTH_COOLDOWN_SECONDS=90
+
+# Stale session detection
+ENDORIUMFORT_ALERT_STALE_SESSION_SECONDS=7200
+ENDORIUMFORT_ALERT_STALE_SESSION_COOLDOWN_SECONDS=900
+```
+
+**Validation:**
+
+- Added backend integration tests in `backend/tests/security_alerts_test.cc` covering:
+  - emission of `behavior.anomaly.auth_failure_burst` through repeated failed/rate-limited logins
+  - emission of `behavior.anomaly.stale_session` for long-running active sessions
+- Added CTest target: `backend_security_alerts_test`.
 
 ### Linux Relay Daemon (real binary)
 
@@ -701,6 +900,21 @@ Minimal production-safe flow:
 | `POST` | `/api/access-requests/:id/approve` | Approve request (admin) |
 | `POST` | `/api/access-requests/:id/deny` | Deny request (admin) |
 
+### Access Governance (JIT)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` / `POST` | `/api/access-policies` | List or create centralized JIT access policies |
+| `PUT` / `DELETE` | `/api/access-policies/:id` | Update or delete an access policy |
+| `GET` / `POST` | `/api/access-profiles` | List or create reusable access profiles |
+| `PUT` / `DELETE` | `/api/access-profiles/:id` | Update or delete an access profile |
+| `GET` | `/api/access-grants` | List ephemeral access grants (auto-expiration enforced) |
+| `GET` | `/api/sessions/:id/dna` | Get session DNA integrity chain |
+| `GET` | `/api/evidence-packs/sessions/:id` | Export signed evidence pack for a session |
+| `POST` | `/api/sessions/:id/elevation/start` | Record a JIT elevation start (`access.elevation.started`) |
+| `POST` | `/api/sessions/:id/elevation/end` | Record a JIT elevation end (`access.elevation.ended`) |
+| `POST` | `/api/sessions/:id/goal-review` | Record mission outcome review (`session.goal.match|mismatch`) |
+
 ### Users & Permissions
 
 | Method | Endpoint | Description |
@@ -719,6 +933,7 @@ Minimal production-safe flow:
 | `/api/ws/ssh` | Live SSH terminal |
 | `/api/ws/shadow` | Session shadowing (read-only) |
 | `/api/ws/rdp` | RDP session (requires FreeRDP) |
+| `/api/ws/vnc` | Browser VNC session bridge (noVNC client) |
 | `/ws/tunnel` | Agent TCP tunnel |
 
 ### Other
@@ -730,7 +945,78 @@ Minimal production-safe flow:
 | `GET`  | `/api/audit` | Audit events |
 | `GET`  | `/api/recordings` | List session recordings |
 | `GET`  | `/api/recordings/:id/cast` | Download .cast file |
+| `GET`  | `/api/vnc/capabilities` | VNC browser capability and runtime metadata |
 | `ANY`  | `/proxy/:resourceId/*` | HTTP reverse proxy |
+
+### Enterprise Integrations (Foundations)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/auth/directory/providers` | List supported directory providers (LDAP/AD foundations) |
+| `GET` | `/api/auth/directory/ldap/config` | Read current LDAP/AD runtime capability/config summary |
+| `POST` | `/api/auth/directory/ldap/test-bind` | Validate LDAP bind credentials (admin diagnostic endpoint) |
+| `GET` | `/api/auth/sso/providers` | List supported SSO providers (OIDC/SAML foundations) |
+| `GET` | `/api/auth/sso/config` | Read current SSO capability/config summary |
+| `GET` | `/api/auth/sso/oidc/start` | Start OIDC authorization flow (state + PKCE) |
+| `GET` | `/api/auth/sso/oidc/callback` | OIDC callback endpoint (JIT provisioning + session bootstrap) |
+| `GET` | `/api/scim/v2/ServiceProviderConfig` | SCIM service provider capabilities |
+| `GET` | `/api/scim/v2/Users` | SCIM-formatted user listing (supports `startIndex`, `count`, `filter`) |
+| `GET` | `/api/scim/v2/Users/:idOrUserName` | SCIM user lookup by numeric id or username |
+| `POST` | `/api/scim/v2/Users` | SCIM user provisioning (JIT-compatible account creation) |
+| `PUT` | `/api/scim/v2/Users/:idOrUserName` | SCIM user update / deprovision when `active=false` |
+| `PATCH` | `/api/scim/v2/Users/:idOrUserName` | SCIM partial update (`active`, `userName`, `role/roles`) |
+| `DELETE` | `/api/scim/v2/Users/:idOrUserName` | SCIM deprovisioning (delete + token revocation) |
+| `GET` | `/api/scim/v2/Groups` | SCIM-formatted role group listing (supports `startIndex`, `count`, `filter`) |
+| `GET` | `/api/integrations/itsm/providers` | List ITSM providers (ServiceNow/Jira) |
+| `POST` | `/api/integrations/itsm/verify-ticket` | Verify ticket with explicit fail-open / fail-closed behavior |
+| `GET` | `/api/integrations/siem/channels` | List SIEM channels (Splunk/Sentinel/syslog/webhook) |
+| `POST` | `/api/integrations/siem/events` | Forward event with explicit fail-open / fail-closed behavior |
+
+#### OIDC JIT Quick Configuration
+
+```bash
+export ENDORIUMFORT_SSO_OIDC_ENABLED=true
+export ENDORIUMFORT_SSO_DEFAULT_PROVIDER=keycloak
+export ENDORIUMFORT_SSO_OIDC_CLIENT_ID=endoriumfort
+export ENDORIUMFORT_SSO_OIDC_CLIENT_SECRET=change-me
+export ENDORIUMFORT_SSO_OIDC_AUTHORIZATION_ENDPOINT=http://localhost:8081/realms/master/protocol/openid-connect/auth
+export ENDORIUMFORT_SSO_OIDC_TOKEN_ENDPOINT=http://localhost:8081/realms/master/protocol/openid-connect/token
+export ENDORIUMFORT_SSO_OIDC_USERINFO_ENDPOINT=http://localhost:8081/realms/master/protocol/openid-connect/userinfo
+export ENDORIUMFORT_SSO_OIDC_SCOPE="openid profile email"
+export ENDORIUMFORT_SSO_OIDC_ROLE_CLAIM=role
+export ENDORIUMFORT_SSO_OIDC_DEFAULT_ROLE=operator
+```
+
+OIDC token and userinfo exchanges support both `http://` and `https://` endpoints. For HTTPS, server certificates are validated against the system trust store.
+
+#### LDAP / Active Directory Quick Configuration
+
+```bash
+export ENDORIUMFORT_LDAP_ENABLED=true
+export ENDORIUMFORT_LDAP_HOST=ldaps://dc1.example.org:636
+export ENDORIUMFORT_LDAP_BASE_DN="dc=example,dc=org"
+export ENDORIUMFORT_LDAP_BIND_DN_TEMPLATE="uid={username},ou=People,dc=example,dc=org"
+export ENDORIUMFORT_LDAP_DEFAULT_ROLE=operator
+export ENDORIUMFORT_LDAP_SYNC_ROLE=true
+# Optional username/DN overrides (exact match):
+# export ENDORIUMFORT_LDAP_ROLE_MAP="alice=admin;bob=auditor;uid=secops,ou=People,dc=example,dc=org=admin"
+# Optional partial-match rules on username or directoryIdentity:
+# export ENDORIUMFORT_LDAP_ROLE_ADMIN_MATCHERS="cn=prod-admins,ou=groups"
+# export ENDORIUMFORT_LDAP_ROLE_AUDITOR_MATCHERS="cn=auditors,ou=groups"
+```
+
+Notes:
+- Backend LDAP diagnostics and login fallback use the `ldapwhoami` CLI (OpenLDAP tools). Install package `ldap-utils` (Debian/Ubuntu) or equivalent on your distro.
+- `ENDORIUMFORT_LDAP_HOST` accepts plain hostnames (`dc1.example.org`) or LDAP URIs (`ldap://...` / `ldaps://...`). URI scheme and optional port are auto-normalized by the backend.
+- `ENDORIUMFORT_LDAP_BIND_DN_TEMPLATE` is the preferred variable name; `ENDORIUMFORT_LDAP_USER_TEMPLATE` remains accepted for backward compatibility.
+- For DN-heavy mappings, use `;` (or newline) as separator in `ENDORIUMFORT_LDAP_ROLE_MAP` and matcher variables to avoid conflicts with DN commas.
+- Role mapping precedence is: `ENDORIUMFORT_LDAP_ROLE_MAP` exact match, then admin/auditor matcher lists, then `ENDORIUMFORT_LDAP_DEFAULT_ROLE` fallback.
+- In the admin console, open **Enterprise IAM** then **Directory Integrations** to inspect provider status and run bind tests.
+
+SCIM filter support notes:
+- Users filter attributes: `id`, `userName`, `displayName`, `role` / `roles`, `active`
+- Groups filter attributes: `id`, `displayName`, `members`
+- Filter operators: `eq`, `co`, `sw`
 
 ---
 
@@ -910,7 +1196,7 @@ The build scripts automatically cross-compile the agent:
 | **Agent** | Go 1.25.9, [gorilla/websocket](https://github.com/gorilla/websocket) |
 | **Build** | CMake 3.16+, npm, Go toolchain |
 | **Database** | SQLite3 (file-based, zero config) |
-| **Protocols** | SSH, HTTP/HTTPS, RDP (FreeRDP), VNC (planned), TCP tunnel |
+| **Protocols** | SSH, HTTP/HTTPS, RDP (FreeRDP), VNC (browser via noVNC), TCP tunnel |
 
 ---
 
@@ -924,12 +1210,12 @@ The build scripts automatically cross-compile the agent:
 - [x] Session shadowing (live observation)
 - [x] Dashboard KPIs & statistics
 - [x] Smart per-component versioning
-- [ ] AES-256 encryption for vault passwords
-- [ ] Rate limiting & brute-force protection
-- [ ] CSP headers & security hardening
-- [ ] Anomaly detection & alerting
-- [ ] LDAP / Active Directory integration
-- [ ] VNC protocol support
+- [x] AES-256 encryption for vault passwords
+- [x] Rate limiting & brute-force protection
+- [x] CSP headers & security hardening
+- [x] Anomaly detection & alerting
+- [x] LDAP / Active Directory integration
+- [x] VNC protocol support
 - [x] Docker deployment
 - [ ] Cluster / HA mode
 

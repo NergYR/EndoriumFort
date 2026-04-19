@@ -3329,6 +3329,79 @@ button:disabled {
   border-color: rgba(245, 158, 11, 0.3);
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   VNC Viewer Modal
+   ══════════════════════════════════════════════════════════════════════ */
+
+.vnc-modal {
+  width: min(1100px, 95vw);
+  max-width: min(1100px, 95vw);
+  padding: 1rem;
+}
+
+.vnc-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 0.8rem;
+}
+
+.vnc-modal-header h3 {
+  margin: 0;
+}
+
+.vnc-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.vnc-status-message {
+  margin: 0 0 0.8rem;
+}
+
+.vnc-canvas-shell {
+  min-height: 62vh;
+  border-radius: 14px;
+  border: 1px solid var(--stroke);
+  background: radial-gradient(circle at 25% 15%, #1f2a44, #0b1020 55%, #060913);
+  overflow: hidden;
+}
+
+.vnc-canvas {
+  width: 100%;
+  height: 100%;
+  min-height: 62vh;
+}
+
+[data-theme="dark"] .vnc-canvas-shell {
+  border-color: rgba(148, 163, 184, 0.3);
+  background: radial-gradient(circle at 25% 15%, #1e293b, #020617 60%, #01030a);
+}
+
+@media (max-width: 900px) {
+  .vnc-modal {
+    width: 98vw;
+    max-width: 98vw;
+    padding: 0.8rem;
+  }
+
+  .vnc-modal-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .vnc-header-actions {
+    justify-content: space-between;
+  }
+
+  .vnc-canvas-shell,
+  .vnc-canvas {
+    min-height: 52vh;
+  }
+}
+
 /* Resource tiles readability refresh */
 .resource-tiles {
   gap: 0.85rem;

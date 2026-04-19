@@ -11,13 +11,18 @@
 
 struct Session {
   int id = 0;
+  int resourceId = 0;
+  int accessGrantId = 0;
   std::string target;
   std::string user;
   std::string protocol;
   std::string status;
+  std::string missionRef;
+  std::string credentialSource = "vaulted";
   std::string createdAt;
   std::string terminatedAt;
   int port = 22;
+  int maxDurationSeconds = 0;
 };
 
 struct Resource {
@@ -30,6 +35,8 @@ struct Resource {
   std::string description;
   std::string imageUrl;
   std::string imageData; // base64
+  std::string tagsCsv;
+  std::string credentialSource = "vaulted";
   std::string httpUsername;
   std::string httpPassword;
   std::string sshUsername;
@@ -41,6 +48,61 @@ struct Resource {
   std::string riskLevel = "low";
   std::string createdAt;
   std::string updatedAt;
+};
+
+struct AccessPolicy {
+  int id = 0;
+  std::string name;
+  std::string description;
+  std::string identityPattern;
+  std::string groupName;
+  std::string role;
+  std::string resourceTagsCsv;
+  std::string riskLevel = "any";
+  bool ticketRequired = false;
+  bool requireJustification = false;
+  std::string approvalMode = "inherit";
+  std::string mfaRequirement = "any";
+  std::string timeWindow = "any";
+  int maxDurationSeconds = 3600;
+  std::string routingConstraint = "any";
+  bool enabled = true;
+  std::string createdAt;
+  std::string updatedAt;
+};
+
+struct AccessProfile {
+  int id = 0;
+  std::string name;
+  std::string description;
+  std::string resourceTagsCsv;
+  std::string resourceIdsCsv;
+  int policyId = 0;
+  std::string createdAt;
+  std::string updatedAt;
+};
+
+struct AccessGrant {
+  int id = 0;
+  int policyId = 0;
+  int profileId = 0;
+  int resourceId = 0;
+  int sessionId = 0;
+  int approvalRef = 0;
+  std::string subject;
+  std::string resourceScope;
+  std::string grantedAt;
+  std::string expiresAt;
+  std::string usedAt;
+  std::string missionRef;
+  std::string elevationScope;
+  std::string status = "issued";
+  std::string credentialSource = "vaulted";
+  std::string routingConstraint = "any";
+  std::string ticketId;
+  std::string purpose;
+  std::string justification;
+  std::string mfaRequirement = "any";
 };
 
 struct AccessRequest {
@@ -184,6 +246,16 @@ struct TunnelState {
   int resource_id = 0;
   std::string user;
   std::string token;
+  std::atomic<bool> active{false};
+  std::thread reader_thread;
+};
+
+struct VncConnection {
+  int upstream_sock = -1;
+  int session_id = 0;
+  int resource_id = 0;
+  std::string user;
+  std::string role;
   std::atomic<bool> active{false};
   std::thread reader_thread;
 };

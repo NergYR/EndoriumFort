@@ -15,7 +15,7 @@
 #include <thread>
 
 namespace {
-std::string trim_copy(std::string value) {
+std::string tunnel_trim_copy(std::string value) {
   while (!value.empty() &&
          std::isspace(static_cast<unsigned char>(value.front()))) {
     value.erase(value.begin());
@@ -431,18 +431,18 @@ void register_tunnel_routes(CrowApp &app, AppContext &ctx) {
           // Authenticate with one-time tunnel ticket
           const char *ticket_param = req.url_params.get("ticket");
           const std::string proof =
-              trim_copy(req.get_header_value("X-EndoriumFort-Tunnel-Proof"));
-            const std::string signature = trim_copy(
+              tunnel_trim_copy(req.get_header_value("X-EndoriumFort-Tunnel-Proof"));
+            const std::string signature = tunnel_trim_copy(
               req.get_header_value("X-EndoriumFort-Tunnel-Signature"));
-            const std::string signature_timestamp = trim_copy(
+            const std::string signature_timestamp = tunnel_trim_copy(
               req.get_header_value("X-EndoriumFort-Tunnel-Timestamp"));
-            const std::string signature_nonce = trim_copy(
+            const std::string signature_nonce = tunnel_trim_copy(
               req.get_header_value("X-EndoriumFort-Tunnel-Nonce"));
-              const std::string challenge = trim_copy(
+              const std::string challenge = tunnel_trim_copy(
                 req.get_header_value("X-EndoriumFort-Tunnel-Challenge"));
-                const std::string signing_key_id = trim_copy(
+                const std::string signing_key_id = tunnel_trim_copy(
                   req.get_header_value("X-EndoriumFort-Tunnel-Key-Id"));
-                  const std::string server_attestation = trim_copy(
+                  const std::string server_attestation = tunnel_trim_copy(
                     req.get_header_value("X-EndoriumFort-Tunnel-Attestation"));
           const std::string ticket = ticket_param ? ticket_param : "";
           auto consumed = consume_tunnel_ticket(ctx, ticket, proof, resource_id,
