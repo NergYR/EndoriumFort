@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import RFB from '@novnc/novnc/core/rfb';
+import RFB from '@novnc/novnc/lib/rfb.js';
 import { useI18n } from '../../i18n.jsx';
 
 function buildVncWebSocketUrl(sessionId) {
