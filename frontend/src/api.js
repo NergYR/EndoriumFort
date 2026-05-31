@@ -791,6 +791,33 @@ export async function fetchRelayResolution(resourceId) {
   return response.json();
 }
 
+// ── Cluster / HA Control Plane ──────────────────────────────────────
+
+export async function fetchClusterStatus() {
+  const response = await fetch('/api/cluster/status', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch cluster status');
+  return response.json();
+}
+
+export async function fetchClusterConfig() {
+  const response = await fetch('/api/cluster/config', {
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to fetch cluster config');
+  return response.json();
+}
+
+export async function removeClusterPeer(nodeId) {
+  const response = await fetch(`/api/cluster/peers/${encodeURIComponent(String(nodeId))}`, {
+    method: 'DELETE',
+    headers: withAuthHeaders()
+  });
+  await ensureResponseOk(response, 'Failed to remove cluster peer');
+  return response.json();
+}
+
 // ── Enterprise Foundations ───────────────────────────────────────────
 
 export function startOidcSso(options = {}) {

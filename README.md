@@ -49,6 +49,7 @@ EndoriumFort is positioned as a **modern sovereign PAM platform** for self-hoste
 | **Audit CSV Export** | Export current filtered audit timeline for compliance and investigation workflows |
 | **Session SLO Insights** | Real-time completion rate, average duration, and stale-session signals for operations teams |
 | **Relay Control Plane (v1)** | Secure relay enrollment, heartbeat health, per-resource relay assignment, and route resolution (relay/direct fallback) |
+| **Cluster / HA Foundations** | Local node identity, peer heartbeat registry, stale-peer detection, and admin peer eviction |
 | **Access Justification Trail** | Admin-configurable per-resource reason popup + ticket ID attached to session creation audits |
 | **Access Playbooks** | Per-resource saved justification/purpose templates to accelerate compliant access requests |
 | **Dual Approval Workflow** | Per-resource 4-eyes control with operator request submission and admin approve/deny queue |
@@ -269,6 +270,7 @@ export ENDORIUMFORT_WEBAUTHN_ORIGIN=http://localhost:5173
     - SCIM PATCH operator workspace for partial updates (`userName`, `role`, `active`)
     - ITSM verification drills with explicit fail-open/fail-closed behavior simulation
     - SIEM forwarding drills to validate channel availability and delivery-mode behavior
+    - Cluster/HA control-plane board (local node role, peer heartbeat inventory, stale/offline state visibility, and peer eviction)
 9. **Role + resource policy access model**:
   - role defines the global permission baseline
   - assigned resources define the user scope
@@ -322,6 +324,18 @@ export ENDORIUMFORT_WEBAUTHN_ORIGIN=http://localhost:5173
   - relay route automatically falls back to `direct` when assigned relay is stale/offline
   - relay enrollment/heartbeat routes require secure transport (`HTTPS`) except local loopback lab usage
 
+13. **Cluster / HA control-plane foundations**:
+  - inspect local node posture and full peer health inventory (admin/read scopes):
+    - `GET /api/cluster/status`
+  - inspect local Cluster/HA runtime configuration:
+    - `GET /api/cluster/config`
+  - register peer heartbeat metadata (inter-node auth secret required):
+    - `POST /api/cluster/heartbeat`
+    - header: `X-EndoriumFort-Cluster-Secret`
+  - evict a retired/stale peer node from the runtime registry (admin):
+    - `DELETE /api/cluster/peers/:nodeId`
+  - stale peer detection is controlled by `cluster_heartbeat_stale_seconds` and reported as `online`/`offline`
+
 ### Relay Runtime Configuration
 
 Set relay control-plane hardening values in backend runtime:
@@ -334,6 +348,20 @@ Set relay control-plane hardening values in backend runtime:
 - `ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS`: relay stale threshold for online/offline decision (default `90`)
 
 If `ENDORIUMFORT_RELAY_ENROLL_SECRET` is not set, enrollment stays fail-closed (disabled).
+
+### Cluster / HA Runtime Configuration
+
+Set Cluster/HA control-plane values in backend runtime:
+
+- `ENDORIUMFORT_CLUSTER_ENABLED`: enable cluster mode (`true`/`false`, default `false`)
+- `ENDORIUMFORT_CLUSTER_NODE_ID`: stable local node identifier exposed by `/api/cluster/status`
+- `ENDORIUMFORT_CLUSTER_NODE_LABEL`: human-readable local node label
+- `ENDORIUMFORT_CLUSTER_ADVERTISE_ADDR`: advertised local node endpoint shown to peers/admin UI
+- `ENDORIUMFORT_CLUSTER_ROLE`: local role (`leader`, `follower`, `standalone`)
+- `ENDORIUMFORT_CLUSTER_SHARED_SECRET`: shared secret required by `POST /api/cluster/heartbeat`
+- `ENDORIUMFORT_CLUSTER_HEARTBEAT_STALE_SECONDS`: stale threshold for peer online/offline state (default `45`)
+
+If `ENDORIUMFORT_CLUSTER_ENABLED=true` but `ENDORIUMFORT_CLUSTER_SHARED_SECRET` is not configured, peer heartbeat authentication is fail-open (warning emitted at startup).
 
 ### Auth / WebAuthn Runtime Configuration
 
@@ -946,6 +974,10 @@ Minimal production-safe flow:
 | `GET`  | `/api/recordings` | List session recordings |
 | `GET`  | `/api/recordings/:id/cast` | Download .cast file |
 | `GET`  | `/api/vnc/capabilities` | VNC browser capability and runtime metadata |
+| `GET`  | `/api/cluster/status` | Cluster/HA status snapshot (local node + peers + health summary) |
+| `GET`  | `/api/cluster/config` | Cluster/HA runtime configuration metadata |
+| `POST` | `/api/cluster/heartbeat` | Peer heartbeat update (shared secret auth) |
+| `DELETE` | `/api/cluster/peers/:nodeId` | Remove a cluster peer from runtime registry |
 | `ANY`  | `/proxy/:resourceId/*` | HTTP reverse proxy |
 
 ### Enterprise Integrations (Foundations)
@@ -1113,6 +1145,13 @@ docker compose up -d
 | `ENDORIUMFORT_RELAY_ENROLL_TOKEN_TTL_SECONDS` | `600` | Relay enrollment token TTL in seconds |
 | `ENDORIUMFORT_RELAY_TOKEN_TTL_SECONDS` | `86400` | Relay auth token TTL in seconds |
 | `ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS` | `90` | Relay stale threshold in seconds |
+| `ENDORIUMFORT_CLUSTER_ENABLED` | `false` | Enable Cluster/HA mode |
+| `ENDORIUMFORT_CLUSTER_NODE_ID` | _(empty)_ | Stable local node identifier |
+| `ENDORIUMFORT_CLUSTER_NODE_LABEL` | _(empty)_ | Local node display label |
+| `ENDORIUMFORT_CLUSTER_ADVERTISE_ADDR` | _(empty)_ | Advertised local node endpoint |
+| `ENDORIUMFORT_CLUSTER_ROLE` | `standalone` | Local cluster role (`leader`, `follower`, `standalone`) |
+| `ENDORIUMFORT_CLUSTER_SHARED_SECRET` | _(empty)_ | Shared secret required for peer heartbeat updates |
+| `ENDORIUMFORT_CLUSTER_HEARTBEAT_STALE_SECONDS` | `45` | Cluster peer stale threshold in seconds |
 
 ### Persistent Volumes
 
@@ -1217,7 +1256,7 @@ The build scripts automatically cross-compile the agent:
 - [x] LDAP / Active Directory integration
 - [x] VNC protocol support
 - [x] Docker deployment
-- [ ] Cluster / HA mode
+- [x] Cluster / HA mode
 
 ---
 

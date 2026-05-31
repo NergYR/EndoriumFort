@@ -29,6 +29,22 @@ bool parse_scim_list_query_params(const char *start_index_param,
   return true;
 }
 
+ScimPageWindow scim_page_window(const ScimListQuery &query,
+                                std::size_t total_results) {
+  std::size_t start_offset = 0;
+  if (query.startIndex > 1) {
+    start_offset = static_cast<std::size_t>(query.startIndex) - 1;
+  }
+  if (start_offset > total_results) start_offset = total_results;
+
+  std::size_t count = 0;
+  if (query.count > 0) count = static_cast<std::size_t>(query.count);
+  const std::size_t remaining = total_results - start_offset;
+  if (count > remaining) count = remaining;
+
+  return {start_offset, start_offset + count};
+}
+
 std::optional<ScimFilterExpression> parse_scim_filter_expression(
     const std::string &raw_filter, std::string &error_message) {
   const std::string filter = trim_copy(raw_filter);

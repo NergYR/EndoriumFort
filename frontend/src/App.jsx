@@ -83,7 +83,10 @@ import {
   fetchItsmProviders,
   verifyItsmTicket,
   fetchSiemChannels,
-  forwardSiemEvent
+  forwardSiemEvent,
+  fetchClusterStatus,
+  fetchClusterConfig,
+  removeClusterPeer
 } from './api.js';
 import { describeAccessOutcome, describeResourcePolicy, normalizeRiskLevel } from './accessPolicy.js';
 import AdminSectionNav from './components/admin/AdminSectionNav.jsx';
@@ -491,6 +494,10 @@ export default function App() {
   const [enterpriseSiemSimulateFailure, setEnterpriseSiemSimulateFailure] = useState(false);
   const [enterpriseSiemLoading, setEnterpriseSiemLoading] = useState(false);
   const [enterpriseSiemResult, setEnterpriseSiemResult] = useState(null);
+  const [enterpriseClusterStatus, setEnterpriseClusterStatus] = useState(null);
+  const [enterpriseClusterConfig, setEnterpriseClusterConfig] = useState(null);
+  const [enterpriseClusterPeerBusy, setEnterpriseClusterPeerBusy] = useState('');
+  const [enterpriseClusterPeerMessage, setEnterpriseClusterPeerMessage] = useState('');
   const [sessionEvidencePack, setSessionEvidencePack] = useState(null);
   const [sessionEvidenceLoading, setSessionEvidenceLoading] = useState(false);
   const [sessionEvidenceError, setSessionEvidenceError] = useState('');
@@ -855,11 +862,13 @@ export default function App() {
         id: 'enterprise',
         label: 'Enterprise IAM',
         hint: 'LDAP/AD, SSO, SCIM, ITSM, SIEM',
+        
         badge: String(
           enterpriseDirectoryProviders.length +
           enterpriseSsoProviders.length +
           enterpriseItsmProviders.length +
-          enterpriseSiemChannels.length
+          enterpriseSiemChannels.length +
+          (Number(enterpriseClusterStatus?.summary?.nodesTotal) || 0)
         ),
         badgeTone: enterpriseLoading ? 'loading' : 'ok'
       },
@@ -871,7 +880,7 @@ export default function App() {
         badgeTone: adminsWithoutMfa ? 'loading' : 'ok'
       }
     ];
-  }, [accessGrants.length, accessRequests, enterpriseDirectoryProviders.length, enterpriseItsmProviders.length, enterpriseLoading, enterpriseSiemChannels.length, enterpriseSsoProviders.length, loadingAccessGrants, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, t, users.length]);
+  }, [accessGrants.length, accessRequests, enterpriseClusterStatus, enterpriseDirectoryProviders.length, enterpriseItsmProviders.length, enterpriseLoading, enterpriseSiemChannels.length, enterpriseSsoProviders.length, loadingAccessGrants, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, t, users.length]);
 
   const activeAdminSection = useMemo(
     () => adminSections.find((section) => section.id === adminSection) || null,
@@ -1968,15 +1977,28 @@ export default function App() {
   const loadEnterpriseFoundations = async () => {
     setEnterpriseLoading(true);
     setEnterpriseError('');
+    setEnterpriseClusterPeerMessage('');
     try {
-      const [directoryData, ldapConfigData, providersData, configData, scimConfigData, itsmData, siemData] = await Promise.all([
+      const [
+        directoryData,
+        ldapConfigData,
+        providersData,
+        configData,
+        scimConfigData,
+        itsmData,
+        siemData,
+        clusterStatusData,
+        clusterConfigData
+      ] = await Promise.all([
         fetchDirectoryProviders(),
         fetchLdapConfig(),
         fetchSsoProviders(),
         fetchSsoConfig(),
         fetchScimServiceProviderConfig(),
         fetchItsmProviders(),
-        fetchSiemChannels()
+        fetchSiemChannels(),
+        fetchClusterStatus(),
+        fetchClusterConfig()
       ]);
 
       const nextDirectoryProviders = Array.isArray(directoryData?.items) ? directoryData.items : [];
@@ -1991,6 +2013,8 @@ export default function App() {
       setEnterpriseScimConfig(scimConfigData || null);
       setEnterpriseItsmProviders(nextItsmProviders);
       setEnterpriseSiemChannels(nextSiemChannels);
+      setEnterpriseClusterStatus(clusterStatusData || null);
+      setEnterpriseClusterConfig(clusterConfigData || null);
 
       const defaultSsoProvider = String(configData?.defaultProvider || nextSsoProviders[0]?.id || '');
       setEnterpriseSsoProvider((prev) =>
@@ -2229,6 +2253,26 @@ export default function App() {
     }
   };
 
+  const onRemoveEnterpriseClusterPeer = async (nodeId) => {
+    const normalized = String(nodeId || '').trim();
+    if (!normalized) return;
+    setEnterpriseClusterPeerBusy(normalized);
+    setEnterpriseClusterPeerMessage('');
+    try {
+      await removeClusterPeer(normalized);
+      setEnterpriseClusterPeerMessage(locale === 'fr'
+        ? `Noeud retire: ${normalized}`
+        : `Peer removed: ${normalized}`);
+      await loadEnterpriseFoundations();
+    } catch (error) {
+      setEnterpriseClusterPeerMessage(error.message || (locale === 'fr'
+        ? 'Suppression du noeud impossible.'
+        : 'Unable to remove cluster peer.'));
+    } finally {
+      setEnterpriseClusterPeerBusy('');
+    }
+  };
+
   useEffect(() => {
     if (!auth.token || !canManagePlatform) {
       setEnterpriseLoading(false);
@@ -2254,6 +2298,10 @@ export default function App() {
       setEnterpriseItsmResult(null);
       setEnterpriseSiemChannels([]);
       setEnterpriseSiemResult(null);
+      setEnterpriseClusterStatus(null);
+      setEnterpriseClusterConfig(null);
+      setEnterpriseClusterPeerBusy('');
+      setEnterpriseClusterPeerMessage('');
       return;
     }
     if (adminSection !== 'enterprise') {
@@ -5780,6 +5828,14 @@ export default function App() {
                 <span>SIEM channels</span>
                 <strong>{enterpriseSiemChannels.length}</strong>
               </article>
+              <article className={`relay-kpi-card ${enterpriseClusterStatus?.enabled ? 'ok' : 'warning'}`}>
+                <span>Cluster mode</span>
+                <strong>{enterpriseClusterStatus?.enabled ? 'enabled' : 'disabled'}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Cluster nodes</span>
+                <strong>{Number(enterpriseClusterStatus?.summary?.nodesTotal) || 1}</strong>
+              </article>
             </div>
 
             <form className="resource-form" onSubmit={(event) => {
@@ -5853,6 +5909,79 @@ export default function App() {
                   ? 'Endpoints OIDC en HTTPS pris en charge avec validation de certificat système.'
                   : 'OIDC endpoints support HTTPS with system trust-store certificate validation.'}
               </p>
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.2rem' }}>
+              <div>
+                <h3>Cluster / HA Control Plane</h3>
+                <p>
+                  {locale === 'fr'
+                    ? 'Etat local, heartbeat inter-noeuds et inventaire des pairs.'
+                    : 'Local node posture, inter-node heartbeat health, and peer inventory.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="relay-enroll-token-box">
+              <p>
+                <strong>Node ID</strong>: {enterpriseClusterConfig?.nodeId || enterpriseClusterStatus?.localNode?.nodeId || 'node-local'}
+              </p>
+              <p>
+                <strong>Node label</strong>: {enterpriseClusterConfig?.nodeLabel || enterpriseClusterStatus?.localNode?.label || 'Primary Node'}
+              </p>
+              <p>
+                <strong>Role</strong>: {enterpriseClusterConfig?.role || enterpriseClusterStatus?.localNode?.role || 'standalone'}
+              </p>
+              <p>
+                <strong>Advertise address</strong>: {enterpriseClusterConfig?.advertiseAddr || enterpriseClusterStatus?.localNode?.endpoint || 'n/a'}
+              </p>
+              <p>
+                <strong>Peer auth</strong>: {enterpriseClusterConfig?.peerAuthRequired ? 'required' : 'disabled'}
+              </p>
+              <p>
+                <strong>Heartbeat stale threshold</strong>: {enterpriseClusterConfig?.heartbeatStaleSeconds || enterpriseClusterStatus?.heartbeatStaleSeconds || 45}s
+              </p>
+              <p>
+                <strong>Summary</strong>: {(Number(enterpriseClusterStatus?.summary?.nodesOnline) || 1)} online / {(Number(enterpriseClusterStatus?.summary?.nodesOffline) || 0)} offline
+              </p>
+            </div>
+
+            {enterpriseClusterPeerMessage && <p className="muted">{enterpriseClusterPeerMessage}</p>}
+
+            <div className="resource-list relay-fleet-list">
+              {Array.isArray(enterpriseClusterStatus?.peers) && enterpriseClusterStatus.peers.length ? enterpriseClusterStatus.peers.map((peer) => {
+                const peerStatus = String(peer?.status || '').toLowerCase() === 'online' ? 'online' : 'offline';
+                return (
+                  <article className="resource-row relay-row" key={`cluster-peer-${peer.nodeId}`}>
+                    <div>
+                      <h4>{peer.label || peer.nodeId}</h4>
+                      <p className="muted">
+                        {peer.nodeId} • {peer.role || 'follower'} • {peer.endpoint || peer.sourceIp || 'n/a'}
+                      </p>
+                      <p className="muted">
+                        version {peer.version || 'n/a'} • relays {Number(peer.managedRelays) || 0} • sessions {Number(peer.managedSessions) || 0}
+                      </p>
+                    </div>
+                    <div className="resource-actions">
+                      <span className={`pill ${peerStatus === 'online' ? 'ok' : 'offline'}`}>{peerStatus}</span>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => onRemoveEnterpriseClusterPeer(peer.nodeId)}
+                        disabled={enterpriseClusterPeerBusy === peer.nodeId}
+                      >
+                        {enterpriseClusterPeerBusy === peer.nodeId
+                          ? (locale === 'fr' ? 'Suppression...' : 'Removing...')
+                          : (locale === 'fr' ? 'Retirer' : 'Remove')}
+                      </button>
+                    </div>
+                  </article>
+                );
+              }) : (
+                <p className="muted">
+                  {locale === 'fr' ? 'Aucun pair cluster recu pour le moment.' : 'No cluster peer heartbeat received yet.'}
+                </p>
+              )}
             </div>
           </div>
           )}

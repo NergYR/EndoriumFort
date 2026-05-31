@@ -232,3 +232,4 @@
 {"id":36,"type":"user.scim.deprovisioned","actor":"admin","role":"admin","createdAt":"2026-04-19T18:30:39Z","payload":{"userId":3,"username":"bob","role":"operator","createdAt":"2026-04-19T18:30:37Z","updatedAt":"2026-04-19T18:30:37Z"}}
 {"id":1,"type":"auth.login.sso.failure","actor":"anonymous","role":"anonymous","createdAt":"2026-04-19T18:36:06Z","payload":{"provider":"unknown","reason":"config_error","detail":"Missing OIDC client identifier configuration"}}
 {"id":2,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-04-19T18:36:14Z","payload":{"userId":1,"username":"admin","ip":"127.0.0.1","authSource":"local","directoryRole":"","directoryRoleStrategy":""}}
+{"id":2,"type":"auth.login.success","actor":"admin","role":"admin","createdAt":"2026-04-24T08:45:15Z","payload":{"userId":1,"username":"admin","ip":"127.0.0.1","authSource":"local","directoryRole":"","directoryRoleStrategy":""}}

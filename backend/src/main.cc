@@ -3,6 +3,7 @@
 // all route groups, and starts the server.
 
 #include "app_context.h"
+#include "cluster.h"
 #include "http_proxy.h"
 #include "rdp.h"
 #include "runtime_config.h"
@@ -50,6 +51,7 @@ int main() {
   register_recording_routes(app, ctx);
   register_stats_routes(app, ctx);
   register_enterprise_routes(app, ctx);
+  register_cluster_routes(app, ctx);
   register_proxy_routes(app, ctx);
   register_web_resource_routes(app, ctx);
   register_ssh_routes(app, ctx);

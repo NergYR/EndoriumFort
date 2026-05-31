@@ -1,6 +1,7 @@
 #include "scim_query.h"
 
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace {
@@ -71,6 +72,30 @@ int main() {
                  "large count should be accepted then clamped");
     ok &= expect(query.count == 200,
                  "count should be clamped to SCIM maxResults=200");
+  }
+
+  {
+    ScimListQuery query;
+    query.startIndex = std::numeric_limits<int>::max();
+    query.count = 200;
+    const auto window = scim_page_window(query, 10);
+    ok &= expect(window.start == 10 && window.end == 10,
+                 "huge startIndex should clamp to the result count");
+  }
+
+  {
+    ScimListQuery query;
+    query.startIndex = std::numeric_limits<int>::max();
+    query.count = 200;
+    const std::size_t total =
+        static_cast<std::size_t>(std::numeric_limits<int>::max()) + 100;
+    const auto window = scim_page_window(query, total);
+    ok &= expect(window.start ==
+                     static_cast<std::size_t>(std::numeric_limits<int>::max()) -
+                         1,
+                 "huge startIndex should convert to a safe size_t offset");
+    ok &= expect(window.end == window.start + 101,
+                 "SCIM page window should add only the remaining result count");
   }
 
   {

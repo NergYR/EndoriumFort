@@ -275,3 +275,16 @@ struct RelayNode {
   std::string tokenExpiresAt;
   int managedResourceCount = 0;
 };
+
+struct ClusterPeerNode {
+  std::string nodeId;
+  std::string label;
+  std::string endpoint;
+  std::string version;
+  std::string role = "follower";
+  std::string status = "offline";
+  std::string sourceIp;
+  std::string lastSeenAt;
+  int managedRelays = 0;
+  int managedSessions = 0;
+};

@@ -240,6 +240,17 @@ struct AppContext {
   int relay_token_ttl_seconds = 86400;  // 24h
   int relay_heartbeat_stale_seconds = 90;
 
+  // ── Cluster / HA control-plane state ──
+  std::mutex cluster_mutex;
+  std::unordered_map<std::string, ClusterPeerNode> cluster_peers;
+  bool cluster_enabled = false;
+  std::string cluster_node_id = "node-local";
+  std::string cluster_node_label = "Primary Node";
+  std::string cluster_advertise_addr;
+  std::string cluster_role = "standalone";
+  std::string cluster_shared_secret;
+  int cluster_heartbeat_stale_seconds = 45;
+
 #ifdef ENDORIUMFORT_SSH_ENABLED
 #ifndef _WIN32
   // ── SSH WebSocket state ──

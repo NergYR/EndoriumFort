@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -2990,8 +2991,12 @@ void register_auth_routes(CrowApp &app, AppContext &ctx) {
                 ? request.url_params.get("postLoginRedirect")
                 : "/");
         state.createdAt = now_utc();
-        state.expiresAt =
-            utc_from_epoch_seconds(now_epoch_seconds() + kOidcStateTtlSeconds);
+        const auto state_expires_at = checked_epoch_seconds_after(
+            now_epoch_seconds(), kOidcStateTtlSeconds);
+        if (!state_expires_at) {
+          return crow::response(500, "Invalid OIDC state TTL");
+        }
+        state.expiresAt = utc_from_epoch_seconds(*state_expires_at);
 
         if (!store_oidc_auth_state(ctx, state)) {
           append_sso_failure_audit(ctx, config->provider, "state_persist_error",
@@ -5469,8 +5474,13 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
                                     ? std::to_string(resource.id)
                                     : resource.name;
           grant.grantedAt = now_utc();
-          grant.expiresAt = utc_from_epoch_seconds(
-              now_epoch_seconds() + std::max(300, decision.maxDurationSeconds));
+          const auto grant_expires_at = checked_epoch_seconds_after(
+              now_epoch_seconds(),
+              std::max<int64_t>(300, decision.maxDurationSeconds));
+          if (!grant_expires_at) {
+            return crow::response(500, "Invalid access grant TTL");
+          }
+          grant.expiresAt = utc_from_epoch_seconds(*grant_expires_at);
           grant.missionRef = mission_ref;
           grant.status = "issued";
           grant.credentialSource = resource.credentialSource;
@@ -6332,24 +6342,18 @@ void register_enterprise_routes(CrowApp &app, AppContext &ctx) {
           filtered_users.push_back(user);
         }
 
-        const int total_results = static_cast<int>(filtered_users.size());
-        int start_offset = query.startIndex - 1;
-        if (start_offset < 0) start_offset = 0;
-        if (start_offset > total_results) start_offset = total_results;
-        int end_offset = start_offset + query.count;
-        if (end_offset > total_results) end_offset = total_results;
-        if (end_offset < start_offset) end_offset = start_offset;
+        const auto page = scim_page_window(query, filtered_users.size());
 
         crow::json::wvalue payload;
         payload["schemas"] = crow::json::wvalue::list();
         payload["schemas"][0] =
             "urn:ietf:params:scim:api:messages:2.0:ListResponse";
-        payload["totalResults"] = total_results;
+        payload["totalResults"] = static_cast<uint64_t>(filtered_users.size());
         payload["startIndex"] = query.startIndex;
-        payload["itemsPerPage"] = end_offset - start_offset;
+        payload["itemsPerPage"] = static_cast<uint64_t>(page.end - page.start);
         payload["Resources"] = crow::json::wvalue::list();
-        int out_index = 0;
-        for (int i = start_offset; i < end_offset; ++i) {
+        unsigned out_index = 0;
+        for (std::size_t i = page.start; i < page.end; ++i) {
           payload["Resources"][out_index++] =
               scim_user_resource_json(filtered_users[i]);
         }
@@ -6698,24 +6702,18 @@ void register_enterprise_routes(CrowApp &app, AppContext &ctx) {
           filtered_names.push_back(name);
         }
 
-        const int total_results = static_cast<int>(filtered_names.size());
-        int start_offset = query.startIndex - 1;
-        if (start_offset < 0) start_offset = 0;
-        if (start_offset > total_results) start_offset = total_results;
-        int end_offset = start_offset + query.count;
-        if (end_offset > total_results) end_offset = total_results;
-        if (end_offset < start_offset) end_offset = start_offset;
+        const auto page = scim_page_window(query, filtered_names.size());
 
         crow::json::wvalue payload;
         payload["schemas"] = crow::json::wvalue::list();
         payload["schemas"][0] =
             "urn:ietf:params:scim:api:messages:2.0:ListResponse";
-        payload["totalResults"] = total_results;
+        payload["totalResults"] = static_cast<uint64_t>(filtered_names.size());
         payload["startIndex"] = query.startIndex;
-        payload["itemsPerPage"] = end_offset - start_offset;
+        payload["itemsPerPage"] = static_cast<uint64_t>(page.end - page.start);
         payload["Resources"] = crow::json::wvalue::list();
-        int out_index = 0;
-        for (int i = start_offset; i < end_offset; ++i) {
+        unsigned out_index = 0;
+        for (std::size_t i = page.start; i < page.end; ++i) {
           const auto &name = filtered_names[i];
           payload["Resources"][out_index]["schemas"] =
               crow::json::wvalue::list();
@@ -8221,8 +8219,12 @@ void register_stats_routes(CrowApp &app, AppContext &ctx) {
             lease.username = target_resource.sshUsername;
             lease.status = "issued";
             lease.issuedAt = now_utc();
-            lease.expiresAt =
-                utc_from_epoch_seconds(now_epoch + kEphemeralLeaseTtlSeconds);
+            const auto lease_expires_at =
+                checked_epoch_seconds_after(now_epoch, kEphemeralLeaseTtlSeconds);
+            if (!lease_expires_at) {
+              return crow::response(500, "Invalid ephemeral lease TTL");
+            }
+            lease.expiresAt = utc_from_epoch_seconds(*lease_expires_at);
 
             {
               std::lock_guard<std::mutex> lock(ctx.ephemeral_credential_mutex);

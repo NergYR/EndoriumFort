@@ -53,6 +53,7 @@ add_executable(endoriumfort_backend
   src/http_proxy.cc
   src/scim_query.cc
   src/routes.cc
+  src/cluster.cc
   src/relay.cc
   src/ssh.cc
   src/tunnel.cc
@@ -114,6 +115,7 @@ if (BUILD_TESTING)
     src/http_proxy.cc
     src/scim_query.cc
     src/routes.cc
+    src/cluster.cc
     src/vnc.cc
   )
 

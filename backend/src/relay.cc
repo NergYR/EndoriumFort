@@ -7,9 +7,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
+#include <limits>
+#include <optional>
 #include <sstream>
 
 namespace {
+constexpr size_t kRelayIdMaxLength = 128;
+constexpr size_t kRelayLabelMaxLength = 256;
+constexpr size_t kRelayVersionMaxLength = 128;
+
 std::string relay_trim_copy(std::string value) {
   while (!value.empty() &&
          std::isspace(static_cast<unsigned char>(value.front()))) {
@@ -20,6 +27,18 @@ std::string relay_trim_copy(std::string value) {
     value.pop_back();
   }
   return value;
+}
+
+std::optional<std::string> relay_trimmed_json_string(
+    const crow::json::rvalue &value, size_t max_bytes) {
+  try {
+    if (value.t() != crow::json::type::String) return std::nullopt;
+    const auto raw = value.s();
+    if (raw.size() > max_bytes) return std::nullopt;
+    return relay_trim_copy(static_cast<std::string>(raw));
+  } catch (...) {
+    return std::nullopt;
+  }
 }
 
 std::string request_source_ip(const crow::request &request) {
@@ -165,20 +184,26 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
         int ttl_seconds = ctx.relay_certificate_ttl_seconds;
         auto body = crow::json::load(request.body);
         if (body && body.has("ttlSeconds")) {
-          const int requested = body["ttlSeconds"].i();
+          const int64_t requested = body["ttlSeconds"].i();
           if (requested > 0) {
-            ttl_seconds = std::max(3600, std::min(requested, 7776000));
+            ttl_seconds = static_cast<int>(
+                std::max<int64_t>(3600, std::min<int64_t>(requested, 7776000)));
           }
         }
 
         const int64_t now_epoch = now_epoch_seconds();
         cleanup_relay_certificates(ctx, now_epoch);
+        const auto expires_at_epoch =
+            checked_epoch_seconds_after(now_epoch, ttl_seconds);
+        if (!expires_at_epoch) {
+          return crow::response(500, "Invalid relay certificate TTL");
+        }
 
         RelayCertificate cert;
         cert.certificateId = "efrc_" + ctx.generate_token().substr(4);
         cert.certificate = "efrcert_" + ctx.generate_token().substr(4);
         cert.createdAt = now_utc();
-        cert.expiresAtEpoch = now_epoch + ttl_seconds;
+        cert.expiresAtEpoch = *expires_at_epoch;
         cert.expiresAt = utc_from_epoch_seconds(cert.expiresAtEpoch);
         cert.createdBy = auth->user;
 
@@ -225,19 +250,25 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
         int ttl_seconds = ctx.relay_enrollment_token_ttl_seconds;
         auto body = crow::json::load(request.body);
         if (body && body.has("ttlSeconds")) {
-          const int requested = body["ttlSeconds"].i();
+          const int64_t requested = body["ttlSeconds"].i();
           if (requested > 0) {
-            ttl_seconds = std::max(60, std::min(requested, 3600));
+            ttl_seconds = static_cast<int>(
+                std::max<int64_t>(60, std::min<int64_t>(requested, 3600)));
           }
         }
 
         const int64_t now_epoch = now_epoch_seconds();
         cleanup_relay_enrollment_tokens(ctx, now_epoch);
+        const auto expires_at_epoch =
+            checked_epoch_seconds_after(now_epoch, ttl_seconds);
+        if (!expires_at_epoch) {
+          return crow::response(500, "Invalid relay enrollment token TTL");
+        }
 
         RelayEnrollmentToken token;
         token.token = "efenr_" + ctx.generate_token();
         token.createdAt = now_utc();
-        token.expiresAtEpoch = now_epoch + ttl_seconds;
+        token.expiresAtEpoch = *expires_at_epoch;
         token.expiresAt = utc_from_epoch_seconds(token.expiresAtEpoch);
         token.createdBy = auth->user;
 
@@ -297,10 +328,12 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
           return crow::response(401, "Relay enrollment denied");
         }
 
-        const std::string relay_id = relay_trim_copy(std::string(body["relayId"].s()));
-        if (relay_id.empty()) {
+        const auto relay_id_value =
+            relay_trimmed_json_string(body["relayId"], kRelayIdMaxLength);
+        if (!relay_id_value || relay_id_value->empty()) {
           return crow::response(400, "Invalid relayId");
         }
+        const std::string relay_id = *relay_id_value;
 
         std::string certificate_id;
         if (ctx.relay_certificate_required) {
@@ -318,8 +351,20 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
 
         RelayNode relay;
         relay.relayId = relay_id;
-        relay.label = body.has("label") ? relay_trim_copy(std::string(body["label"].s())) : relay_id;
-        relay.version = body.has("version") ? relay_trim_copy(std::string(body["version"].s())) : "";
+        relay.label = relay_id;
+        if (body.has("label")) {
+          const auto label =
+              relay_trimmed_json_string(body["label"], kRelayLabelMaxLength);
+          if (!label) return crow::response(400, "Invalid label");
+          relay.label = *label;
+        }
+        relay.version = "";
+        if (body.has("version")) {
+          const auto version =
+              relay_trimmed_json_string(body["version"], kRelayVersionMaxLength);
+          if (!version) return crow::response(400, "Invalid version");
+          relay.version = *version;
+        }
         relay.capabilitiesCsv = body.has("capabilities")
                                     ? join_capabilities(body["capabilities"])
                                     : "";
@@ -330,8 +375,12 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
         relay.certificateBoundAt = relay.enrolledAt;
         relay.lastSeenAt = relay.enrolledAt;
         relay.token = "efr_" + ctx.generate_token();
-        relay.tokenExpiresAt =
-            utc_from_epoch_seconds(now_epoch_seconds() + ctx.relay_token_ttl_seconds);
+        const auto relay_token_expires_at =
+            checked_epoch_seconds_after(now_epoch, ctx.relay_token_ttl_seconds);
+        if (!relay_token_expires_at) {
+          return crow::response(500, "Invalid relay token TTL");
+        }
+        relay.tokenExpiresAt = utc_from_epoch_seconds(*relay_token_expires_at);
 
         {
           std::lock_guard<std::mutex> lock(ctx.relay_mutex);
@@ -488,8 +537,12 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
           return crow::response(400, "Missing resourceId");
         }
 
-        const int resource_id = body["resourceId"].i();
-        if (resource_id <= 0) return crow::response(400, "Invalid resourceId");
+        const int64_t requested_resource_id = body["resourceId"].i();
+        if (requested_resource_id <= 0 ||
+            requested_resource_id > std::numeric_limits<int>::max()) {
+          return crow::response(400, "Invalid resourceId");
+        }
+        const int resource_id = static_cast<int>(requested_resource_id);
 
         {
           std::lock_guard<std::mutex> lock(ctx.resource_mutex);
@@ -500,8 +553,12 @@ void register_relay_routes(CrowApp &app, AppContext &ctx) {
 
         std::string relay_id;
         if (body.has("relayId")) {
-          relay_id = relay_trim_copy(std::string(body["relayId"].s()));
-          if (relay_id.empty()) return crow::response(400, "Invalid relayId");
+          const auto relay_id_value =
+              relay_trimmed_json_string(body["relayId"], kRelayIdMaxLength);
+          if (!relay_id_value || relay_id_value->empty()) {
+            return crow::response(400, "Invalid relayId");
+          }
+          relay_id = *relay_id_value;
           std::lock_guard<std::mutex> lock(ctx.relay_mutex);
           if (ctx.relays.find(relay_id) == ctx.relays.end()) {
             return crow::response(404, "Relay not found");
