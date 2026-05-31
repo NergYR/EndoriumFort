@@ -51,12 +51,15 @@ add_executable(endoriumfort_backend
   src/main.cc
   src/app_context.cc
   src/http_proxy.cc
+  src/scim_query.cc
   src/routes.cc
+  src/cluster.cc
   src/relay.cc
   src/ssh.cc
   src/tunnel.cc
   src/session_recording.cc
   src/rdp.cc
+  src/vnc.cc
 )
 
 add_dependencies(endoriumfort_backend increment_version)
@@ -72,7 +75,7 @@ target_compile_definitions(endoriumfort_backend
   PRIVATE ASIO_STANDALONE
 )
 
-target_link_libraries(endoriumfort_backend PRIVATE SQLite::SQLite3 OpenSSL::Crypto)
+target_link_libraries(endoriumfort_backend PRIVATE SQLite::SQLite3 OpenSSL::SSL OpenSSL::Crypto)
 
 if (LibSSH2_FOUND)
   target_link_libraries(endoriumfort_backend PRIVATE LibSSH2::LibSSH2)
@@ -101,6 +104,29 @@ if (BUILD_TESTING)
     tests/runtime_config_test.cc
   )
 
+  add_executable(endoriumfort_backend_scim_query_tests
+    tests/scim_query_test.cc
+    src/scim_query.cc
+  )
+
+  add_executable(endoriumfort_backend_scim_routes_tests
+    tests/scim_routes_test.cc
+    src/app_context.cc
+    src/http_proxy.cc
+    src/scim_query.cc
+    src/routes.cc
+    src/cluster.cc
+    src/vnc.cc
+  )
+
+  add_executable(endoriumfort_backend_security_alerts_tests
+    tests/security_alerts_test.cc
+    src/app_context.cc
+    src/http_proxy.cc
+    src/scim_query.cc
+    src/routes.cc
+  )
+
   target_include_directories(endoriumfort_backend_tests
     PRIVATE
       ${crow_SOURCE_DIR}/include
@@ -122,6 +148,27 @@ if (BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
 
+  target_include_directories(endoriumfort_backend_scim_query_tests
+    PRIVATE
+      ${crow_SOURCE_DIR}/include
+      ${asio_SOURCE_DIR}/asio/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_include_directories(endoriumfort_backend_scim_routes_tests
+    PRIVATE
+      ${crow_SOURCE_DIR}/include
+      ${asio_SOURCE_DIR}/asio/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_include_directories(endoriumfort_backend_security_alerts_tests
+    PRIVATE
+      ${crow_SOURCE_DIR}/include
+      ${asio_SOURCE_DIR}/asio/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
   target_compile_definitions(endoriumfort_backend_tests
     PRIVATE ASIO_STANDALONE
   )
@@ -134,11 +181,42 @@ if (BUILD_TESTING)
     PRIVATE ASIO_STANDALONE
   )
 
+  target_compile_definitions(endoriumfort_backend_scim_query_tests
+    PRIVATE ASIO_STANDALONE
+  )
+
+  target_compile_definitions(endoriumfort_backend_scim_routes_tests
+    PRIVATE ASIO_STANDALONE
+  )
+
+  target_compile_definitions(endoriumfort_backend_security_alerts_tests
+    PRIVATE ASIO_STANDALONE
+  )
+
   target_link_libraries(endoriumfort_backend_tests PRIVATE OpenSSL::Crypto)
   target_link_libraries(endoriumfort_backend_auth_mfa_tests PRIVATE OpenSSL::Crypto)
   target_link_libraries(endoriumfort_backend_runtime_config_tests PRIVATE OpenSSL::Crypto SQLite::SQLite3)
+  target_link_libraries(endoriumfort_backend_scim_query_tests PRIVATE OpenSSL::Crypto)
+  target_link_libraries(endoriumfort_backend_scim_routes_tests PRIVATE SQLite::SQLite3 OpenSSL::SSL OpenSSL::Crypto)
+  target_link_libraries(endoriumfort_backend_security_alerts_tests PRIVATE SQLite::SQLite3 OpenSSL::SSL OpenSSL::Crypto)
+
+  if (LibSSH2_FOUND)
+    target_compile_definitions(endoriumfort_backend_scim_routes_tests PRIVATE ENDORIUMFORT_SSH_ENABLED)
+    target_compile_definitions(endoriumfort_backend_security_alerts_tests PRIVATE ENDORIUMFORT_SSH_ENABLED)
+  elseif (TARGET PkgConfig::LIBSSH2)
+    target_compile_definitions(endoriumfort_backend_scim_routes_tests PRIVATE ENDORIUMFORT_SSH_ENABLED)
+    target_compile_definitions(endoriumfort_backend_security_alerts_tests PRIVATE ENDORIUMFORT_SSH_ENABLED)
+  endif()
+
+  if (WIN32)
+    target_link_libraries(endoriumfort_backend_scim_routes_tests PRIVATE ws2_32 mswsock)
+    target_link_libraries(endoriumfort_backend_security_alerts_tests PRIVATE ws2_32 mswsock)
+  endif()
 
   add_test(NAME backend_utils_test COMMAND endoriumfort_backend_tests)
   add_test(NAME backend_auth_mfa_test COMMAND endoriumfort_backend_auth_mfa_tests)
   add_test(NAME backend_runtime_config_test COMMAND endoriumfort_backend_runtime_config_tests)
+  add_test(NAME backend_scim_query_test COMMAND endoriumfort_backend_scim_query_tests)
+  add_test(NAME backend_scim_routes_test COMMAND endoriumfort_backend_scim_routes_tests)
+  add_test(NAME backend_security_alerts_test COMMAND endoriumfort_backend_security_alerts_tests)
 endif()

@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import './webproxy.css';
+import { useI18n } from './i18n.jsx';
 
 export default function WebProxyViewer({ resourceId, token, resourceName, onNavigate }) {
   const [loading, setLoading] = useState(true);
+  const { t } = useI18n();
 
   useEffect(() => {
     if (!resourceId || !token) {
@@ -28,20 +30,20 @@ export default function WebProxyViewer({ resourceId, token, resourceName, onNavi
         <button 
           className="back-button"
           onClick={() => onNavigate('/')}
-          title="Retour au tableau de bord"
+          title={t('webproxy.dashboard')}
         >
-          ← Retour
+          ← {t('webproxy.back')}
         </button>
-        <h2>{resourceName || `Ressource #${resourceId}`}</h2>
+        <h2>{resourceName || t('webproxy.resourceTitle', { id: resourceId })}</h2>
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <p className="proxy-info">Accès sécurisé via le bastion</p>
+          <p className="proxy-info">{t('webproxy.secureAccess')}</p>
           <button 
             className="ghost"
             onClick={openInNewTab}
-            title="Ouvrir dans un nouvel onglet pour l'authentification HTTP"
+            title={t('webproxy.newTabTitle')}
             style={{ fontSize: '0.9rem', padding: '0.4rem 0.8rem' }}
           >
-            ↗ Nouvel onglet
+            ↗ {t('webproxy.newTab')}
           </button>
         </div>
       </div>
@@ -50,12 +52,12 @@ export default function WebProxyViewer({ resourceId, token, resourceName, onNavi
         {loading && (
           <div className="proxy-loading">
             <div className="spinner"></div>
-            <p>Chargement du contenu...</p>
+            <p>{t('webproxy.loading')}</p>
           </div>
         )}
         <iframe
           src={iframeUrl}
-          title={`Proxy pour ${resourceName}`}
+          title={t('webproxy.iframeTitle', { name: resourceName || t('webproxy.resourceTitle', { id: resourceId }) })}
           className="proxy-iframe"
           onLoad={() => setLoading(false)}
           sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals allow-top-navigation-by-user-activation"

@@ -58,8 +58,14 @@ bool AppContext::check_rate_limit(const std::string &key) {
   std::lock_guard<std::mutex> lock(rate_limit_mutex);
   auto now = std::chrono::steady_clock::now();
 
-  // Cleanup old entries (older than window)
   auto &entry = rate_limit_map[key];
+  
+  // Check if currently blocked due to exponential backoff
+  if (entry.block_until > now) {
+    return false;  // Still blocked
+  }
+  
+  // Cleanup old entries (older than window)
   while (!entry.attempts.empty() &&
          (now - entry.attempts.front()) > rate_limit_window) {
     entry.attempts.pop();
@@ -72,6 +78,87 @@ bool AppContext::check_rate_limit(const std::string &key) {
   entry.attempts.push(now);
   return true;
 }
+
+bool AppContext::is_login_blocked(const std::string &key) {
+  std::lock_guard<std::mutex> lock(rate_limit_mutex);
+  auto now = std::chrono::steady_clock::now();
+  auto &entry = rate_limit_map[key];
+  return entry.block_until > now;
+}
+
+void AppContext::record_failed_login_attempt(const std::string &key) {
+  std::lock_guard<std::mutex> lock(rate_limit_mutex);
+  auto now = std::chrono::steady_clock::now();
+  
+  auto &entry = rate_limit_map[key];
+  entry.consecutive_failures++;
+  entry.last_failure_time = now;
+  
+  // Calculate exponential backoff delay based on failure count
+  // 10-19 failures: 30 seconds
+  // 20-29 failures: 5 minutes
+  // 30+ failures: 30 minutes
+  int backoff_seconds = 30;
+  if (entry.consecutive_failures >= 30) {
+    backoff_seconds = 1800;  // 30 minutes
+  } else if (entry.consecutive_failures >= 20) {
+    backoff_seconds = 300;   // 5 minutes
+  } else if (entry.consecutive_failures >= 10) {
+    backoff_seconds = 30;    // 30 seconds
+  }
+  
+  entry.block_until = now + std::chrono::seconds(backoff_seconds);
+}
+
+void AppContext::clear_login_attempts(const std::string &key) {
+  std::lock_guard<std::mutex> lock(rate_limit_mutex);
+  
+  auto &entry = rate_limit_map[key];
+  // Clear the attempt queue
+  while (!entry.attempts.empty()) {
+    entry.attempts.pop();
+  }
+  // Reset failure counter and blocks
+  entry.consecutive_failures = 0;
+  entry.block_until = std::chrono::steady_clock::now();  // Clear any block
+}
+
+int AppContext::get_consecutive_failures(const std::string &key) {
+  std::lock_guard<std::mutex> lock(rate_limit_mutex);
+  auto &entry = rate_limit_map[key];
+  return entry.consecutive_failures;
+}
+
+int AppContext::record_anomaly_signal(const std::string &key,
+                                      std::chrono::seconds window) {
+  std::lock_guard<std::mutex> lock(anomaly_mutex);
+  auto now = std::chrono::steady_clock::now();
+  auto &signals = anomaly_signal_windows[key];
+  while (!signals.empty() && (now - signals.front()) > window) {
+    signals.pop();
+  }
+  signals.push(now);
+  return static_cast<int>(signals.size());
+}
+
+bool AppContext::should_emit_anomaly_signal(const std::string &key,
+                                            std::chrono::seconds cooldown) {
+  std::lock_guard<std::mutex> lock(anomaly_mutex);
+  auto now = std::chrono::steady_clock::now();
+  auto it = anomaly_signal_cooldowns.find(key);
+  if (it != anomaly_signal_cooldowns.end() && it->second > now) {
+    return false;
+  }
+  anomaly_signal_cooldowns[key] = now + cooldown;
+  return true;
+}
+
+void AppContext::clear_anomaly_signal(const std::string &key) {
+  std::lock_guard<std::mutex> lock(anomaly_mutex);
+  anomaly_signal_windows.erase(key);
+  anomaly_signal_cooldowns.erase(key);
+}
+
 
 // ── SSRF protection ─────────────────────────────────────────────────────
 
@@ -248,17 +335,27 @@ void AppContext::init_database() {
   const std::string session_schema =
       "CREATE TABLE IF NOT EXISTS sessions ("
       "id INTEGER PRIMARY KEY,"
+      "resource_id INTEGER DEFAULT 0,"
+      "access_grant_id INTEGER DEFAULT 0,"
       "target TEXT NOT NULL,"
       "user TEXT NOT NULL,"
       "protocol TEXT NOT NULL,"
       "port INTEGER NOT NULL DEFAULT 22,"
       "status TEXT NOT NULL,"
+      "mission_ref TEXT,"
+      "credential_source TEXT DEFAULT 'vaulted',"
+      "max_duration_seconds INTEGER DEFAULT 0,"
       "created_at TEXT NOT NULL,"
       "terminated_at TEXT"
       ");";
   if (!sqlite.exec(session_schema, err))
     std::cerr << "SQLite schema failed: " << err << '\n';
   sqlite.exec("ALTER TABLE sessions ADD COLUMN port INTEGER DEFAULT 22;", err);
+  sqlite.exec("ALTER TABLE sessions ADD COLUMN resource_id INTEGER DEFAULT 0;", err);
+  sqlite.exec("ALTER TABLE sessions ADD COLUMN access_grant_id INTEGER DEFAULT 0;", err);
+  sqlite.exec("ALTER TABLE sessions ADD COLUMN mission_ref TEXT;", err);
+  sqlite.exec("ALTER TABLE sessions ADD COLUMN credential_source TEXT DEFAULT 'vaulted';", err);
+  sqlite.exec("ALTER TABLE sessions ADD COLUMN max_duration_seconds INTEGER DEFAULT 0;", err);
 
   const std::string resource_schema =
       "CREATE TABLE IF NOT EXISTS resources ("
@@ -287,6 +384,8 @@ void AppContext::init_database() {
   sqlite.exec("ALTER TABLE resources ADD COLUMN adaptive_access_policy INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN risk_level TEXT DEFAULT 'low';", err);
   sqlite.exec("ALTER TABLE resources ADD COLUMN tunnel_ticket_rate_limit_max_attempts INTEGER DEFAULT 0;", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN tags_csv TEXT;", err);
+  sqlite.exec("ALTER TABLE resources ADD COLUMN credential_source TEXT DEFAULT 'vaulted';", err);
 
   const std::string user_schema =
       "CREATE TABLE IF NOT EXISTS users ("
@@ -386,6 +485,81 @@ void AppContext::init_database() {
   if (!sqlite.exec(ephemeral_schema, err))
     std::cerr << "SQLite ephemeral_credentials schema failed: " << err << '\n';
 
+  const std::string access_policy_schema =
+      "CREATE TABLE IF NOT EXISTS access_policies ("
+      "id INTEGER PRIMARY KEY,"
+      "name TEXT NOT NULL,"
+      "description TEXT,"
+      "identity_pattern TEXT,"
+      "group_name TEXT,"
+      "role TEXT,"
+      "resource_tags_csv TEXT,"
+      "risk_level TEXT DEFAULT 'any',"
+      "ticket_required INTEGER DEFAULT 0,"
+      "require_justification INTEGER DEFAULT 0,"
+      "approval_mode TEXT DEFAULT 'inherit',"
+      "mfa_requirement TEXT DEFAULT 'any',"
+      "time_window TEXT DEFAULT 'any',"
+      "max_duration_seconds INTEGER DEFAULT 3600,"
+      "routing_constraint TEXT DEFAULT 'any',"
+      "enabled INTEGER DEFAULT 1,"
+      "created_at TEXT NOT NULL,"
+      "updated_at TEXT NOT NULL"
+      ");";
+  if (!sqlite.exec(access_policy_schema, err))
+    std::cerr << "SQLite access_policies schema failed: " << err << '\n';
+
+  const std::string access_profile_schema =
+      "CREATE TABLE IF NOT EXISTS access_profiles ("
+      "id INTEGER PRIMARY KEY,"
+      "name TEXT NOT NULL,"
+      "description TEXT,"
+      "resource_tags_csv TEXT,"
+      "resource_ids_csv TEXT,"
+      "policy_id INTEGER DEFAULT 0,"
+      "created_at TEXT NOT NULL,"
+      "updated_at TEXT NOT NULL"
+      ");";
+  if (!sqlite.exec(access_profile_schema, err))
+    std::cerr << "SQLite access_profiles schema failed: " << err << '\n';
+
+  const std::string user_access_profile_schema =
+      "CREATE TABLE IF NOT EXISTS user_access_profiles ("
+      "id INTEGER PRIMARY KEY,"
+      "user_id INTEGER NOT NULL,"
+      "profile_id INTEGER NOT NULL,"
+      "created_at TEXT NOT NULL,"
+      "UNIQUE(user_id, profile_id)"
+      ");";
+  if (!sqlite.exec(user_access_profile_schema, err))
+    std::cerr << "SQLite user_access_profiles schema failed: " << err << '\n';
+
+  const std::string access_grant_schema =
+      "CREATE TABLE IF NOT EXISTS access_grants ("
+      "id INTEGER PRIMARY KEY,"
+      "policy_id INTEGER DEFAULT 0,"
+      "profile_id INTEGER DEFAULT 0,"
+      "resource_id INTEGER NOT NULL,"
+      "session_id INTEGER DEFAULT 0,"
+      "approval_ref INTEGER DEFAULT 0,"
+      "subject TEXT NOT NULL,"
+      "resource_scope TEXT NOT NULL,"
+      "granted_at TEXT NOT NULL,"
+      "expires_at TEXT NOT NULL,"
+      "used_at TEXT,"
+      "mission_ref TEXT,"
+      "elevation_scope TEXT,"
+      "status TEXT NOT NULL DEFAULT 'issued',"
+      "credential_source TEXT DEFAULT 'vaulted',"
+      "routing_constraint TEXT DEFAULT 'any',"
+      "ticket_id TEXT,"
+      "purpose TEXT,"
+      "justification TEXT,"
+      "mfa_requirement TEXT DEFAULT 'any'"
+      ");";
+  if (!sqlite.exec(access_grant_schema, err))
+    std::cerr << "SQLite access_grants schema failed: " << err << '\n';
+
   // TOTP columns on users
   sqlite.exec("ALTER TABLE users ADD COLUMN bootstrap_password_change_required INTEGER DEFAULT 0;", err);
   sqlite.exec("ALTER TABLE users ADD COLUMN bootstrap_mfa_required INTEGER DEFAULT 0;", err);
@@ -445,8 +619,9 @@ void AppContext::load_sessions_from_db() {
   if (!sqlite.db) return;
   std::lock_guard<std::mutex> db_lock(sqlite.mutex);
   const char *sql =
-      "SELECT id, target, user, protocol, port, status, created_at, "
-      "terminated_at FROM sessions";
+      "SELECT id, resource_id, access_grant_id, target, user, protocol, port, "
+      "status, mission_ref, credential_source, max_duration_seconds, "
+      "created_at, terminated_at FROM sessions";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite select failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -458,14 +633,23 @@ void AppContext::load_sessions_from_db() {
     while (sqlite3_step(stmt) == SQLITE_ROW) {
       Session s;
       s.id = sqlite3_column_int(stmt, 0);
-      s.target  = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
-      s.user    = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
-      s.protocol = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
-      s.port = sqlite3_column_int(stmt, 4);
+      s.resourceId = sqlite3_column_int(stmt, 1);
+      s.accessGrantId = sqlite3_column_int(stmt, 2);
+      s.target  = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+      s.user    = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
+      s.protocol = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
+      s.port = sqlite3_column_int(stmt, 6);
       if (s.port <= 0) s.port = 22;
-      s.status  = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
-      s.createdAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 6));
-      const unsigned char *term = sqlite3_column_text(stmt, 7);
+      s.status  = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 7));
+      if (auto mission = sqlite3_column_text(stmt, 8))
+        s.missionRef = reinterpret_cast<const char *>(mission);
+      if (auto credential_source = sqlite3_column_text(stmt, 9))
+        s.credentialSource =
+            reinterpret_cast<const char *>(credential_source);
+      if (s.credentialSource.empty()) s.credentialSource = "vaulted";
+      s.maxDurationSeconds = sqlite3_column_int(stmt, 10);
+      s.createdAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 11));
+      const unsigned char *term = sqlite3_column_text(stmt, 12);
       if (term) s.terminatedAt = reinterpret_cast<const char *>(term);
       sessions[s.id] = s;
       if (s.id > max_id) max_id = s.id;
@@ -479,22 +663,30 @@ bool AppContext::insert_session(const Session &session) {
   if (!sqlite.db) return true;
   std::lock_guard<std::mutex> lock(sqlite.mutex);
   const char *sql =
-      "INSERT INTO sessions (id, target, user, protocol, status, port, "
-      "created_at, terminated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+      "INSERT INTO sessions (id, resource_id, access_grant_id, target, user, "
+      "protocol, status, port, mission_ref, credential_source, "
+      "max_duration_seconds, created_at, terminated_at) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite insert prepare failed: " << sqlite3_errmsg(sqlite.db) << '\n';
     return false;
   }
   sqlite3_bind_int(stmt, 1, session.id);
-  sqlite3_bind_text(stmt, 2, session.target.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 3, session.user.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 4, session.protocol.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_text(stmt, 5, session.status.c_str(), -1, SQLITE_TRANSIENT);
-  sqlite3_bind_int(stmt, 6, session.port);
-  sqlite3_bind_text(stmt, 7, session.createdAt.c_str(), -1, SQLITE_TRANSIENT);
-  if (session.terminatedAt.empty()) sqlite3_bind_null(stmt, 8);
-  else sqlite3_bind_text(stmt, 8, session.terminatedAt.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 2, session.resourceId);
+  sqlite3_bind_int(stmt, 3, session.accessGrantId);
+  sqlite3_bind_text(stmt, 4, session.target.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 5, session.user.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 6, session.protocol.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 7, session.status.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 8, session.port);
+  if (session.missionRef.empty()) sqlite3_bind_null(stmt, 9);
+  else sqlite3_bind_text(stmt, 9, session.missionRef.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_text(stmt, 10, session.credentialSource.c_str(), -1, SQLITE_TRANSIENT);
+  sqlite3_bind_int(stmt, 11, session.maxDurationSeconds);
+  sqlite3_bind_text(stmt, 12, session.createdAt.c_str(), -1, SQLITE_TRANSIENT);
+  if (session.terminatedAt.empty()) sqlite3_bind_null(stmt, 13);
+  else sqlite3_bind_text(stmt, 13, session.terminatedAt.c_str(), -1, SQLITE_TRANSIENT);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -532,6 +724,21 @@ void AppContext::terminate_session(int session_id, const std::string &actor,
     terminated = it->second;
   }
   if (!update_session_termination(terminated)) return;
+
+  if (sqlite.db && terminated.accessGrantId > 0) {
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "UPDATE access_grants SET status=?, used_at=? WHERE id=?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+      const std::string used_at = now_utc();
+      sqlite3_bind_text(stmt, 1, "used", -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(stmt, 2, used_at.c_str(), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int(stmt, 3, terminated.accessGrantId);
+      sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+  }
 
   AuditEvent event;
   event.id = next_audit_id.fetch_add(1);
@@ -626,10 +833,11 @@ void AppContext::load_resources_from_db() {
   std::lock_guard<std::mutex> db_lock(sqlite.mutex);
   const char *sql =
       "SELECT id, name, target, protocol, port, description, image_url, "
-      "http_username, http_password, created_at, updated_at, "
-      "ssh_username, ssh_password, require_access_justification, "
-      "require_dual_approval, enable_command_guard, adaptive_access_policy, "
-      "risk_level, tunnel_ticket_rate_limit_max_attempts FROM resources";
+      "image_data, tags_csv, credential_source, http_username, http_password, "
+      "created_at, updated_at, ssh_username, ssh_password, "
+      "require_access_justification, require_dual_approval, "
+      "enable_command_guard, adaptive_access_policy, risk_level, "
+      "tunnel_ticket_rate_limit_max_attempts FROM resources";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite resource select failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -652,24 +860,38 @@ void AppContext::load_resources_from_db() {
       if (img) r.imageUrl = reinterpret_cast<const char *>(img);
       auto imgdata = sqlite3_column_text(stmt, 7);
       if (imgdata) r.imageData = reinterpret_cast<const char *>(imgdata);
-      auto hu    = sqlite3_column_text(stmt, 7);
+      auto tags = sqlite3_column_text(stmt, 8);
+      if (tags) r.tagsCsv = reinterpret_cast<const char *>(tags);
+      auto credential_source = sqlite3_column_text(stmt, 9);
+      if (credential_source) {
+        r.credentialSource =
+            reinterpret_cast<const char *>(credential_source);
+      }
+      if (r.credentialSource.empty()) r.credentialSource = "vaulted";
+      auto hu    = sqlite3_column_text(stmt, 10);
       if (hu) r.httpUsername = reinterpret_cast<const char *>(hu);
-      auto hp    = sqlite3_column_text(stmt, 8);
-      if (hp) r.httpPassword = reinterpret_cast<const char *>(hp);
-      r.createdAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 9));
-      r.updatedAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 10));
-      auto su    = sqlite3_column_text(stmt, 11);
+      auto hp    = sqlite3_column_text(stmt, 11);
+      if (hp) {
+        std::string hp_encrypted = reinterpret_cast<const char *>(hp);
+        r.httpPassword = crypto::aes256_decrypt(hp_encrypted);
+      }
+      r.createdAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 12));
+      r.updatedAt = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 13));
+      auto su    = sqlite3_column_text(stmt, 14);
       if (su) r.sshUsername = reinterpret_cast<const char *>(su);
-      auto sp    = sqlite3_column_text(stmt, 12);
-      if (sp) r.sshPassword = reinterpret_cast<const char *>(sp);
-      r.requireAccessJustification = sqlite3_column_int(stmt, 13) != 0;
-      r.requireDualApproval = sqlite3_column_int(stmt, 14) != 0;
-      r.enableCommandGuard = sqlite3_column_int(stmt, 15) != 0;
-      r.adaptiveAccessPolicy = sqlite3_column_int(stmt, 16) != 0;
-      auto rl = sqlite3_column_text(stmt, 17);
+      auto sp    = sqlite3_column_text(stmt, 15);
+      if (sp) {
+        std::string sp_encrypted = reinterpret_cast<const char *>(sp);
+        r.sshPassword = crypto::aes256_decrypt(sp_encrypted);
+      }
+      r.requireAccessJustification = sqlite3_column_int(stmt, 16) != 0;
+      r.requireDualApproval = sqlite3_column_int(stmt, 17) != 0;
+      r.enableCommandGuard = sqlite3_column_int(stmt, 18) != 0;
+      r.adaptiveAccessPolicy = sqlite3_column_int(stmt, 19) != 0;
+      auto rl = sqlite3_column_text(stmt, 20);
       if (rl) r.riskLevel = reinterpret_cast<const char *>(rl);
       if (r.riskLevel.empty()) r.riskLevel = "low";
-      r.tunnelTicketRateLimitMaxAttempts = sqlite3_column_int(stmt, 18);
+      r.tunnelTicketRateLimitMaxAttempts = sqlite3_column_int(stmt, 21);
       if (r.tunnelTicketRateLimitMaxAttempts < 0) {
         r.tunnelTicketRateLimitMaxAttempts = 0;
       }
@@ -686,11 +908,12 @@ bool AppContext::insert_resource(const Resource &r) {
   std::lock_guard<std::mutex> lock(sqlite.mutex);
     const char *sql =
       "INSERT INTO resources (id, name, target, protocol, port, description, "
-      "image_url, image_data, http_username, http_password, created_at, updated_at, "
-      "ssh_username, ssh_password, require_access_justification, "
-      "require_dual_approval, enable_command_guard, adaptive_access_policy, "
-      "risk_level, tunnel_ticket_rate_limit_max_attempts) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+      "image_url, image_data, tags_csv, credential_source, http_username, "
+      "http_password, created_at, updated_at, ssh_username, ssh_password, "
+      "require_access_justification, require_dual_approval, "
+      "enable_command_guard, adaptive_access_policy, risk_level, "
+      "tunnel_ticket_rate_limit_max_attempts) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
   sqlite3_stmt *stmt = nullptr;
   if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
     std::cerr << "SQLite resource insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
@@ -707,22 +930,35 @@ bool AppContext::insert_resource(const Resource &r) {
       : sqlite3_bind_text(stmt, 7, r.imageUrl.c_str(), -1, SQLITE_TRANSIENT);
     r.imageData.empty() ? sqlite3_bind_null(stmt, 8)
       : sqlite3_bind_text(stmt, 8, r.imageData.c_str(), -1, SQLITE_TRANSIENT);
-    r.httpUsername.empty() ? sqlite3_bind_null(stmt, 9)
-      : sqlite3_bind_text(stmt, 9, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
-    r.httpPassword.empty() ? sqlite3_bind_null(stmt, 10)
-      : sqlite3_bind_text(stmt, 10, r.httpPassword.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 11, r.createdAt.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 12, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
-    r.sshUsername.empty() ? sqlite3_bind_null(stmt, 13)
-      : sqlite3_bind_text(stmt, 13, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
-    r.sshPassword.empty() ? sqlite3_bind_null(stmt, 14)
-      : sqlite3_bind_text(stmt, 14, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 15, r.requireAccessJustification ? 1 : 0);
-    sqlite3_bind_int(stmt, 16, r.requireDualApproval ? 1 : 0);
-    sqlite3_bind_int(stmt, 17, r.enableCommandGuard ? 1 : 0);
-    sqlite3_bind_int(stmt, 18, r.adaptiveAccessPolicy ? 1 : 0);
-    sqlite3_bind_text(stmt, 19, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 20, std::max(0, r.tunnelTicketRateLimitMaxAttempts));
+    r.tagsCsv.empty() ? sqlite3_bind_null(stmt, 9)
+      : sqlite3_bind_text(stmt, 9, r.tagsCsv.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, r.credentialSource.c_str(), -1, SQLITE_TRANSIENT);
+    r.httpUsername.empty() ? sqlite3_bind_null(stmt, 11)
+      : sqlite3_bind_text(stmt, 11, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
+    // Encrypt httpPassword before storing
+    if (r.httpPassword.empty()) {
+      sqlite3_bind_null(stmt, 12);
+    } else {
+      std::string encrypted_hp = crypto::aes256_encrypt(r.httpPassword);
+      sqlite3_bind_text(stmt, 12, encrypted_hp.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    sqlite3_bind_text(stmt, 13, r.createdAt.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 14, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+    r.sshUsername.empty() ? sqlite3_bind_null(stmt, 15)
+      : sqlite3_bind_text(stmt, 15, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
+    // Encrypt sshPassword before storing
+    if (r.sshPassword.empty()) {
+      sqlite3_bind_null(stmt, 16);
+    } else {
+      std::string encrypted_sp = crypto::aes256_encrypt(r.sshPassword);
+      sqlite3_bind_text(stmt, 16, encrypted_sp.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    sqlite3_bind_int(stmt, 17, r.requireAccessJustification ? 1 : 0);
+    sqlite3_bind_int(stmt, 18, r.requireDualApproval ? 1 : 0);
+    sqlite3_bind_int(stmt, 19, r.enableCommandGuard ? 1 : 0);
+    sqlite3_bind_int(stmt, 20, r.adaptiveAccessPolicy ? 1 : 0);
+    sqlite3_bind_text(stmt, 21, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 22, std::max(0, r.tunnelTicketRateLimitMaxAttempts));
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite resource insert failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -734,8 +970,8 @@ bool AppContext::update_resource_db(const Resource &r) {
   std::lock_guard<std::mutex> lock(sqlite.mutex);
     const char *sql =
       "UPDATE resources SET name=?, target=?, protocol=?, port=?, "
-      "description=?, image_url=?, image_data=?, http_username=?, http_password=?, "
-      "updated_at=?, ssh_username=?, ssh_password=?, "
+      "description=?, image_url=?, image_data=?, tags_csv=?, credential_source=?, "
+      "http_username=?, http_password=?, updated_at=?, ssh_username=?, ssh_password=?, "
       "require_access_justification=?, require_dual_approval=?, "
       "enable_command_guard=?, adaptive_access_policy=?, risk_level=?, "
       "tunnel_ticket_rate_limit_max_attempts=? "
@@ -755,22 +991,35 @@ bool AppContext::update_resource_db(const Resource &r) {
       : sqlite3_bind_text(stmt, 6, r.imageUrl.c_str(), -1, SQLITE_TRANSIENT);
     r.imageData.empty() ? sqlite3_bind_null(stmt, 7)
       : sqlite3_bind_text(stmt, 7, r.imageData.c_str(), -1, SQLITE_TRANSIENT);
-    r.httpUsername.empty() ? sqlite3_bind_null(stmt, 8)
-      : sqlite3_bind_text(stmt, 8, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
-    r.httpPassword.empty() ? sqlite3_bind_null(stmt, 9)
-      : sqlite3_bind_text(stmt, 9, r.httpPassword.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 10, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
-    r.sshUsername.empty() ? sqlite3_bind_null(stmt, 11)
-      : sqlite3_bind_text(stmt, 11, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
-    r.sshPassword.empty() ? sqlite3_bind_null(stmt, 12)
-      : sqlite3_bind_text(stmt, 12, r.sshPassword.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 13, r.requireAccessJustification ? 1 : 0);
-    sqlite3_bind_int(stmt, 14, r.requireDualApproval ? 1 : 0);
-    sqlite3_bind_int(stmt, 15, r.enableCommandGuard ? 1 : 0);
-    sqlite3_bind_int(stmt, 16, r.adaptiveAccessPolicy ? 1 : 0);
-    sqlite3_bind_text(stmt, 17, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 18, std::max(0, r.tunnelTicketRateLimitMaxAttempts));
-    sqlite3_bind_int(stmt, 19, r.id);
+    r.tagsCsv.empty() ? sqlite3_bind_null(stmt, 8)
+      : sqlite3_bind_text(stmt, 8, r.tagsCsv.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, r.credentialSource.c_str(), -1, SQLITE_TRANSIENT);
+    r.httpUsername.empty() ? sqlite3_bind_null(stmt, 10)
+      : sqlite3_bind_text(stmt, 10, r.httpUsername.c_str(), -1, SQLITE_TRANSIENT);
+    // Encrypt httpPassword before storing
+    if (r.httpPassword.empty()) {
+      sqlite3_bind_null(stmt, 11);
+    } else {
+      std::string encrypted_hp = crypto::aes256_encrypt(r.httpPassword);
+      sqlite3_bind_text(stmt, 11, encrypted_hp.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    sqlite3_bind_text(stmt, 12, r.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+    r.sshUsername.empty() ? sqlite3_bind_null(stmt, 13)
+      : sqlite3_bind_text(stmt, 13, r.sshUsername.c_str(), -1, SQLITE_TRANSIENT);
+    // Encrypt sshPassword before storing
+    if (r.sshPassword.empty()) {
+      sqlite3_bind_null(stmt, 14);
+    } else {
+      std::string encrypted_sp = crypto::aes256_encrypt(r.sshPassword);
+      sqlite3_bind_text(stmt, 14, encrypted_sp.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    sqlite3_bind_int(stmt, 15, r.requireAccessJustification ? 1 : 0);
+    sqlite3_bind_int(stmt, 16, r.requireDualApproval ? 1 : 0);
+    sqlite3_bind_int(stmt, 17, r.enableCommandGuard ? 1 : 0);
+    sqlite3_bind_int(stmt, 18, r.adaptiveAccessPolicy ? 1 : 0);
+    sqlite3_bind_text(stmt, 19, r.riskLevel.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 20, std::max(0, r.tunnelTicketRateLimitMaxAttempts));
+    sqlite3_bind_int(stmt, 21, r.id);
   bool ok = sqlite3_step(stmt) == SQLITE_DONE;
   if (!ok) std::cerr << "SQLite resource update failed: " << sqlite3_errmsg(sqlite.db) << '\n';
   sqlite3_finalize(stmt);
@@ -924,20 +1173,80 @@ bool AppContext::delete_user_db(int user_id) {
 // ── Permissions ─────────────────────────────────────────────────────────
 
 std::vector<int> AppContext::get_resource_permissions(int user_id) {
-  std::vector<int> ids;
-  if (!sqlite.db) return ids;
-  std::lock_guard<std::mutex> lock(sqlite.mutex);
-  const char *sql =
-      "SELECT resource_id FROM user_resource_permissions WHERE user_id = ?";
-  sqlite3_stmt *stmt = nullptr;
-  if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-    std::cerr << "SQLite perm select failed: " << sqlite3_errmsg(sqlite.db) << '\n';
-    return ids;
+  std::unordered_set<int> unique_ids;
+  std::vector<AccessProfile> assigned_profiles;
+  if (!sqlite.db) return {};
+  {
+    std::lock_guard<std::mutex> lock(sqlite.mutex);
+    const char *sql =
+        "SELECT resource_id FROM user_resource_permissions WHERE user_id = ?";
+    sqlite3_stmt *stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+      std::cerr << "SQLite perm select failed: " << sqlite3_errmsg(sqlite.db) << '\n';
+      return {};
+    }
+    sqlite3_bind_int(stmt, 1, user_id);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+      unique_ids.insert(sqlite3_column_int(stmt, 0));
+    }
+    sqlite3_finalize(stmt);
+
+    const char *profile_sql =
+        "SELECT p.id, p.name, p.description, p.resource_tags_csv, "
+        "p.resource_ids_csv, p.policy_id, p.created_at, p.updated_at "
+        "FROM access_profiles p "
+        "INNER JOIN user_access_profiles up ON up.profile_id = p.id "
+        "WHERE up.user_id = ?";
+    stmt = nullptr;
+    if (sqlite3_prepare_v2(sqlite.db, profile_sql, -1, &stmt, nullptr) ==
+        SQLITE_OK) {
+      sqlite3_bind_int(stmt, 1, user_id);
+      while (sqlite3_step(stmt) == SQLITE_ROW) {
+        AccessProfile profile;
+        profile.id = sqlite3_column_int(stmt, 0);
+        if (auto value = sqlite3_column_text(stmt, 1))
+          profile.name = reinterpret_cast<const char *>(value);
+        if (auto value = sqlite3_column_text(stmt, 2))
+          profile.description = reinterpret_cast<const char *>(value);
+        if (auto value = sqlite3_column_text(stmt, 3))
+          profile.resourceTagsCsv = reinterpret_cast<const char *>(value);
+        if (auto value = sqlite3_column_text(stmt, 4))
+          profile.resourceIdsCsv = reinterpret_cast<const char *>(value);
+        profile.policyId = sqlite3_column_int(stmt, 5);
+        if (auto value = sqlite3_column_text(stmt, 6))
+          profile.createdAt = reinterpret_cast<const char *>(value);
+        if (auto value = sqlite3_column_text(stmt, 7))
+          profile.updatedAt = reinterpret_cast<const char *>(value);
+        assigned_profiles.push_back(profile);
+      }
+    }
+    sqlite3_finalize(stmt);
   }
-  sqlite3_bind_int(stmt, 1, user_id);
-  while (sqlite3_step(stmt) == SQLITE_ROW)
-    ids.push_back(sqlite3_column_int(stmt, 0));
-  sqlite3_finalize(stmt);
+
+  for (const auto &profile : assigned_profiles) {
+    for (const auto &token : split_csv_compact(profile.resourceIdsCsv)) {
+      try {
+        const int id = std::stoi(token);
+        if (id > 0) unique_ids.insert(id);
+      } catch (...) {
+      }
+    }
+  }
+
+  if (!assigned_profiles.empty()) {
+    std::lock_guard<std::mutex> lock(resource_mutex);
+    for (const auto &profile : assigned_profiles) {
+      if (profile.resourceTagsCsv.empty()) continue;
+      for (const auto &entry : resources) {
+        if (csv_intersects(profile.resourceTagsCsv, entry.second.tagsCsv)) {
+          unique_ids.insert(entry.first);
+        }
+      }
+    }
+  }
+
+  std::vector<int> ids(unique_ids.begin(), unique_ids.end());
+  std::sort(ids.begin(), ids.end());
   return ids;
 }
 

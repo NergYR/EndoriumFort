@@ -247,13 +247,14 @@ void register_ssh_routes(CrowApp &app, AppContext &ctx) {
                 "{\"type\":\"error\",\"message\":\"Already started\"}");
             return;
           }
-          if (!payload.has("sessionId") || !payload.has("password")) {
+          if (!payload.has("sessionId")) {
             conn.send_text(
                 "{\"type\":\"error\",\"message\":\"Missing fields\"}");
             return;
           }
           int session_id = payload["sessionId"].i();
-          std::string password = payload["password"].s();
+          std::string password =
+              payload.has("password") ? std::string(payload["password"].s()) : "";
           int cols = payload.has("cols") ? payload["cols"].i() : 120;
           int rows = payload.has("rows") ? payload["rows"].i() : 32;
 
@@ -272,6 +273,41 @@ void register_ssh_routes(CrowApp &app, AppContext &ctx) {
               return;
             }
             target_session = it->second;
+          }
+
+          Resource session_resource;
+          bool has_session_resource = false;
+          if (target_session.resourceId > 0) {
+            std::lock_guard<std::mutex> rlock(ctx.resource_mutex);
+            auto resource_it = ctx.resources.find(target_session.resourceId);
+            if (resource_it != ctx.resources.end()) {
+              session_resource = resource_it->second;
+              has_session_resource = true;
+            }
+          }
+
+          if (password.empty() && has_session_resource) {
+            password = session_resource.sshPassword;
+            if (target_session.credentialSource == "ephemeral_account" &&
+                !password.empty()) {
+              AuditEvent fallback_event;
+              fallback_event.id = ctx.next_audit_id.fetch_add(1);
+              fallback_event.type = "credential.ephemeral_account.fallback";
+              fallback_event.actor = "system";
+              fallback_event.role = "system";
+              fallback_event.createdAt = now_utc();
+              fallback_event.payloadJson =
+                  "{\"sessionId\":" + std::to_string(session_id) +
+                  ",\"resourceId\":" +
+                  std::to_string(target_session.resourceId) + "}";
+              fallback_event.payloadIsJson = true;
+              ctx.append_audit(fallback_event);
+            }
+          }
+          if (password.empty()) {
+            conn.send_text(
+                "{\"type\":\"error\",\"message\":\"No SSH credential available for this session\"}");
+            return;
           }
 
           std::string error;

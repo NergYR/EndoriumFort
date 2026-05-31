@@ -1,7 +1,11 @@
 import React from 'react';
+import { useI18n } from '../../i18n.jsx';
+
 export default function AdminSectionNav({ sections, current, onChange }) {
+  const { t } = useI18n();
+
   return (
-    <nav className="admin-section-nav" aria-label="Admin sections">
+    <nav className="admin-section-nav" aria-label={t('nav.adminSections')}>
       {sections.map((section) => (
         <button
           key={section.id}

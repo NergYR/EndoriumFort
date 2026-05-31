@@ -20,7 +20,8 @@ HttpProxyResponse http_proxy_request(
     const std::string &path,
     const std::string &request_body,
     const std::unordered_map<std::string, std::string> &request_headers,
-    std::string &error);
+    std::string &error,
+    bool use_tls = false);
 
 // High-level handler: authenticates, resolves the target resource, proxies
 // the request and rewrites HTML/cookies/headers.  Used by the two

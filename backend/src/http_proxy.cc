@@ -4,9 +4,13 @@
 #include "app_context.h"
 #include "utils.h"
 
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <climits>
 #include <cstring>
 #include <optional>
 #include <sstream>
@@ -31,7 +35,8 @@ HttpProxyResponse http_proxy_request(
     const std::string &path,
     const std::string &request_body,
     const std::unordered_map<std::string, std::string> &request_headers,
-    std::string &error) {
+  std::string &error,
+  bool use_tls) {
 
   HttpProxyResponse response;
 
@@ -66,6 +71,57 @@ HttpProxyResponse http_proxy_request(
   recv_tv.tv_usec = 0;
   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &recv_tv, sizeof(recv_tv));
 
+  SSL_CTX *ssl_ctx = nullptr;
+  SSL *ssl = nullptr;
+  auto close_connection = [&]() {
+    if (ssl) {
+      SSL_shutdown(ssl);
+      SSL_free(ssl);
+      ssl = nullptr;
+    }
+    if (ssl_ctx) {
+      SSL_CTX_free(ssl_ctx);
+      ssl_ctx = nullptr;
+    }
+    close(sock);
+  };
+
+  if (use_tls) {
+    ssl_ctx = SSL_CTX_new(TLS_client_method());
+    if (!ssl_ctx) {
+      error = "Failed to initialize TLS context";
+      close_connection();
+      return response;
+    }
+    SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, nullptr);
+    SSL_CTX_set_default_verify_paths(ssl_ctx);
+
+    ssl = SSL_new(ssl_ctx);
+    if (!ssl) {
+      error = "Failed to allocate TLS session";
+      close_connection();
+      return response;
+    }
+    SSL_set_tlsext_host_name(ssl, host.c_str());
+    if (SSL_set_fd(ssl, sock) != 1) {
+      error = "Failed to bind TLS session to socket";
+      close_connection();
+      return response;
+    }
+    if (SSL_connect(ssl) != 1) {
+      error = "TLS handshake failed";
+      close_connection();
+      return response;
+    }
+    const long verify_result = SSL_get_verify_result(ssl);
+    if (verify_result != X509_V_OK) {
+      error = "TLS certificate validation failed: " +
+              std::string(X509_verify_cert_error_string(verify_result));
+      close_connection();
+      return response;
+    }
+  }
+
   // Build HTTP request
   std::ostringstream request;
   request << method << " " << path << " HTTP/1.1\r\n";
@@ -93,10 +149,48 @@ HttpProxyResponse http_proxy_request(
 
   std::string request_str = request.str();
 
-  ssize_t sent = send(sock, request_str.c_str(), request_str.length(), 0);
-  if (sent < 0) {
-    error = "Failed to send request";
-    close(sock);
+  auto write_all = [&](const char *data, size_t length) {
+    size_t sent_total = 0;
+    while (sent_total < length) {
+      const size_t remaining = length - sent_total;
+      if (use_tls) {
+        const int chunk = static_cast<int>(
+            std::min<size_t>(remaining, static_cast<size_t>(INT_MAX)));
+        const int written = SSL_write(ssl, data + sent_total, chunk);
+        if (written <= 0) {
+          error = "Failed to send TLS request";
+          return false;
+        }
+        sent_total += static_cast<size_t>(written);
+      } else {
+        const ssize_t written = send(sock, data + sent_total, remaining, 0);
+        if (written <= 0) {
+          error = "Failed to send request";
+          return false;
+        }
+        sent_total += static_cast<size_t>(written);
+      }
+    }
+    return true;
+  };
+
+  auto read_chunk = [&](char *data, size_t length) -> ssize_t {
+    if (use_tls) {
+      const int chunk = static_cast<int>(
+          std::min<size_t>(length, static_cast<size_t>(INT_MAX)));
+      const int rc = SSL_read(ssl, data, chunk);
+      if (rc > 0) return static_cast<ssize_t>(rc);
+      if (rc == 0) return 0;
+      const int ssl_error = SSL_get_error(ssl, rc);
+      if (ssl_error == SSL_ERROR_ZERO_RETURN) return 0;
+      error = "Failed to read TLS response";
+      return -1;
+    }
+    return recv(sock, data, length, 0);
+  };
+
+  if (!write_all(request_str.c_str(), request_str.length())) {
+    close_connection();
     return response;
   }
 
@@ -109,8 +203,12 @@ HttpProxyResponse http_proxy_request(
   bool headers_complete = false;
   size_t header_end_pos = std::string::npos;
   while (!headers_complete) {
-    received = recv(sock, buffer, sizeof(buffer), 0);
-    if (received <= 0) break;
+    received = read_chunk(buffer, sizeof(buffer));
+    if (received < 0) {
+      close_connection();
+      return response;
+    }
+    if (received == 0) break;
     full_response.append(buffer, received);
     header_end_pos = full_response.find("\r\n\r\n");
     if (header_end_pos != std::string::npos) {
@@ -119,10 +217,10 @@ HttpProxyResponse http_proxy_request(
   }
 
   if (!headers_complete) {
-    close(sock);
+    close_connection();
     if (full_response.empty()) {
       error = "No response from upstream";
-    } else {
+    } else if (error.empty()) {
       error = "Incomplete HTTP response headers";
     }
     return response;
@@ -159,8 +257,12 @@ HttpProxyResponse http_proxy_request(
   if (expected_content_length >= 0) {
     size_t body_so_far = full_response.size() - body_start;
     while ((long)body_so_far < expected_content_length) {
-      received = recv(sock, buffer, sizeof(buffer), 0);
-      if (received <= 0) break;
+      received = read_chunk(buffer, sizeof(buffer));
+      if (received < 0) {
+        close_connection();
+        return response;
+      }
+      if (received == 0) break;
       full_response.append(buffer, received);
       body_so_far = full_response.size() - body_start;
     }
@@ -176,16 +278,24 @@ HttpProxyResponse http_proxy_request(
       return full_response.find("\r\n0\r\n", body_start) != std::string::npos;
     };
     while (!has_final_chunk()) {
-      received = recv(sock, buffer, sizeof(buffer), 0);
-      if (received <= 0) break;
+      received = read_chunk(buffer, sizeof(buffer));
+      if (received < 0) {
+        close_connection();
+        return response;
+      }
+      if (received == 0) break;
       full_response.append(buffer, received);
     }
   } else {
-    while ((received = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
+    while ((received = read_chunk(buffer, sizeof(buffer))) > 0) {
       full_response.append(buffer, received);
     }
+    if (received < 0) {
+      close_connection();
+      return response;
+    }
   }
-  close(sock);
+  close_connection();
 
   // ── Parse HTTP response ──
   size_t header_end = full_response.find("\r\n\r\n");
@@ -437,7 +547,7 @@ parse_set_cookie_name_value(const std::string &set_cookie_value) {
   return std::make_pair(name, value);
 }
 
-std::string trim_copy(const std::string &value) {
+std::string proxy_trim_copy(const std::string &value) {
   size_t start = 0;
   while (start < value.size() &&
          std::isspace(static_cast<unsigned char>(value[start]))) ++start;
@@ -696,7 +806,8 @@ crow::response handle_proxy_request(
   std::string error;
   HttpProxyResponse proxy_response = http_proxy_request(
       method_name, target_host, target_port, target_url,
-      request.body, proxy_headers, error);
+      request.body, proxy_headers, error,
+      to_lower(target_resource.protocol) == "https");
 
   if (!error.empty()) {
     AuditEvent event;
@@ -852,7 +963,7 @@ crow::response handle_proxy_request(
     while (pos <= cookie_value.size()) {
       size_t sep = cookie_value.find(';', pos);
       if (sep == std::string::npos) sep = cookie_value.size();
-      parts.push_back(trim_copy(cookie_value.substr(pos, sep - pos)));
+      parts.push_back(proxy_trim_copy(cookie_value.substr(pos, sep - pos)));
       if (sep == cookie_value.size()) break;
       pos = sep + 1;
     }
@@ -893,7 +1004,7 @@ crow::response handle_proxy_request(
     }
     if (is_config_get_request &&
         content_type.find("application/json") != std::string::npos) {
-      std::string trimmed_body = trim_copy(proxy_response.body);
+      std::string trimmed_body = proxy_trim_copy(proxy_response.body);
       if (!trimmed_body.empty() && trimmed_body.front() == '{' &&
           trimmed_body.back() == '}' &&
           trimmed_body.find("\"success\":true") != std::string::npos &&

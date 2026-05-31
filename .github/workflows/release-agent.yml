@@ -19,7 +19,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.8'
+          go-version: '1.25.9'
           cache-dependency-path: agent/go.sum
 
       - name: Extract version from tag
@@ -184,7 +184,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.8'
+          go-version: '1.25.9'
           cache-dependency-path: agent/go.sum
 
       - name: Setup Ruby (for fpm)
@@ -343,7 +343,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.8'
+          go-version: '1.25.9'
           cache-dependency-path: agent/go.sum
 
       - name: Build macOS agent binaries
@@ -397,7 +397,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.8'
+          go-version: '1.25.9'
           cache-dependency-path: agent/go.sum
 
       - name: Build Windows agent binary
@@ -416,12 +416,30 @@ jobs:
         run: |
           dotnet tool install --global wix
           "$env:USERPROFILE\\.dotnet\\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          $wixVersion = (wix --version).Trim()
+          $wixVersionRaw = (wix --version).Trim()
+          $wixVersion = $null
+          $wixMajor = 0
+          if ($wixVersionRaw -match '(\d+)\.(\d+)\.(\d+)') {
+            $wixVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+            $wixMajor = [int]$Matches[1]
+          }
+          elseif ($wixVersionRaw -match '^(\d+)') {
+            $wixMajor = [int]$Matches[1]
+          }
+
+          if ($wixMajor -ge 7) {
+            & wix eula accept wix7
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to accept WiX v7 EULA (wix7)."
+            }
+          }
 
           $uiExtInstalled = $false
-          & wix extension add -g "WixToolset.UI.wixext/$wixVersion"
-          if ($LASTEXITCODE -eq 0) {
-            $uiExtInstalled = $true
+          if ($wixVersion) {
+            & wix extension add -g "WixToolset.UI.wixext/$wixVersion"
+            if ($LASTEXITCODE -eq 0) {
+              $uiExtInstalled = $true
+            }
           }
 
           if (-not $uiExtInstalled) {

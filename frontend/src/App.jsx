@@ -21,7 +21,6 @@ import {
   reportSecurityIncidentEscalation,
   fetchSecurityAlerts,
   fetchSessionDna,
-  fetchResourceCredentials,
   issueEphemeralCredential,
   consumeEphemeralCredential,
   previewSessionRisk,
@@ -32,6 +31,7 @@ import {
   get2FAStatus,
   login,
   logout,
+  startOidcSso,
   setAuthToken,
   setup2FA,
   terminateSession,
@@ -44,8 +44,12 @@ import {
   verify2FA,
   fetchAccessRequests,
   createAccessRequest,
+  createAccessPolicy,
+  createAccessProfile,
   approveAccessRequest,
   denyAccessRequest,
+  deleteAccessPolicy,
+  deleteAccessProfile,
   setContainmentMode,
   fetchRelays,
   fetchRelayConfig,
@@ -57,34 +61,40 @@ import {
   beginWebAuthnRegistration,
   verifyWebAuthnRegistration,
   deleteWebAuthnCredential,
-  setMfaPreference
+  setMfaPreference,
+  fetchAccessPolicies,
+  fetchAccessProfiles,
+  fetchAccessGrants,
+  fetchSessionEvidencePack,
+  getUserAccessProfiles,
+  grantAccessProfile,
+  revokeAccessProfile,
+  updateAccessPolicy,
+  updateAccessProfile,
+  fetchDirectoryProviders,
+  fetchLdapConfig,
+  fetchSsoProviders,
+  fetchSsoConfig,
+  testLdapBind,
+  fetchScimServiceProviderConfig,
+  fetchScimUsers,
+  fetchScimGroups,
+  patchScimUser,
+  fetchItsmProviders,
+  verifyItsmTicket,
+  fetchSiemChannels,
+  forwardSiemEvent,
+  fetchClusterStatus,
+  fetchClusterConfig,
+  removeClusterPeer
 } from './api.js';
 import { describeAccessOutcome, describeResourcePolicy, normalizeRiskLevel } from './accessPolicy.js';
 import AdminSectionNav from './components/admin/AdminSectionNav.jsx';
+import VncViewerModal from './components/sessions/VncViewerModal.jsx';
 import { EmptyState, InlineAlert, MetricTile, SectionCard, StatusBadge } from './components/ui/primitives.jsx';
+import { useI18n } from './i18n.jsx';
 
 const RecordingsPanel = lazy(() => import('./components/operator/RecordingsPanel.jsx'));
-
-const ROLE_BLUEPRINTS = [
-  {
-    id: 'operator',
-    label: 'Session Operator',
-    description: 'Launch and manage remote sessions on authorized resources.',
-    permissions: ['Start and terminate sessions', 'Use SSH/web/agent access paths', 'View personal operations data']
-  },
-  {
-    id: 'admin',
-    label: 'Platform Admin',
-    description: 'Govern users, resources, and assignment policies.',
-    permissions: ['Create and edit users', 'Manage resources and credentials', 'Assign resource permissions']
-  },
-  {
-    id: 'auditor',
-    label: 'Security Auditor',
-    description: 'Monitor traceability and investigate security events.',
-    permissions: ['Read audit events', 'Replay session recordings', 'Access governance metrics']
-  }
-];
 
 const normalizeRole = (role) => {
   const value = String(role || '').toLowerCase();
@@ -94,10 +104,11 @@ const normalizeRole = (role) => {
   return value || 'operator';
 };
 
-const roleLabel = (role) => {
+const roleLabel = (role, t) => {
   const mapped = normalizeRole(role);
-  const found = ROLE_BLUEPRINTS.find((item) => item.id === mapped);
-  return found ? found.label : mapped;
+  if (!t) return mapped;
+  const label = t(`roles.${mapped}.label`);
+  return label !== `roles.${mapped}.label` ? label : mapped;
 };
 
 const isWebAuthnSupported = () =>
@@ -299,16 +310,23 @@ const extractSessionIdFromAuditItem = (item) => {
 };
 
 const DEFAULT_SSH_SNIPPETS = [
-  { id: 'health', label: 'Health Snapshot', command: 'whoami && hostname && uptime' },
-  { id: 'net', label: 'Network Quick Check', command: 'ip a && ss -tulpen | head -n 30' },
-  { id: 'disk', label: 'Disk Pressure', command: 'df -h && du -sh /var/log 2>/dev/null' },
-  { id: 'proc', label: 'Top Processes', command: 'ps aux --sort=-%cpu | head -n 15' }
+  { id: 'health', labelKey: 'Health Snapshot', command: 'whoami && hostname && uptime' },
+  { id: 'net', labelKey: 'Network Quick Check', command: 'ip a && ss -tulpen | head -n 30' },
+  { id: 'disk', labelKey: 'Disk Pressure', command: 'df -h && du -sh /var/log 2>/dev/null' },
+  { id: 'proc', labelKey: 'Top Processes', command: 'ps aux --sort=-%cpu | head -n 15' }
 ];
 
 const ACCESS_PLAYBOOK_STORAGE_KEY = 'endoriumfort_access_playbooks';
 const SESSION_WATCHLIST_STORAGE_KEY = 'endoriumfort_session_watchlist';
 
+const clampInteger = (value, fallback, min, max) => {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+};
+
 export default function App() {
+  const { locale, setLocale, t, raw } = useI18n();
   const [status, setStatus] = useState('loading');
   const [detail, setDetail] = useState('');
   const [auth, setAuth] = useState(() => {
@@ -370,6 +388,8 @@ export default function App() {
     description: '',
     imageUrl: '',
     imageData: '', // base64 locale
+    tagsCsv: '',
+    credentialSource: 'vaulted',
     httpUsername: '',
     httpPassword: '',
     sshUsername: '',
@@ -393,14 +413,101 @@ export default function App() {
   const [editingUserId, setEditingUserId] = useState(null);
   const [selectedUserForAccessScope, setSelectedUserForAccessScope] = useState(null);
   const [userResourceScope, setUserResourceScope] = useState([]);
+  const [userAccessProfiles, setUserAccessProfiles] = useState([]);
   const [loadingAccessScope, setLoadingAccessScope] = useState(false);
   const [accessScopeError, setAccessScopeError] = useState('');
+  const [accessPolicies, setAccessPolicies] = useState([]);
+  const [loadingAccessPolicies, setLoadingAccessPolicies] = useState(false);
+  const [accessPolicyError, setAccessPolicyError] = useState('');
+  const [editingAccessPolicyId, setEditingAccessPolicyId] = useState(null);
+  const [accessPolicyForm, setAccessPolicyForm] = useState({
+    name: '',
+    description: '',
+    identityPattern: '',
+    groupName: '',
+    role: '',
+    resourceTagsCsv: '',
+    riskLevel: 'any',
+    ticketRequired: false,
+    requireJustification: false,
+    approvalMode: 'inherit',
+    mfaRequirement: 'any',
+    timeWindow: 'any',
+    maxDurationSeconds: '3600',
+    routingConstraint: 'any',
+    enabled: true
+  });
+  const [accessProfiles, setAccessProfiles] = useState([]);
+  const [loadingAccessProfiles, setLoadingAccessProfiles] = useState(false);
+  const [accessProfileError, setAccessProfileError] = useState('');
+  const [editingAccessProfileId, setEditingAccessProfileId] = useState(null);
+  const [accessProfileForm, setAccessProfileForm] = useState({
+    name: '',
+    description: '',
+    resourceTagsCsv: '',
+    resourceIdsCsv: '',
+    policyId: '0'
+  });
+  const [accessGrants, setAccessGrants] = useState([]);
+  const [loadingAccessGrants, setLoadingAccessGrants] = useState(false);
+  const [accessGrantError, setAccessGrantError] = useState('');
+  const [enterpriseLoading, setEnterpriseLoading] = useState(false);
+  const [enterpriseError, setEnterpriseError] = useState('');
+  const [enterpriseDirectoryProviders, setEnterpriseDirectoryProviders] = useState([]);
+  const [enterpriseLdapConfig, setEnterpriseLdapConfig] = useState(null);
+  const [enterpriseLdapTestUsername, setEnterpriseLdapTestUsername] = useState('');
+  const [enterpriseLdapTestPassword, setEnterpriseLdapTestPassword] = useState('');
+  const [enterpriseLdapTesting, setEnterpriseLdapTesting] = useState(false);
+  const [enterpriseLdapTestResult, setEnterpriseLdapTestResult] = useState(null);
+  const [enterpriseSsoProviders, setEnterpriseSsoProviders] = useState([]);
+  const [enterpriseSsoProvider, setEnterpriseSsoProvider] = useState('');
+  const [enterpriseSsoConfig, setEnterpriseSsoConfig] = useState(null);
+  const [enterpriseScimConfig, setEnterpriseScimConfig] = useState(null);
+  const [enterpriseScimUsers, setEnterpriseScimUsers] = useState([]);
+  const [enterpriseScimGroups, setEnterpriseScimGroups] = useState([]);
+  const [enterpriseScimMeta, setEnterpriseScimMeta] = useState({
+    users: { totalResults: 0, startIndex: 1, itemsPerPage: 0 },
+    groups: { totalResults: 0, startIndex: 1, itemsPerPage: 0 }
+  });
+  const [enterpriseScimFilter, setEnterpriseScimFilter] = useState('');
+  const [enterpriseScimStartIndex, setEnterpriseScimStartIndex] = useState('1');
+  const [enterpriseScimCount, setEnterpriseScimCount] = useState('20');
+  const [enterpriseScimLoading, setEnterpriseScimLoading] = useState(false);
+  const [enterpriseScimError, setEnterpriseScimError] = useState('');
+  const [enterpriseScimPatchId, setEnterpriseScimPatchId] = useState('');
+  const [enterpriseScimPatchUsername, setEnterpriseScimPatchUsername] = useState('');
+  const [enterpriseScimPatchRole, setEnterpriseScimPatchRole] = useState('');
+  const [enterpriseScimPatchActive, setEnterpriseScimPatchActive] = useState('unchanged');
+  const [enterpriseScimPatchLoading, setEnterpriseScimPatchLoading] = useState(false);
+  const [enterpriseScimPatchResult, setEnterpriseScimPatchResult] = useState('');
+  const [enterpriseItsmProviders, setEnterpriseItsmProviders] = useState([]);
+  const [enterpriseItsmProvider, setEnterpriseItsmProvider] = useState('servicenow');
+  const [enterpriseItsmTicketId, setEnterpriseItsmTicketId] = useState('');
+  const [enterpriseItsmFailMode, setEnterpriseItsmFailMode] = useState('fail-closed');
+  const [enterpriseItsmUnavailable, setEnterpriseItsmUnavailable] = useState(false);
+  const [enterpriseItsmLoading, setEnterpriseItsmLoading] = useState(false);
+  const [enterpriseItsmResult, setEnterpriseItsmResult] = useState(null);
+  const [enterpriseSiemChannels, setEnterpriseSiemChannels] = useState([]);
+  const [enterpriseSiemChannel, setEnterpriseSiemChannel] = useState('json_webhook');
+  const [enterpriseSiemEventType, setEnterpriseSiemEventType] = useState('security.event.test');
+  const [enterpriseSiemDeliveryMode, setEnterpriseSiemDeliveryMode] = useState('fail-open');
+  const [enterpriseSiemSimulateFailure, setEnterpriseSiemSimulateFailure] = useState(false);
+  const [enterpriseSiemLoading, setEnterpriseSiemLoading] = useState(false);
+  const [enterpriseSiemResult, setEnterpriseSiemResult] = useState(null);
+  const [enterpriseClusterStatus, setEnterpriseClusterStatus] = useState(null);
+  const [enterpriseClusterConfig, setEnterpriseClusterConfig] = useState(null);
+  const [enterpriseClusterPeerBusy, setEnterpriseClusterPeerBusy] = useState('');
+  const [enterpriseClusterPeerMessage, setEnterpriseClusterPeerMessage] = useState('');
+  const [sessionEvidencePack, setSessionEvidencePack] = useState(null);
+  const [sessionEvidenceLoading, setSessionEvidenceLoading] = useState(false);
+  const [sessionEvidenceError, setSessionEvidenceError] = useState('');
   const [route, setRoute] = useState(() =>
     window.location.pathname ? window.location.pathname : '/'
   );
   const [adminSection, setAdminSection] = useState('resources');
   const [mainTab, setMainTab] = useState('sessions');
   const [inlineWebResource, setInlineWebResource] = useState(null);
+  const [vncViewerSession, setVncViewerSession] = useState(null);
   const [accessPromptResource, setAccessPromptResource] = useState(null);
   const [accessPromptReason, setAccessPromptReason] = useState('');
   const [accessPromptTicketId, setAccessPromptTicketId] = useState('');
@@ -573,10 +680,30 @@ export default function App() {
   const canViewAudit = hasCapability(auth.role, auth.permissions, 'viewAudit');
   const canViewRecordings = hasCapability(auth.role, auth.permissions, 'viewRecordings');
   const canOperateSessions = hasCapability(auth.role, auth.permissions, 'operateSessions');
-  const roleName = roleLabel(auth.role);
+  const roleName = roleLabel(auth.role, t);
   const activeLiveAlertProfile = LIVE_ALERT_PROFILES[liveAlertProfile] || LIVE_ALERT_PROFILES.normal;
   const containmentEnabled = !!containmentStatus.enabled;
   const bootstrapRequired = !!(auth.token && bootstrapState.required);
+  const roleBlueprints = useMemo(() => ([
+    {
+      id: 'operator',
+      label: t('roles.operator.label'),
+      description: t('roles.operator.description'),
+      permissions: raw('roles.operator.permissions') || []
+    },
+    {
+      id: 'admin',
+      label: t('roles.admin.label'),
+      description: t('roles.admin.description'),
+      permissions: raw('roles.admin.permissions') || []
+    },
+    {
+      id: 'auditor',
+      label: t('roles.auditor.label'),
+      description: t('roles.auditor.description'),
+      permissions: raw('roles.auditor.permissions') || []
+    }
+  ]), [raw, t]);
 
   useEffect(() => {
     try {
@@ -619,62 +746,65 @@ export default function App() {
       }))
       .filter((item) => item.id && item.label && item.command)
       .map((item) => ({ ...item, custom: true }));
-    return [...DEFAULT_SSH_SNIPPETS.map((item) => ({ ...item, custom: false })), ...normalizedCustom];
+    return [
+      ...DEFAULT_SSH_SNIPPETS.map((item) => ({ ...item, label: item.labelKey, custom: false })),
+      ...normalizedCustom
+    ];
   }, [customSnippets]);
   const tabGuide = useMemo(() => {
     const base = {
       overview: {
-        title: 'Overview',
-        hint: 'Fast health and posture checks.',
-        focus: 'Review posture and recent sessions.'
+        title: t('app.overview'),
+        hint: t('app.overviewHint'),
+        focus: t('app.overviewFocus')
       },
       sessions: {
-        title: 'Sessions',
-        hint: 'Operate live access.',
-        focus: 'Start, monitor, and terminate active sessions.'
+        title: t('app.sessions'),
+        hint: t('app.sessionsHint'),
+        focus: t('app.sessionsFocus')
       },
       audit: {
-        title: 'Audit',
-        hint: 'Investigate events.',
-        focus: 'Filter and inspect traceability records.'
+        title: t('app.audit'),
+        hint: t('app.auditHint'),
+        focus: t('app.auditFocus')
       },
       recordings: {
-        title: 'Recordings',
-        hint: 'Replay captured evidence.',
-        focus: 'Open SSH cast files and inspect timelines.'
+        title: t('app.recordings'),
+        hint: t('app.recordingsHint'),
+        focus: t('app.recordingsFocus')
       }
     };
     return base[mainTab] || base.overview;
-  }, [mainTab]);
+  }, [mainTab, t]);
 
   const missionBoardEntries = useMemo(() => {
     const entries = [
       {
         id: 'sessions',
-        stage: 'Operate',
-        title: 'Live Access',
+        stage: t('app.operate'),
+        title: t('app.liveAccess'),
         shortcut: 'Alt+1',
-        hint: 'Open and supervise sessions.'
+        hint: t('app.openAndSupervise')
       },
       {
         id: 'audit',
-        stage: 'Trace',
-        title: 'Investigation',
+        stage: t('app.trace'),
+        title: t('app.investigation'),
         shortcut: 'Alt+2',
-        hint: 'Review events and trails.'
+        hint: t('app.reviewEvents')
       },
       {
         id: 'recordings',
-        stage: 'Evidence',
-        title: 'Replay Vault',
+        stage: t('app.evidence'),
+        title: t('app.replayVault'),
         shortcut: 'Alt+3',
-        hint: 'Replay recorded SSH sessions.',
+        hint: t('app.replayRecordedSsh'),
         hidden: !canViewRecordings
       }
     ];
 
     return entries.filter((entry) => !entry.hidden);
-  }, [canViewRecordings]);
+  }, [canViewRecordings, t]);
 
   const pendingAccessApprovals = useMemo(() => {
     return accessRequests
@@ -702,34 +832,55 @@ export default function App() {
     return [
       {
         id: 'resources',
-        label: 'Resources',
-        hint: 'Inventory and policies',
+        label: t('admin.resources'),
+        hint: t('admin.inventoryAndPolicies'),
         badge: String(resources.length),
         badgeTone: loadingResources ? 'loading' : 'ok'
       },
       {
         id: 'users',
-        label: 'Users',
-        hint: 'Accounts and access scope',
+        label: t('admin.users'),
+        hint: t('admin.accountsAndAccessScope'),
         badge: String(users.length),
         badgeTone: loadingUsers ? 'loading' : 'ok'
       },
       {
         id: 'routing',
-        label: 'Routing',
-        hint: 'Relays and approvals',
-        badge: pendingRequests ? `${pendingRequests} pending` : `${relayInventorySummary.online} online`,
+        label: t('admin.routing'),
+        hint: t('admin.relaysAndApprovals'),
+        badge: pendingRequests ? t('admin.pendingCount', { count: pendingRequests }) : t('admin.onlineCount', { count: relayInventorySummary.online }),
         badgeTone: pendingRequests ? 'active' : 'ok'
       },
       {
+        id: 'jit',
+        label: 'JIT',
+        hint: 'Policies, profiles and grants',
+        badge: String(accessGrants.length),
+        badgeTone: loadingAccessGrants ? 'loading' : 'ok'
+      },
+      {
+        id: 'enterprise',
+        label: 'Enterprise IAM',
+        hint: 'LDAP/AD, SSO, SCIM, ITSM, SIEM',
+        
+        badge: String(
+          enterpriseDirectoryProviders.length +
+          enterpriseSsoProviders.length +
+          enterpriseItsmProviders.length +
+          enterpriseSiemChannels.length +
+          (Number(enterpriseClusterStatus?.summary?.nodesTotal) || 0)
+        ),
+        badgeTone: enterpriseLoading ? 'loading' : 'ok'
+      },
+      {
         id: 'security',
-        label: 'Security',
-        hint: 'MFA and posture',
-        badge: adminsWithoutMfa ? `${adminsWithoutMfa} risk` : 'healthy',
+        label: t('admin.security'),
+        hint: t('admin.mfaAndPosture'),
+        badge: adminsWithoutMfa ? t('admin.riskCount', { count: adminsWithoutMfa }) : t('admin.healthy'),
         badgeTone: adminsWithoutMfa ? 'loading' : 'ok'
       }
     ];
-  }, [accessRequests, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, users.length]);
+  }, [accessGrants.length, accessRequests, enterpriseClusterStatus, enterpriseDirectoryProviders.length, enterpriseItsmProviders.length, enterpriseLoading, enterpriseSiemChannels.length, enterpriseSsoProviders.length, loadingAccessGrants, loadingResources, loadingUsers, relayInventorySummary.online, resources.length, stats?.users?.adminsWithoutMfa, t, users.length]);
 
   const activeAdminSection = useMemo(
     () => adminSections.find((section) => section.id === adminSection) || null,
@@ -756,7 +907,7 @@ export default function App() {
   useEffect(() => {
     const onUnauthorized = () => {
       setAuth((prev) => ({ ...prev, token: '', password: '', permissions: [] }));
-      setAuthError('Session expirée. Veuillez vous reconnecter.');
+      setAuthError(t('auth.sessionExpired'));
       setTokenExpiresAt('');
       setBootstrapState({
         required: false,
@@ -775,7 +926,7 @@ export default function App() {
     };
     window.addEventListener('endoriumfort:unauthorized', onUnauthorized);
     return () => window.removeEventListener('endoriumfort:unauthorized', onUnauthorized);
-  }, []);
+  }, [t]);
 
   // Dark mode effect
   useEffect(() => {
@@ -814,10 +965,10 @@ export default function App() {
     }
     const timer = setTimeout(() => {
       onLogout();
-      setAuthError('Session expired. Please login again.');
+      setAuthError(t('auth.sessionExpired'));
     }, remaining);
     return () => clearTimeout(timer);
-  }, [tokenExpiresAt, auth.token]);
+  }, [tokenExpiresAt, auth.token, t]);
 
   useEffect(() => {
     if (!auth.token && route !== '/login') {
@@ -834,17 +985,17 @@ export default function App() {
       .then((data) => {
         if (!active) return;
         setStatus(data.status || 'ok');
-        setDetail(data.message || 'API reachable');
+        setDetail(data.message || t('app.healthApiReachable'));
       })
       .catch(() => {
         if (!active) return;
         setStatus('offline');
-        setDetail('Start the backend to enable health checks.');
+        setDetail(t('app.healthStartBackend'));
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!auth.token) {
@@ -953,6 +1104,87 @@ export default function App() {
       active = false;
     };
   }, [auth.token, canManagePlatform]);
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform) {
+      setAccessPolicies([]);
+      setLoadingAccessPolicies(false);
+      return;
+    }
+    let active = true;
+    setLoadingAccessPolicies(true);
+    fetchAccessPolicies()
+      .then((data) => {
+        if (!active) return;
+        setAccessPolicies(Array.isArray(data.items) ? data.items : []);
+        setAccessPolicyError('');
+      })
+      .catch((error) => {
+        if (!active) return;
+        setAccessPolicyError(error.message || 'Unable to load access policies');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoadingAccessPolicies(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth.token, canManagePlatform]);
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform) {
+      setAccessProfiles([]);
+      setLoadingAccessProfiles(false);
+      return;
+    }
+    let active = true;
+    setLoadingAccessProfiles(true);
+    fetchAccessProfiles()
+      .then((data) => {
+        if (!active) return;
+        setAccessProfiles(Array.isArray(data.items) ? data.items : []);
+        setAccessProfileError('');
+      })
+      .catch((error) => {
+        if (!active) return;
+        setAccessProfileError(error.message || 'Unable to load access profiles');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoadingAccessProfiles(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth.token, canManagePlatform]);
+
+  useEffect(() => {
+    if (!auth.token) {
+      setAccessGrants([]);
+      setLoadingAccessGrants(false);
+      return;
+    }
+    let active = true;
+    setLoadingAccessGrants(true);
+    fetchAccessGrants()
+      .then((data) => {
+        if (!active) return;
+        setAccessGrants(Array.isArray(data.items) ? data.items : []);
+        setAccessGrantError('');
+      })
+      .catch((error) => {
+        if (!active) return;
+        setAccessGrantError(error.message || 'Unable to load access grants');
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoadingAccessGrants(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth.token]);
 
   useEffect(() => {
     if (!auth.token || !canManagePlatform) {
@@ -1485,6 +1717,19 @@ export default function App() {
     setUserForm((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
   };
 
+  const onAccessPolicyFieldChange = (event) => {
+    const { name, value, type, checked } = event.target;
+    setAccessPolicyForm((prev) => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value
+    }));
+  };
+
+  const onAccessProfileFieldChange = (event) => {
+    const { name, value } = event.target;
+    setAccessProfileForm((prev) => ({ ...prev, [name]: value }));
+  };
+
   const onLogin = async (event) => {
     event.preventDefault();
     try {
@@ -1545,13 +1790,18 @@ export default function App() {
       setAuthError('');
       navigate('/');
     } catch (error) {
-      setAuthError(error.message || 'Login failed');
+      setAuthError(error.message || t('auth.loginFailed'));
     }
+  };
+
+  const onStartSsoLogin = () => {
+    setAuthError('');
+    startOidcSso({ postLoginRedirect: '/' });
   };
 
   const onLoginWithPasskey = async () => {
     if (!webauthnLoginOptions) {
-      setAuthError('No passkey challenge is available for this login.');
+      setAuthError(t('auth.noPasskeyChallenge'));
       return;
     }
     setWebauthnBusy(true);
@@ -1569,7 +1819,7 @@ export default function App() {
       });
       if (payload.status === 'mfa_required') {
         setWebauthnLoginOptions(payload.webauthn || null);
-        throw new Error(payload.message || 'Passkey verification is still required.');
+        throw new Error(payload.message || t('auth.passkeyStillRequired'));
       }
       const bootstrap = payload.bootstrap || {};
       setTwoFARequired(false);
@@ -1604,7 +1854,7 @@ export default function App() {
       }));
       navigate('/');
     } catch (error) {
-      setAuthError(error.message || 'Passkey sign-in failed');
+      setAuthError(error.message || t('auth.passkeySignInFailed'));
     } finally {
       setWebauthnBusy(false);
     }
@@ -1699,16 +1949,366 @@ export default function App() {
           setAuditItems(items);
         }
       }
+      try {
+        const grantsData = await fetchAccessGrants();
+        setAccessGrants(Array.isArray(grantsData?.items) ? grantsData.items : []);
+      } catch (_) {}
+      if (canManagePlatform) {
+        try {
+          const [policyData, profileData] = await Promise.all([
+            fetchAccessPolicies(),
+            fetchAccessProfiles()
+          ]);
+          setAccessPolicies(Array.isArray(policyData?.items) ? policyData.items : []);
+          setAccessProfiles(Array.isArray(profileData?.items) ? profileData.items : []);
+        } catch (_) {}
+      }
       setSessionError('');
       setResourceError('');
       setUserError('');
       setSecurityAuditError('');
     } catch (error) {
-      setSessionError(error.message || 'Unable to refresh data');
+      setSessionError(error.message || t('feedback.unableRefreshData'));
     } finally {
       setQuickRefreshing(false);
     }
   };
+
+  const loadEnterpriseFoundations = async () => {
+    setEnterpriseLoading(true);
+    setEnterpriseError('');
+    setEnterpriseClusterPeerMessage('');
+    try {
+      const [
+        directoryData,
+        ldapConfigData,
+        providersData,
+        configData,
+        scimConfigData,
+        itsmData,
+        siemData,
+        clusterStatusData,
+        clusterConfigData
+      ] = await Promise.all([
+        fetchDirectoryProviders(),
+        fetchLdapConfig(),
+        fetchSsoProviders(),
+        fetchSsoConfig(),
+        fetchScimServiceProviderConfig(),
+        fetchItsmProviders(),
+        fetchSiemChannels(),
+        fetchClusterStatus(),
+        fetchClusterConfig()
+      ]);
+
+      const nextDirectoryProviders = Array.isArray(directoryData?.items) ? directoryData.items : [];
+      const nextSsoProviders = Array.isArray(providersData?.items) ? providersData.items : [];
+      const nextItsmProviders = Array.isArray(itsmData?.items) ? itsmData.items : [];
+      const nextSiemChannels = Array.isArray(siemData?.items) ? siemData.items : [];
+
+      setEnterpriseDirectoryProviders(nextDirectoryProviders);
+      setEnterpriseLdapConfig(ldapConfigData?.config || null);
+      setEnterpriseSsoProviders(nextSsoProviders);
+      setEnterpriseSsoConfig(configData || null);
+      setEnterpriseScimConfig(scimConfigData || null);
+      setEnterpriseItsmProviders(nextItsmProviders);
+      setEnterpriseSiemChannels(nextSiemChannels);
+      setEnterpriseClusterStatus(clusterStatusData || null);
+      setEnterpriseClusterConfig(clusterConfigData || null);
+
+      const defaultSsoProvider = String(configData?.defaultProvider || nextSsoProviders[0]?.id || '');
+      setEnterpriseSsoProvider((prev) =>
+        prev && nextSsoProviders.some((item) => String(item.id) === prev)
+          ? prev
+          : defaultSsoProvider
+      );
+
+      const defaultItsmProvider = String(nextItsmProviders[0]?.id || 'servicenow');
+      setEnterpriseItsmProvider((prev) =>
+        nextItsmProviders.some((item) => String(item.id) === prev)
+          ? prev
+          : defaultItsmProvider
+      );
+
+      const defaultSiemChannel = String(nextSiemChannels[0]?.id || 'json_webhook');
+      setEnterpriseSiemChannel((prev) =>
+        nextSiemChannels.some((item) => String(item.id) === prev)
+          ? prev
+          : defaultSiemChannel
+      );
+
+      const deliveryMode = String(siemData?.defaultDeliveryMode || '').toLowerCase();
+      if (deliveryMode === 'fail-open' || deliveryMode === 'fail-closed') {
+        setEnterpriseSiemDeliveryMode(deliveryMode);
+      }
+      setEnterpriseError('');
+    } catch (error) {
+      setEnterpriseError(error.message || (locale === 'fr'
+        ? 'Impossible de charger les fondations Enterprise IAM.'
+        : 'Unable to load enterprise IAM foundations.'));
+    } finally {
+      setEnterpriseLoading(false);
+    }
+  };
+
+  const loadEnterpriseScimDirectory = async (override = {}) => {
+    const startIndex = clampInteger(override.startIndex ?? enterpriseScimStartIndex, 1, 1, 1000000);
+    const count = clampInteger(override.count ?? enterpriseScimCount, 20, 0, 200);
+    const filter = String(override.filter ?? enterpriseScimFilter).trim();
+    const params = { startIndex, count };
+    if (filter) {
+      params.filter = filter;
+    }
+
+    setEnterpriseScimLoading(true);
+    setEnterpriseScimError('');
+    try {
+      const [usersData, groupsData] = await Promise.all([
+        fetchScimUsers(params),
+        fetchScimGroups(params)
+      ]);
+      setEnterpriseScimUsers(Array.isArray(usersData?.Resources) ? usersData.Resources : []);
+      setEnterpriseScimGroups(Array.isArray(groupsData?.Resources) ? groupsData.Resources : []);
+      setEnterpriseScimMeta({
+        users: {
+          totalResults: Number(usersData?.totalResults) || 0,
+          startIndex: Number(usersData?.startIndex) || startIndex,
+          itemsPerPage: Number(usersData?.itemsPerPage) || 0
+        },
+        groups: {
+          totalResults: Number(groupsData?.totalResults) || 0,
+          startIndex: Number(groupsData?.startIndex) || startIndex,
+          itemsPerPage: Number(groupsData?.itemsPerPage) || 0
+        }
+      });
+      setEnterpriseScimStartIndex(String(startIndex));
+      setEnterpriseScimCount(String(count));
+    } catch (error) {
+      setEnterpriseScimError(error.message || (locale === 'fr'
+        ? 'Impossible d’interroger le répertoire SCIM.'
+        : 'Unable to query SCIM directory.'));
+    } finally {
+      setEnterpriseScimLoading(false);
+    }
+  };
+
+  const refreshEnterpriseWorkspace = async () => {
+    await loadEnterpriseFoundations();
+    await loadEnterpriseScimDirectory();
+  };
+
+  const onStartEnterpriseSso = () => {
+    const selectedProvider = String(enterpriseSsoProvider || enterpriseSsoConfig?.defaultProvider || '');
+    startOidcSso({
+      provider: selectedProvider || undefined,
+      postLoginRedirect: '/'
+    });
+  };
+
+  const onSubmitEnterpriseLdapTest = async (event) => {
+    event.preventDefault();
+    const username = String(enterpriseLdapTestUsername || '').trim();
+    const password = String(enterpriseLdapTestPassword || '');
+    if (!username || !password) {
+      setEnterpriseLdapTestResult({
+        error: true,
+        message: locale === 'fr'
+          ? 'Renseignez un utilisateur et un mot de passe LDAP.'
+          : 'Provide LDAP username and password.'
+      });
+      return;
+    }
+
+    setEnterpriseLdapTesting(true);
+    try {
+      const payload = await testLdapBind({ username, password });
+      setEnterpriseLdapTestResult(payload || null);
+    } catch (error) {
+      setEnterpriseLdapTestResult({
+        error: true,
+        message: error.message || (locale === 'fr'
+          ? 'Le test de bind LDAP a échoué.'
+          : 'LDAP bind test failed.')
+      });
+    } finally {
+      setEnterpriseLdapTesting(false);
+    }
+  };
+
+  const onSubmitEnterpriseScimFilter = async (event) => {
+    event.preventDefault();
+    await loadEnterpriseScimDirectory();
+  };
+
+  const onSubmitEnterpriseScimPatch = async (event) => {
+    event.preventDefault();
+    const target = String(enterpriseScimPatchId || '').trim();
+    if (!target) {
+      setEnterpriseScimPatchResult(locale === 'fr'
+        ? 'Renseignez un identifiant SCIM (ID ou userName).'
+        : 'Provide a SCIM target (id or userName).');
+      return;
+    }
+
+    const operations = [];
+    const nextUserName = String(enterpriseScimPatchUsername || '').trim();
+    const nextRole = String(enterpriseScimPatchRole || '').trim();
+    if (nextUserName) {
+      operations.push({ op: 'replace', path: 'userName', value: nextUserName });
+    }
+    if (nextRole) {
+      operations.push({ op: 'replace', path: 'role', value: nextRole });
+    }
+    if (enterpriseScimPatchActive === 'active') {
+      operations.push({ op: 'replace', path: 'active', value: true });
+    }
+    if (enterpriseScimPatchActive === 'inactive') {
+      operations.push({ op: 'replace', path: 'active', value: false });
+    }
+
+    if (!operations.length) {
+      setEnterpriseScimPatchResult(locale === 'fr'
+        ? 'Aucune opération PATCH à appliquer.'
+        : 'No PATCH operation to apply.');
+      return;
+    }
+
+    setEnterpriseScimPatchLoading(true);
+    try {
+      const response = await patchScimUser(target, operations);
+      if (response && response.userName) {
+        setEnterpriseScimPatchResult(locale === 'fr'
+          ? `Utilisateur SCIM mis à jour: ${response.userName}`
+          : `SCIM user updated: ${response.userName}`);
+      } else {
+        setEnterpriseScimPatchResult(locale === 'fr'
+          ? 'Patch SCIM appliqué avec succès.'
+          : 'SCIM patch applied successfully.');
+      }
+      await loadEnterpriseScimDirectory();
+    } catch (error) {
+      setEnterpriseScimPatchResult(error.message || (locale === 'fr'
+        ? 'Le patch SCIM a échoué.'
+        : 'SCIM patch failed.'));
+    } finally {
+      setEnterpriseScimPatchLoading(false);
+    }
+  };
+
+  const onSubmitEnterpriseItsmVerification = async (event) => {
+    event.preventDefault();
+    const ticketId = String(enterpriseItsmTicketId || '').trim();
+    if (!ticketId) {
+      setEnterpriseItsmResult({
+        error: true,
+        message: locale === 'fr' ? 'Renseignez un ticket ITSM.' : 'Provide an ITSM ticket id.'
+      });
+      return;
+    }
+    setEnterpriseItsmLoading(true);
+    try {
+      const payload = await verifyItsmTicket({
+        provider: enterpriseItsmProvider,
+        ticketId,
+        failMode: enterpriseItsmFailMode,
+        simulateUnavailable: !!enterpriseItsmUnavailable
+      });
+      setEnterpriseItsmResult(payload || null);
+    } catch (error) {
+      setEnterpriseItsmResult({
+        error: true,
+        message: error.message || (locale === 'fr' ? 'Vérification ITSM impossible.' : 'Unable to verify ITSM ticket.')
+      });
+    } finally {
+      setEnterpriseItsmLoading(false);
+    }
+  };
+
+  const onSubmitEnterpriseSiemDispatch = async (event) => {
+    event.preventDefault();
+    const eventType = String(enterpriseSiemEventType || '').trim();
+    if (!eventType) {
+      setEnterpriseSiemResult({
+        error: true,
+        message: locale === 'fr' ? 'Renseignez un type d’événement SIEM.' : 'Provide a SIEM event type.'
+      });
+      return;
+    }
+    setEnterpriseSiemLoading(true);
+    try {
+      const payload = await forwardSiemEvent({
+        channel: enterpriseSiemChannel,
+        eventType,
+        deliveryMode: enterpriseSiemDeliveryMode,
+        simulateFailure: !!enterpriseSiemSimulateFailure
+      });
+      setEnterpriseSiemResult(payload || null);
+    } catch (error) {
+      setEnterpriseSiemResult({
+        error: true,
+        message: error.message || (locale === 'fr' ? 'Forward SIEM impossible.' : 'Unable to forward SIEM event.')
+      });
+    } finally {
+      setEnterpriseSiemLoading(false);
+    }
+  };
+
+  const onRemoveEnterpriseClusterPeer = async (nodeId) => {
+    const normalized = String(nodeId || '').trim();
+    if (!normalized) return;
+    setEnterpriseClusterPeerBusy(normalized);
+    setEnterpriseClusterPeerMessage('');
+    try {
+      await removeClusterPeer(normalized);
+      setEnterpriseClusterPeerMessage(locale === 'fr'
+        ? `Noeud retire: ${normalized}`
+        : `Peer removed: ${normalized}`);
+      await loadEnterpriseFoundations();
+    } catch (error) {
+      setEnterpriseClusterPeerMessage(error.message || (locale === 'fr'
+        ? 'Suppression du noeud impossible.'
+        : 'Unable to remove cluster peer.'));
+    } finally {
+      setEnterpriseClusterPeerBusy('');
+    }
+  };
+
+  useEffect(() => {
+    if (!auth.token || !canManagePlatform) {
+      setEnterpriseLoading(false);
+      setEnterpriseError('');
+      setEnterpriseDirectoryProviders([]);
+      setEnterpriseLdapConfig(null);
+      setEnterpriseLdapTestUsername('');
+      setEnterpriseLdapTestPassword('');
+      setEnterpriseLdapTestResult(null);
+      setEnterpriseSsoProviders([]);
+      setEnterpriseSsoProvider('');
+      setEnterpriseSsoConfig(null);
+      setEnterpriseScimConfig(null);
+      setEnterpriseScimUsers([]);
+      setEnterpriseScimGroups([]);
+      setEnterpriseScimMeta({
+        users: { totalResults: 0, startIndex: 1, itemsPerPage: 0 },
+        groups: { totalResults: 0, startIndex: 1, itemsPerPage: 0 }
+      });
+      setEnterpriseScimError('');
+      setEnterpriseScimPatchResult('');
+      setEnterpriseItsmProviders([]);
+      setEnterpriseItsmResult(null);
+      setEnterpriseSiemChannels([]);
+      setEnterpriseSiemResult(null);
+      setEnterpriseClusterStatus(null);
+      setEnterpriseClusterConfig(null);
+      setEnterpriseClusterPeerBusy('');
+      setEnterpriseClusterPeerMessage('');
+      return;
+    }
+    if (adminSection !== 'enterprise') {
+      return;
+    }
+    refreshEnterpriseWorkspace().catch(() => {});
+  }, [adminSection, auth.token, canManagePlatform]);
 
   const onTerminate = async (sessionId) => {
     try {
@@ -1717,7 +2317,7 @@ export default function App() {
         prev.map((item) => (item.id === sessionId ? updated : item))
       );
     } catch (error) {
-      setSessionError(error.message || 'Unable to terminate session');
+      setSessionError(error.message || t('feedback.unableTerminateSession'));
     }
   };
 
@@ -1737,7 +2337,7 @@ export default function App() {
 
   const loadAudit = async () => {
     if (!auth.token) {
-      setAuditError('Sign in to view audit logs.');
+      setAuditError(t('app.auditorRoleHint'));
       return;
     }
     setLoadingAudit(true);
@@ -1746,7 +2346,7 @@ export default function App() {
       setAuditItems(Array.isArray(data.items) ? data.items : []);
       setAuditError('');
     } catch (error) {
-      setAuditError(error.message || 'Unable to load audit log');
+      setAuditError(error.message || t('feedback.unableLoadAudit'));
     } finally {
       setLoadingAudit(false);
     }
@@ -1937,11 +2537,17 @@ export default function App() {
 
     const resource = resolveSessionResource(session);
     if (!resource || !resource.hasCredentials) {
-      setTerminalInfo('Manual password required for this session.');
+      setTerminalInfo(t('feedback.manualPasswordRequired'));
       return;
     }
 
-    setTerminalInfo('Attempting automatic reconnect with vault credentials...');
+    if ((resource.credentialSource || session.credentialSource || 'vaulted') !== 'vaulted') {
+      setAutoConnectSessionId(session.id);
+      setTerminalInfo('Brokered session ready. Credentials stay on the bastion.');
+      return;
+    }
+
+    setTerminalInfo(t('feedback.autoReconnectAttempt'));
 
     try {
       const lease = await issueEphemeralCredential(resource.id);
@@ -1949,19 +2555,10 @@ export default function App() {
       if (creds.sshPassword) {
         setSshPassword(creds.sshPassword);
         setAutoConnectSessionId(session.id);
-        setTerminalInfo('Vault credentials loaded. Reconnecting...');
+        setTerminalInfo(t('feedback.vaultCredentialsLoaded'));
       }
     } catch (_) {
-      try {
-        const creds = await fetchResourceCredentials(resource.id);
-        if (creds.sshPassword) {
-          setSshPassword(creds.sshPassword);
-          setAutoConnectSessionId(session.id);
-          setTerminalInfo('Vault credentials loaded. Reconnecting...');
-        }
-      } catch (_) {
-        setTerminalInfo('Automatic credential recovery failed. Enter password manually.');
-      }
+      setTerminalInfo(t('feedback.automaticCredentialRecoveryFailed'));
     }
   };
 
@@ -1980,21 +2577,21 @@ export default function App() {
   const connectTerminal = () => {
     setTerminalInfo('');
     if (!activeTerminalSession) {
-      setTerminalError('Pick a session to connect.');
+      setTerminalError(t('feedback.pickSessionToConnect'));
       return;
     }
     if (!sshPassword) {
-      setTerminalError('SSH password is required.');
+      setTerminalError(t('feedback.sshPasswordRequired'));
       return;
     }
     if (!auth.token) {
-      setTerminalError('Sign in first.');
+      setTerminalError(t('feedback.signInFirst'));
       return;
     }
 
     const terminal = terminalInstanceRef.current;
     if (!terminal) {
-      setTerminalError('Terminal is initializing... retrying.');
+      setTerminalError(t('feedback.terminalInitializing'));
       window.setTimeout(() => {
         if (terminalInstanceRef.current && auth.token && activeTerminalSession) {
           connectTerminal();
@@ -2050,7 +2647,7 @@ export default function App() {
         try {
           const payload = JSON.parse(event.data);
           if (payload.type === 'error') {
-            setTerminalError(payload.message || 'SSH error');
+            setTerminalError(payload.message || t('feedback.sshError'));
           }
         } catch (error) {
           terminal.write(event.data);
@@ -2070,12 +2667,12 @@ export default function App() {
       socketRef.current = null;
       if (!socketOpened) {
         setTerminalStatus('error');
-        setTerminalError('SSH live connection rejected. Session may be expired; re-login and retry.');
+        setTerminalError(t('feedback.sshRejected'));
         return;
       }
       if (event?.code === 1008 || event?.code === 1006) {
         setTerminalStatus('error');
-        setTerminalError('SSH live connection interrupted (auth or proxy). Re-login and retry.');
+        setTerminalError(t('feedback.sshInterrupted'));
         return;
       }
       setTerminalStatus('closed');
@@ -2084,7 +2681,7 @@ export default function App() {
     socket.addEventListener('error', () => {
       if (socketRef.current !== socket) return;
       setTerminalStatus('error');
-      setTerminalError('WebSocket transport error. Check reverse proxy routing and session authentication.');
+      setTerminalError(t('feedback.websocketTransportError'));
     });
   };
 
@@ -2092,15 +2689,15 @@ export default function App() {
     if (!snippet?.command) return;
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setTerminalError('Connect the SSH terminal before sending snippets.');
+      setTerminalError(t('feedback.connectTerminalBeforeSnippets'));
       return;
     }
     const payload = execute ? `${snippet.command}\n` : snippet.command;
     socket.send(JSON.stringify({ type: 'input', data: payload }));
     setTerminalInfo(
       execute
-        ? `Snippet executed: ${snippet.label}`
-        : `Snippet injected (press Enter to run): ${snippet.label}`
+        ? t('feedback.snippetExecuted', { label: snippet.label })
+        : t('feedback.snippetInjected', { label: snippet.label })
     );
   };
 
@@ -2108,7 +2705,7 @@ export default function App() {
     const label = snippetLabel.trim();
     const command = snippetCommand.trim();
     if (!label || !command) {
-      setTerminalError('Snippet label and command are required.');
+      setTerminalError(t('feedback.snippetRequired'));
       return;
     }
     const id = `custom-${Date.now()}`;
@@ -2116,7 +2713,7 @@ export default function App() {
     setSnippetLabel('');
     setSnippetCommand('');
     setTerminalError('');
-    setTerminalInfo(`Snippet saved: ${label}`);
+    setTerminalInfo(t('feedback.snippetSaved', { label }));
   };
 
   const removeCustomSnippet = (snippetId) => {
@@ -2136,7 +2733,7 @@ export default function App() {
 
   const isAgentTunnelProtocol = (protocol) => {
     const normalized = String(protocol || '').toLowerCase();
-    return normalized === 'agent' || normalized === 'rdp' || normalized === 'vnc';
+    return normalized === 'agent' || normalized === 'rdp';
   };
 
   const resolveAgentInstallGuide = () => {
@@ -2228,15 +2825,52 @@ export default function App() {
 
   const connectToResource = async (resource, accessMeta = {}) => {
     if (!auth.token) {
-      setSessionError('Sign in to start a session.');
+      setSessionError(t('feedback.signInFirst'));
       return false;
     }
 
+    const protocol = String(resource.protocol || '').toLowerCase();
+
     // Handle web resources via proxy
-    if (resource.protocol === 'http' || resource.protocol === 'https') {
+    if (protocol === 'http' || protocol === 'https') {
       setInlineWebResource(resource);
+      setVncViewerSession(null);
       setMainTab('sessions');
       return true;
+    }
+
+    if (protocol === 'vnc') {
+      try {
+        const payload = {
+          resourceId: resource.id,
+          target: resource.target,
+          user: resource.sshUsername || auth.user,
+          protocol: resource.protocol,
+          port: resource.port,
+          justification: (accessMeta.justification || '').trim(),
+          ticketId: (accessMeta.ticketId || '').trim(),
+          purpose: (accessMeta.purpose || '').trim(),
+          purposeEvidence: (accessMeta.purposeEvidence || '').trim(),
+          accessRequestId: accessMeta.accessRequestId || undefined
+        };
+        const created = await createSession(payload);
+        setSessions((prev) => [created, ...prev]);
+        if (created?.accessGrantId) {
+          fetchAccessGrants()
+            .then((data) => {
+              setAccessGrants(Array.isArray(data?.items) ? data.items : []);
+            })
+            .catch(() => {});
+        }
+        setSessionError('');
+        setInlineWebResource(null);
+        setVncViewerSession(created);
+        setMainTab('sessions');
+        return true;
+      } catch (error) {
+        setSessionError(error.message || 'Unable to create session');
+        return false;
+      }
     }
 
     // Handle protocols that should use local TCP tunnel through the agent
@@ -2264,12 +2898,19 @@ export default function App() {
       };
       const created = await createSession(payload);
       setSessions((prev) => [created, ...prev]);
+      if (created?.accessGrantId) {
+        fetchAccessGrants()
+          .then((data) => {
+            setAccessGrants(Array.isArray(data?.items) ? data.items : []);
+          })
+          .catch(() => {});
+      }
       setSessionError('');
       setInlineWebResource(null);
       openTerminal(created);
 
-      // Auto-inject credentials if stored in the vault
-      if (resource.hasCredentials) {
+      // Auto-inject credentials only for vaulted mode.
+      if (resource.hasCredentials && (resource.credentialSource || 'vaulted') === 'vaulted') {
         try {
           const lease = await issueEphemeralCredential(resource.id);
           const creds = await consumeEphemeralCredential(lease.leaseId);
@@ -2279,18 +2920,12 @@ export default function App() {
             setAutoConnectSessionId(created.id);
           }
         } catch (_) {
-          // Fallback to static vault credentials if ephemeral lease fails.
-          try {
-            const creds = await fetchResourceCredentials(resource.id);
-            if (creds.sshPassword) {
-              setSshPassword(creds.sshPassword);
-              setMainTab('sessions');
-              setAutoConnectSessionId(created.id);
-            }
-          } catch (_) {
-            // Silently fallback to manual password entry
-          }
+          // JIT-first: if lease issuance fails, fall back to manual password entry.
         }
+      } else if ((resource.credentialSource || 'vaulted') !== 'vaulted') {
+        setSshPassword('');
+        setMainTab('sessions');
+        setAutoConnectSessionId(created.id);
       }
       return true;
     } catch (error) {
@@ -2342,7 +2977,7 @@ export default function App() {
       return;
     }
 
-    if (resource.requireAccessJustification || (containmentEnabled && sessionBackedProtocol)) {
+    if (sessionBackedProtocol) {
       const existingPlaybook =
         accessPlaybooks.find((item) => Number(item.resourceId) === Number(resource.id)) || null;
       setAccessPromptMode('connect');
@@ -2358,9 +2993,19 @@ export default function App() {
     await connectToResource(resource);
   };
 
+  const openLiveSession = async (session) => {
+    const protocol = String(session?.protocol || '').toLowerCase();
+    if (protocol === 'vnc') {
+      setVncViewerSession(session);
+      setMainTab('sessions');
+      return;
+    }
+    await openTerminal(session);
+  };
+
   const applyCurrentAccessPlaybook = () => {
     if (!currentAccessPlaybook) {
-      setSessionError('No saved playbook for this resource.');
+      setSessionError(locale === 'fr' ? 'Aucun playbook enregistré pour cette ressource.' : 'No saved playbook for this resource.');
       return;
     }
     setAccessPromptReason(currentAccessPlaybook.justification || '');
@@ -2382,7 +3027,7 @@ export default function App() {
       updatedAt: new Date().toISOString()
     };
     if (!playbook.justification && !playbook.ticketId && !playbook.purpose && !playbook.purposeEvidence) {
-      setSessionError('Playbook cannot be empty. Fill at least one field before saving.');
+      setSessionError(locale === 'fr' ? 'Le playbook ne peut pas être vide. Remplissez au moins un champ avant enregistrement.' : 'Playbook cannot be empty. Fill at least one field before saving.');
       return;
     }
     setAccessPlaybooks((prev) => {
@@ -2390,7 +3035,11 @@ export default function App() {
       return [...next, playbook];
     });
     setSessionError('');
-    setTerminalInfo(`Access playbook saved for ${accessPromptResource?.name || 'resource'}.`);
+    setTerminalInfo(
+      locale === 'fr'
+        ? `Playbook d'accès enregistré pour ${accessPromptResource?.name || 'la ressource'}.`
+        : `Access playbook saved for ${accessPromptResource?.name || 'resource'}.`
+    );
   };
 
   const deleteCurrentAccessPlaybook = () => {
@@ -2409,8 +3058,8 @@ export default function App() {
     if (!reason) {
       setSessionError(
         containmentEnabled
-          ? 'Access reason is required while containment mode is active.'
-          : 'Access reason is required for this resource.'
+          ? (locale === 'fr' ? "Une raison d'accès est requise tant que le mode confinement est actif." : 'Access reason is required while containment mode is active.')
+          : (locale === 'fr' ? "Une raison d'accès est requise pour cette ressource." : 'Access reason is required for this resource.')
       );
       return;
     }
@@ -2419,7 +3068,7 @@ export default function App() {
     const riskLevel = String(accessPromptResource.riskLevel || '').toLowerCase();
     const purposeRequired = riskLevel === 'high' || riskLevel === 'critical';
     if (purposeRequired && !purpose) {
-      setSessionError('High-risk resources require a purpose.');
+      setSessionError(locale === 'fr' ? 'Les ressources à haut risque exigent un objectif.' : 'High-risk resources require a purpose.');
       return;
     }
     if (accessPromptMode === 'request') {
@@ -2430,11 +3079,11 @@ export default function App() {
           ticketId: accessPromptTicketId.trim()
         });
         setAccessRequests((prev) => [created, ...prev]);
-        setSessionError('Access request submitted. Wait for admin approval.');
+        setSessionError(locale === 'fr' ? "Demande d'accès envoyée. Attendez l'approbation d'un admin." : 'Access request submitted. Wait for admin approval.');
         closeAccessPrompt();
         return;
       } catch (error) {
-        setSessionError(error.message || 'Unable to submit access request');
+        setSessionError(error.message || (locale === 'fr' ? "Impossible d'envoyer la demande d'accès" : 'Unable to submit access request'));
         return;
       }
     }
@@ -2468,7 +3117,7 @@ export default function App() {
         setRiskPreviewError('');
       } catch (error) {
         setRiskPreview(null);
-        setRiskPreviewError(error.message || 'Unable to compute risk preview');
+        setRiskPreviewError(error.message || (locale === 'fr' ? "Impossible de calculer l'aperçu de risque" : 'Unable to compute risk preview'));
       } finally {
         setRiskPreviewLoading(false);
       }
@@ -2493,7 +3142,7 @@ export default function App() {
       const data = await fetchSessionDna(sessionId);
       setSessionDna(data);
     } catch (error) {
-      setSessionDnaError(error.message || 'Unable to load session DNA');
+      setSessionDnaError(error.message || (locale === 'fr' ? "Impossible de charger l'ADN de session" : 'Unable to load session DNA'));
     } finally {
       setSessionDnaLoading(false);
     }
@@ -2507,7 +3156,7 @@ export default function App() {
       );
       setAccessRequestError('');
     } catch (error) {
-      setAccessRequestError(error.message || 'Unable to approve access request');
+      setAccessRequestError(error.message || (locale === 'fr' ? "Impossible d'approuver la demande d'accès" : 'Unable to approve access request'));
     }
   };
 
@@ -2519,7 +3168,7 @@ export default function App() {
       );
       setAccessRequestError('');
     } catch (error) {
-      setAccessRequestError(error.message || 'Unable to deny access request');
+      setAccessRequestError(error.message || (locale === 'fr' ? "Impossible de refuser la demande d'accès" : 'Unable to deny access request'));
     }
   };
 
@@ -2534,7 +3183,7 @@ export default function App() {
     const trimmedTarget = resourceForm.target.trim();
     const selectedProtocol = (resourceForm.protocol || '').trim();
     if (!trimmedName || !trimmedTarget || !selectedProtocol) {
-      setResourceError('Name, target and protocol are required.');
+      setResourceError(locale === 'fr' ? 'Le nom, la cible et le protocole sont requis.' : 'Name, target and protocol are required.');
       return;
     }
 
@@ -2550,6 +3199,8 @@ export default function App() {
       description: resourceForm.description.trim(),
       imageUrl: resourceForm.imageUrl.trim(),
       imageData: resourceForm.imageData || '',
+      tagsCsv: resourceForm.tagsCsv.trim(),
+      credentialSource: resourceForm.credentialSource || 'vaulted',
       httpUsername: resourceForm.httpUsername.trim(),
       httpPassword: resourceForm.httpPassword,
       sshUsername: resourceForm.sshUsername.trim(),
@@ -2580,6 +3231,9 @@ export default function App() {
         tunnelTicketRateLimitMaxAttempts: '0',
         description: '',
         imageUrl: '',
+        imageData: '',
+        tagsCsv: '',
+        credentialSource: 'vaulted',
         httpUsername: '',
         httpPassword: '',
         sshUsername: '',
@@ -2591,7 +3245,7 @@ export default function App() {
         riskLevel: 'low'
       });
     } catch (error) {
-      setResourceError(error.message || 'Unable to save resource');
+      setResourceError(error.message || t('feedback.unableSaveResource'));
     } finally {
       setSavingResource(false);
     }
@@ -2610,6 +3264,8 @@ export default function App() {
       description: resource.description || '',
       imageUrl: resource.imageUrl || '',
       imageData: resource.imageData || '',
+      tagsCsv: resource.tagsCsv || '',
+      credentialSource: resource.credentialSource || 'vaulted',
       httpUsername: resource.httpUsername || '',
       httpPassword: '',
       sshUsername: resource.sshUsername || '',
@@ -2627,7 +3283,169 @@ export default function App() {
       await deleteResource(resourceId);
       setResources((prev) => prev.filter((item) => item.id !== resourceId));
     } catch (error) {
-      setResourceError(error.message || 'Unable to delete resource');
+      setResourceError(error.message || t('feedback.unableDeleteResource'));
+    }
+  };
+
+  const resetAccessPolicyForm = () => {
+    setEditingAccessPolicyId(null);
+    setAccessPolicyForm({
+      name: '',
+      description: '',
+      identityPattern: '',
+      groupName: '',
+      role: '',
+      resourceTagsCsv: '',
+      riskLevel: 'any',
+      ticketRequired: false,
+      requireJustification: false,
+      approvalMode: 'inherit',
+      mfaRequirement: 'any',
+      timeWindow: 'any',
+      maxDurationSeconds: '3600',
+      routingConstraint: 'any',
+      enabled: true
+    });
+  };
+
+  const onSubmitAccessPolicy = async (event) => {
+    event.preventDefault();
+    const payload = {
+      name: accessPolicyForm.name.trim(),
+      description: accessPolicyForm.description.trim(),
+      identityPattern: accessPolicyForm.identityPattern.trim(),
+      groupName: accessPolicyForm.groupName.trim(),
+      role: accessPolicyForm.role.trim(),
+      resourceTagsCsv: accessPolicyForm.resourceTagsCsv.trim(),
+      riskLevel: accessPolicyForm.riskLevel || 'any',
+      ticketRequired: !!accessPolicyForm.ticketRequired,
+      requireJustification: !!accessPolicyForm.requireJustification,
+      approvalMode: accessPolicyForm.approvalMode || 'inherit',
+      mfaRequirement: accessPolicyForm.mfaRequirement || 'any',
+      timeWindow: accessPolicyForm.timeWindow.trim() || 'any',
+      maxDurationSeconds: Number.parseInt(accessPolicyForm.maxDurationSeconds, 10) || 3600,
+      routingConstraint: accessPolicyForm.routingConstraint || 'any',
+      enabled: !!accessPolicyForm.enabled
+    };
+    try {
+      const saved = editingAccessPolicyId
+        ? await updateAccessPolicy(editingAccessPolicyId, payload)
+        : await createAccessPolicy(payload);
+      setAccessPolicies((prev) => {
+        if (editingAccessPolicyId) {
+          return prev.map((item) => (item.id === editingAccessPolicyId ? saved : item));
+        }
+        return [...prev, saved];
+      });
+      setAccessPolicyError('');
+      resetAccessPolicyForm();
+    } catch (error) {
+      setAccessPolicyError(error.message || 'Unable to save access policy');
+    }
+  };
+
+  const onEditAccessPolicy = (policy) => {
+    setEditingAccessPolicyId(policy.id);
+    setAccessPolicyForm({
+      name: policy.name || '',
+      description: policy.description || '',
+      identityPattern: policy.identityPattern || '',
+      groupName: policy.groupName || '',
+      role: policy.role || '',
+      resourceTagsCsv: policy.resourceTagsCsv || '',
+      riskLevel: policy.riskLevel || 'any',
+      ticketRequired: !!policy.ticketRequired,
+      requireJustification: !!policy.requireJustification,
+      approvalMode: policy.approvalMode || 'inherit',
+      mfaRequirement: policy.mfaRequirement || 'any',
+      timeWindow: policy.timeWindow || 'any',
+      maxDurationSeconds: String(policy.maxDurationSeconds || 3600),
+      routingConstraint: policy.routingConstraint || 'any',
+      enabled: !!policy.enabled
+    });
+  };
+
+  const onDeleteAccessPolicy = async (policyId) => {
+    try {
+      await deleteAccessPolicy(policyId);
+      setAccessPolicies((prev) => prev.filter((item) => item.id !== policyId));
+      setAccessPolicyError('');
+      if (editingAccessPolicyId === policyId) resetAccessPolicyForm();
+    } catch (error) {
+      setAccessPolicyError(error.message || 'Unable to delete access policy');
+    }
+  };
+
+  const resetAccessProfileForm = () => {
+    setEditingAccessProfileId(null);
+    setAccessProfileForm({
+      name: '',
+      description: '',
+      resourceTagsCsv: '',
+      resourceIdsCsv: '',
+      policyId: '0'
+    });
+  };
+
+  const onSubmitAccessProfile = async (event) => {
+    event.preventDefault();
+    const payload = {
+      name: accessProfileForm.name.trim(),
+      description: accessProfileForm.description.trim(),
+      resourceTagsCsv: accessProfileForm.resourceTagsCsv.trim(),
+      resourceIdsCsv: accessProfileForm.resourceIdsCsv.trim(),
+      policyId: Number.parseInt(accessProfileForm.policyId, 10) || 0
+    };
+    try {
+      const saved = editingAccessProfileId
+        ? await updateAccessProfile(editingAccessProfileId, payload)
+        : await createAccessProfile(payload);
+      setAccessProfiles((prev) => {
+        if (editingAccessProfileId) {
+          return prev.map((item) => (item.id === editingAccessProfileId ? saved : item));
+        }
+        return [...prev, saved];
+      });
+      setAccessProfileError('');
+      resetAccessProfileForm();
+    } catch (error) {
+      setAccessProfileError(error.message || 'Unable to save access profile');
+    }
+  };
+
+  const onEditAccessProfile = (profile) => {
+    setEditingAccessProfileId(profile.id);
+    setAccessProfileForm({
+      name: profile.name || '',
+      description: profile.description || '',
+      resourceTagsCsv: profile.resourceTagsCsv || '',
+      resourceIdsCsv: profile.resourceIdsCsv || '',
+      policyId: String(profile.policyId || 0)
+    });
+  };
+
+  const onDeleteAccessProfile = async (profileId) => {
+    try {
+      await deleteAccessProfile(profileId);
+      setAccessProfiles((prev) => prev.filter((item) => item.id !== profileId));
+      setAccessProfileError('');
+      if (editingAccessProfileId === profileId) resetAccessProfileForm();
+    } catch (error) {
+      setAccessProfileError(error.message || 'Unable to delete access profile');
+    }
+  };
+
+  const onOpenSessionEvidence = async (sessionId) => {
+    setSessionEvidenceLoading(true);
+    setSessionEvidencePack(null);
+    setSessionEvidenceError('');
+    try {
+      const data = await fetchSessionEvidencePack(sessionId);
+      setSessionEvidencePack(data);
+    } catch (error) {
+      setSessionEvidenceError(error.message || 'Unable to load evidence pack');
+    } finally {
+      setSessionEvidenceLoading(false);
     }
   };
 
@@ -2662,7 +3480,7 @@ export default function App() {
         forcePasswordRotation: false
       });
     } catch (error) {
-      setUserError(error.message || 'Unable to save user');
+      setUserError(error.message || t('feedback.unableSaveUser'));
     }
   };
 
@@ -2681,7 +3499,7 @@ export default function App() {
       await deleteUser(userId);
       setUsers((prev) => prev.filter((item) => item.id !== userId));
     } catch (error) {
-      setUserError(error.message || 'Unable to delete user');
+      setUserError(error.message || t('feedback.unableDeleteUser'));
     }
   };
 
@@ -2689,11 +3507,15 @@ export default function App() {
     try {
       setLoadingAccessScope(true);
       setSelectedUserForAccessScope(user);
-      const resourceResponse = await getUserResourcePermissions(user.id);
+      const [resourceResponse, profileResponse] = await Promise.all([
+        getUserResourcePermissions(user.id),
+        getUserAccessProfiles(user.id)
+      ]);
       setUserResourceScope(resourceResponse.resourceIds || []);
+      setUserAccessProfiles(profileResponse.profileIds || []);
       setAccessScopeError('');
     } catch (error) {
-      setAccessScopeError(error.message || 'Unable to load access scope');
+      setAccessScopeError(error.message || t('feedback.unableLoadAccessScope'));
     } finally {
       setLoadingAccessScope(false);
     }
@@ -2713,7 +3535,26 @@ export default function App() {
       }
       setAccessScopeError('');
     } catch (error) {
-      setAccessScopeError(error.message || 'Unable to modify resource scope');
+      setAccessScopeError(error.message || t('feedback.unableModifyResourceScope'));
+    }
+  };
+
+  const onToggleAccessProfile = async (profileId) => {
+    if (!selectedUserForAccessScope) return;
+    const hasProfile = userAccessProfiles.includes(profileId);
+    try {
+      if (hasProfile) {
+        await revokeAccessProfile(selectedUserForAccessScope.id, profileId);
+        setUserAccessProfiles((prev) => prev.filter((id) => id !== profileId));
+      } else {
+        await grantAccessProfile(selectedUserForAccessScope.id, profileId);
+        setUserAccessProfiles((prev) => [...prev, profileId]);
+      }
+      const refreshedResources = await getUserResourcePermissions(selectedUserForAccessScope.id);
+      setUserResourceScope(refreshedResources.resourceIds || []);
+      setAccessScopeError('');
+    } catch (error) {
+      setAccessScopeError(error.message || 'Unable to modify access profile assignment');
     }
   };
 
@@ -2748,7 +3589,7 @@ export default function App() {
       }));
       setRelayError('');
     } catch (error) {
-      setRelayError(error.message || 'Unable to update relay assignment');
+      setRelayError(error.message || t('feedback.unableUpdateRelayAssignment'));
     } finally {
       setRelayAssignBusyResourceId(0);
     }
@@ -2766,7 +3607,7 @@ export default function App() {
       setRelayEnrollmentTokenExpiresAt(String(data?.expiresAt || ''));
       setRelayError('');
     } catch (error) {
-      setRelayError(error.message || 'Unable to issue relay enrollment token');
+      setRelayError(error.message || t('feedback.unableIssueRelayToken'));
     } finally {
       setIssuingRelayEnrollmentToken(false);
     }
@@ -2785,7 +3626,7 @@ export default function App() {
       setRelayCertificateExpiresAt(String(data?.expiresAt || ''));
       setRelayError('');
     } catch (error) {
-      setRelayError(error.message || 'Unable to issue relay certificate');
+      setRelayError(error.message || t('feedback.unableIssueRelayCertificate'));
     } finally {
       setIssuingRelayCertificate(false);
     }
@@ -2795,9 +3636,9 @@ export default function App() {
     if (!relayCertificate) return;
     try {
       await navigator.clipboard.writeText(relayCertificate);
-      setRelayCertificateCopyStatus('Certificate copied');
+      setRelayCertificateCopyStatus(t('feedback.certificateCopied'));
     } catch (_) {
-      setRelayCertificateCopyStatus('Copy failed');
+      setRelayCertificateCopyStatus(t('feedback.copyFailed'));
     }
   };
 
@@ -2805,9 +3646,9 @@ export default function App() {
     if (!relayEnrollmentToken) return;
     try {
       await navigator.clipboard.writeText(relayEnrollmentToken);
-      setRelayEnrollmentCopyStatus('Token copied');
+      setRelayEnrollmentCopyStatus(t('feedback.tokenCopied'));
     } catch (_) {
-      setRelayEnrollmentCopyStatus('Copy failed');
+      setRelayEnrollmentCopyStatus(t('feedback.copyFailed'));
     }
   };
 
@@ -2820,7 +3661,7 @@ export default function App() {
       const data = await setup2FA();
       setTotpSetupData(data);
     } catch (error) {
-      setTotpError(error.message || 'Failed to setup 2FA');
+      setTotpError(error.message || t('feedback.failedSetup2fa'));
     }
   };
 
@@ -2845,7 +3686,7 @@ export default function App() {
         webauthnEnabled: !!data.webauthnEnabled
       });
     } catch (error) {
-      setTotpError(error.message || 'Invalid code');
+      setTotpError(error.message || t('feedback.invalidCode'));
     }
   };
 
@@ -2865,7 +3706,7 @@ export default function App() {
         webauthnEnabled: !!data.webauthnEnabled
       }));
     } catch (error) {
-      setTotpError(error.message || 'Invalid code');
+      setTotpError(error.message || t('feedback.invalidCode'));
     }
   };
 
@@ -2891,9 +3732,9 @@ export default function App() {
   const onCopyTotpValue = async (value, label) => {
     try {
       await navigator.clipboard.writeText(value || '');
-      setTotpCopyStatus(`${label} copied`);
+      setTotpCopyStatus(t('feedback.copiedLabel', { label }));
     } catch (_) {
-      setTotpCopyStatus(`Unable to copy ${label.toLowerCase()}`);
+      setTotpCopyStatus(t('feedback.unableCopyLabel', { label: String(label || '').toLowerCase() }));
     }
   };
 
@@ -2922,9 +3763,9 @@ export default function App() {
       });
       setWebauthnLabel('');
     } catch (error) {
-      const message = error.message || 'Failed to register passkey';
+      const message = error.message || t('feedback.failedRegisterPasskey');
       if (message.toLowerCase().includes('valid domain')) {
-        setTotpError(`${message} Current origin: ${window.location.origin}`);
+        setTotpError(`${message} ${t('feedback.currentOrigin', { value: window.location.origin })}`);
       } else {
         setTotpError(message);
       }
@@ -2949,7 +3790,7 @@ export default function App() {
         webauthnEnabled: !!data.webauthnEnabled
       }));
     } catch (error) {
-      setTotpError(error.message || 'Failed to remove passkey');
+      setTotpError(error.message || t('feedback.failedRemovePasskey'));
     } finally {
       setWebauthnBusy(false);
     }
@@ -2961,7 +3802,7 @@ export default function App() {
       const data = await setMfaPreference(method);
       setPreferredMfaMethod(String(data.preferredMfaMethod || method || 'any'));
     } catch (error) {
-      setTotpError(error.message || 'Failed to save MFA preference');
+      setTotpError(error.message || t('feedback.failedSaveMfaPreference'));
     }
   };
 
@@ -3044,7 +3885,7 @@ export default function App() {
       return;
     }
     refreshRelayBindings().catch(() => {
-      setRelayError('Unable to resolve current relay bindings');
+      setRelayError(t('feedback.unableResolveRelayBindings'));
     });
   }, [auth.token, canManagePlatform, resources]);
 
@@ -3067,7 +3908,7 @@ export default function App() {
       const data = await fetchRecordings(sessionId);
       setRecordings(Array.isArray(data.items) ? data.items : []);
     } catch (error) {
-      setRecordingsError(error.message || 'Unable to load recordings');
+      setRecordingsError(error.message || t('feedback.unableLoadRecordings'));
     } finally {
       setLoadingRecordings(false);
     }
@@ -3124,7 +3965,7 @@ export default function App() {
         }, 100);
       }
     } catch (error) {
-      setRecordingsError(error.message || 'Unable to load recording');
+      setRecordingsError(error.message || t('feedback.unableLoadRecording'));
     }
   };
 
@@ -3210,7 +4051,7 @@ export default function App() {
 
       socket.addEventListener('open', () => {
         setShadowStatus('live');
-        terminal.writeln('\x1b[33m[SHADOW MODE]\x1b[0m Connected to session #' + session.id + ' — Read-only observation');
+        terminal.writeln(`\x1b[33m${t('feedback.shadowConnected', { id: session.id })}\x1b[0m`);
         terminal.writeln('');
       });
 
@@ -3219,7 +4060,7 @@ export default function App() {
           try {
             const payload = JSON.parse(event.data);
             if (payload.type === 'status') {
-              terminal.writeln('\x1b[36m[INFO]\x1b[0m ' + payload.message);
+              terminal.writeln(`\x1b[36m${t('feedback.shadowInfo', { message: payload.message })}\x1b[0m`);
             }
           } catch (_) {
             terminal.write(event.data);
@@ -3254,7 +4095,7 @@ export default function App() {
     setChangePwError('');
     setChangePwSuccess('');
     if (changePwNew !== changePwConfirm) {
-      setChangePwError('New passwords do not match');
+      setChangePwError(t('feedback.passwordsDoNotMatch'));
       return;
     }
     try {
@@ -3263,8 +4104,8 @@ export default function App() {
       });
       setChangePwSuccess(
         bootstrapRequired
-          ? 'Password updated. Let us finish MFA setup to secure the admin account.'
-          : 'Password changed successfully'
+          ? t('feedback.passwordUpdatedContinueMfa')
+          : t('feedback.passwordChanged')
       );
       setChangePwCurrent('');
       setChangePwNew('');
@@ -3287,7 +4128,7 @@ export default function App() {
         });
       }
     } catch (error) {
-      setChangePwError(error.message || 'Failed to change password');
+      setChangePwError(error.message || t('feedback.failedChangePassword'));
     }
   };
 
@@ -3372,7 +4213,7 @@ export default function App() {
           key: `watch:${sessionId}:${Date.now()}`,
           sessionId,
           status: normalizedStatus,
-          message: `Session #${sessionId} status changed: ${previous} -> ${normalizedStatus}`,
+          message: t('feedback.sessionStatusChanged', { id: sessionId, from: previous, to: normalizedStatus }),
           createdAt: new Date().toISOString()
         });
       }
@@ -3497,7 +4338,7 @@ export default function App() {
 
   const exportFilteredAuditCsv = () => {
     if (!filteredAuditItems.length) {
-      setAuditError('No audit rows to export with current filters.');
+      setAuditError(t('app.noAuditEvents'));
       return;
     }
 
@@ -3527,43 +4368,42 @@ export default function App() {
 
   const formatRelativeDate = (value) => {
     const timestamp = Date.parse(value || '');
-    if (!timestamp) return value || 'n/a';
+    if (!timestamp) return value || t('common.notAvailable');
     const diffSec = Math.floor((Date.now() - timestamp) / 1000);
-    if (diffSec < 60) return 'just now';
-    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-    return `${Math.floor(diffSec / 86400)}d ago`;
+    if (diffSec < 60) return t('time.justNow');
+    if (diffSec < 3600) return t('time.minutesAgo', { count: Math.floor(diffSec / 60) });
+    if (diffSec < 86400) return t('time.hoursAgo', { count: Math.floor(diffSec / 3600) });
+    return t('time.daysAgo', { count: Math.floor(diffSec / 86400) });
   };
 
   const renderBootstrapOverlay = () => {
     if (!bootstrapRequired) return null;
     const currentStep = bootstrapState.passwordChangeRequired
-      ? 'Change the default admin password'
-      : 'Enable MFA for the admin account';
+      ? t('bootstrap.changeDefaultPassword')
+      : t('bootstrap.enableMfa');
     return (
       <div className="modal-overlay bootstrap-overlay">
         <div className="modal-content bootstrap-modal" onClick={(event) => event.stopPropagation()}>
-          <p className="workflow-kicker">Initial Security Setup</p>
-          <h3>Secure the default admin account</h3>
+          <p className="workflow-kicker">{t('bootstrap.title')}</p>
+          <h3>{t('bootstrap.heading')}</h3>
           <p className="muted">
-            This first-run checkpoint is mandatory before using the platform. We need a private
-            admin password and at least one MFA factor bound to the account: TOTP or a passkey.
+            {t('bootstrap.body')}
           </p>
           <div className="bootstrap-checklist">
             <div className={`bootstrap-step ${bootstrapState.passwordChangeRequired ? 'active' : 'done'}`}>
-              <strong>1. Change the default password</strong>
-              <span>{bootstrapState.passwordChangeRequired ? 'Required now' : 'Done'}</span>
+              <strong>1. {t('bootstrap.step1')}</strong>
+              <span>{bootstrapState.passwordChangeRequired ? t('bootstrap.requiredNow') : t('bootstrap.done')}</span>
             </div>
             <div className={`bootstrap-step ${!bootstrapState.passwordChangeRequired && bootstrapState.mfaSetupRequired ? 'active' : ''} ${!bootstrapState.mfaSetupRequired ? 'done' : ''}`}>
-              <strong>2. Enable MFA with TOTP or passkey</strong>
-              <span>{bootstrapState.mfaSetupRequired ? 'Pending' : 'Done'}</span>
+              <strong>2. {t('bootstrap.step2')}</strong>
+              <span>{bootstrapState.mfaSetupRequired ? t('bootstrap.pending') : t('bootstrap.done')}</span>
             </div>
           </div>
-          <p className="bootstrap-status">Current step: {currentStep}</p>
+          <p className="bootstrap-status">{t('bootstrap.currentStep', { step: currentStep })}</p>
           {bootstrapState.passwordChangeRequired ? (
             <form onSubmit={onChangePassword}>
               <label>
-                Current password
+                {t('auth.currentPassword')}
                 <input
                   type="password"
                   value={changePwCurrent}
@@ -3573,18 +4413,18 @@ export default function App() {
                 />
               </label>
               <label>
-                New admin password
+                {t('bootstrap.newAdminPassword')}
                 <input
                   type="password"
                   value={changePwNew}
                   onChange={(e) => setChangePwNew(e.target.value)}
                   required
                   autoComplete="new-password"
-                  placeholder="Min 8 chars, upper + lower + digit"
+                  placeholder={t('auth.passwordPlaceholder')}
                 />
               </label>
               <label>
-                Confirm new password
+                {t('auth.confirmNewPassword')}
                 <input
                   type="password"
                   value={changePwConfirm}
@@ -3596,7 +4436,7 @@ export default function App() {
               {changePwError && <p className="error">{changePwError}</p>}
               {changePwSuccess && <p className="success">{changePwSuccess}</p>}
               <div className="bootstrap-actions">
-                <button type="submit">Save new password</button>
+                <button type="submit">{t('auth.saveNewPassword')}</button>
               </div>
             </form>
           ) : (
@@ -3605,23 +4445,22 @@ export default function App() {
               {!totpEnabled && !totpSetupData && (
                 <>
                   <p className="muted">
-                    Finish admin hardening with either a TOTP authenticator or a WebAuthn passkey
-                    such as a physical security key.
+                    {t('bootstrap.finishHardening')}
                   </p>
                   <div className="bootstrap-actions">
-                    <button type="button" onClick={onSetup2FA}>Start MFA setup</button>
+                    <button type="button" onClick={onSetup2FA}>{t('bootstrap.startMfaSetup')}</button>
                     <button
                       type="button"
                       className="ghost"
                       onClick={() => onRegisterPasskey('Admin security key')}
                       disabled={webauthnBusy || !isWebAuthnSupported()}
                     >
-                      {webauthnBusy ? 'Registering...' : 'Use passkey / security key'}
+                      {webauthnBusy ? t('admin.registering') : t('auth.usePasskey')}
                     </button>
                   </div>
                   {!isWebAuthnSupported() && (
                     <p className="muted">
-                      Passkeys require a compatible browser in a secure context (HTTPS or localhost).
+                      {t('bootstrap.passkeyBrowserHint')}
                     </p>
                   )}
                 </>
@@ -3629,29 +4468,28 @@ export default function App() {
               {totpSetupData && (
                 <div className="bootstrap-totp-panel">
                   <p>
-                    Use the secret below in your authenticator app or OATH-TOTP hardware token,
-                    or copy the full `otpauth://` enrollment URI for compatible devices.
+                    {t('bootstrap.totpHelp')}
                   </p>
                   {totpQrDataUrl && (
                     <div className="bootstrap-qr-image-card">
-                      <img src={totpQrDataUrl} alt="Local TOTP QR Code" width={220} height={220} />
+                      <img src={totpQrDataUrl} alt={t('bootstrap.qrAlt')} width={220} height={220} />
                     </div>
                   )}
                   <div className="bootstrap-qr-card">
-                    <strong>Manual secret</strong>
+                    <strong>{t('bootstrap.manualSecret')}</strong>
                     <code className="inline-secret">{totpSetupData.secret}</code>
                     <div className="bootstrap-actions">
-                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.secret, 'Secret')}>
-                        Copy secret
+                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.secret, t('bootstrap.manualSecret'))}>
+                        {t('bootstrap.copySecret')}
                       </button>
-                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.otpauthUri, 'Enrollment URI')}>
-                        Copy URI
+                      <button type="button" className="ghost" onClick={() => onCopyTotpValue(totpSetupData.otpauthUri, t('bootstrap.enrollmentUri'))}>
+                        {t('bootstrap.copyUri')}
                       </button>
                     </div>
                   </div>
                   {totpCopyStatus && <p className="muted">{totpCopyStatus}</p>}
                   <label>
-                    Authenticator code
+                    {t('auth.authenticatorCode')}
                     <input
                       type="text"
                       inputMode="numeric"
@@ -3662,12 +4500,12 @@ export default function App() {
                     />
                   </label>
                   <div className="bootstrap-actions">
-                    <button type="button" onClick={onVerify2FA}>Verify and enable MFA</button>
+                    <button type="button" onClick={onVerify2FA}>{t('bootstrap.verifyAndEnableMfa')}</button>
                   </div>
                 </div>
               )}
               {(totpEnabled || webauthnEnabled) && !bootstrapState.mfaSetupRequired && (
-                <p className="success">MFA enabled. The admin account is now secured.</p>
+                <p className="success">{t('bootstrap.mfaEnabled')}</p>
               )}
             </div>
           )}
@@ -3683,17 +4521,23 @@ export default function App() {
           <img src="/assets/logo-full-blue.png" alt="EndoriumFort" className="login-logo" />
         </div>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-          <h1>Sign in</h1>
-          <button type="button" className="ghost icon-btn" title={darkMode ? 'Light mode' : 'Dark mode'} onClick={toggleDarkMode}>
-            {darkMode ? '☀️' : '🌙'}
-          </button>
+          <h1>{t('auth.signIn')}</h1>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <select aria-label={t('common.language')} value={locale} onChange={(event) => setLocale(event.target.value)}>
+              <option value="fr">{t('common.french')}</option>
+              <option value="en">{t('common.english')}</option>
+            </select>
+            <button type="button" className="ghost icon-btn" title={darkMode ? t('auth.lightMode') : t('auth.darkMode')} onClick={toggleDarkMode}>
+              {darkMode ? '☀️' : '🌙'}
+            </button>
+          </div>
         </div>
         <p className="muted">
-          Access the WebBastion console to launch remote sessions.
+          {t('auth.accessConsole')}
         </p>
         <form className="auth-form" onSubmit={onLogin}>
           <label>
-            User
+            {t('auth.user')}
             <input
               name="user"
               value={auth.user}
@@ -3703,13 +4547,13 @@ export default function App() {
             />
           </label>
           <label>
-            Password
+            {t('auth.password')}
             <input
               name="password"
               type="password"
               value={auth.password}
               onChange={onAuthChange}
-              placeholder="Password"
+              placeholder={t('auth.password')}
               disabled={twoFARequired}
             />
           </label>
@@ -3717,7 +4561,7 @@ export default function App() {
             <div className="login-mfa-block">
               {availableMfaMethods.includes('totp') && (
                 <label>
-                  Authenticator Code (6 digits)
+                  {t('auth.authenticatorCode6Digits')}
                   <input
                     className="mfa-code-input login-mfa-code"
                     type="text"
@@ -3733,7 +4577,7 @@ export default function App() {
               {availableMfaMethods.includes('webauthn') && (
                 <div className="mfa-panel-block login-passkey-card">
                   <p className="muted">
-                    A registered passkey or physical security key can also complete this login.
+                    {t('auth.usePasskey')}
                   </p>
                   <button
                     type="button"
@@ -3741,15 +4585,20 @@ export default function App() {
                     onClick={onLoginWithPasskey}
                     disabled={webauthnBusy || !webauthnLoginOptions}
                   >
-                    {webauthnBusy ? 'Waiting for security key...' : 'Use passkey / security key'}
+                    {webauthnBusy ? t('auth.waitingForSecurityKey') : t('auth.usePasskey')}
                   </button>
                 </div>
               )}
             </div>
           )}
           <button type="submit">
-            {twoFARequired ? 'Verify & Sign in' : 'Sign in'}
+            {twoFARequired ? t('auth.verifyAndSignIn') : t('auth.signIn')}
           </button>
+          {!twoFARequired && (
+            <button type="button" className="ghost" onClick={onStartSsoLogin}>
+              {locale === 'fr' ? 'Se connecter via SSO (OIDC)' : 'Sign in with SSO (OIDC)'}
+            </button>
+          )}
           {twoFARequired && (
             <button
               type="button"
@@ -3762,7 +4611,7 @@ export default function App() {
                 setAuthError('');
               }}
             >
-              Back
+              {t('common.back')}
             </button>
           )}
         </form>
@@ -3777,19 +4626,23 @@ export default function App() {
         <div className="brand">
           <img src="/assets/logo-icon-dark.png" alt="EndoriumFort" className="brand-logo" />
           <div>
-            <h1>Admin Console</h1>
+            <h1>{t('admin.console')}</h1>
           </div>
         </div>
         <div className="top-actions">
-          <button type="button" className="ghost icon-btn" title={darkMode ? 'Light mode' : 'Dark mode'} onClick={toggleDarkMode}>
+          <select aria-label={t('common.language')} value={locale} onChange={(event) => setLocale(event.target.value)}>
+            <option value="fr">{t('common.french')}</option>
+            <option value="en">{t('common.english')}</option>
+          </select>
+          <button type="button" className="ghost icon-btn" title={darkMode ? t('auth.lightMode') : t('auth.darkMode')} onClick={toggleDarkMode}>
             {darkMode ? '☀️' : '🌙'}
           </button>
           <button type="button" className="ghost" onClick={() => navigate('/')}
           >
-            Back to console
+            {t('auth.backToConsole')}
           </button>
           <button type="button" className="secondary" onClick={onLogout}>
-            Sign out
+            {t('auth.signOut')}
           </button>
         </div>
       </header>
@@ -3798,12 +4651,12 @@ export default function App() {
         <>
           {stats && (
             <section className="metric-tile-grid reveal" style={{ marginBottom: '1rem' }}>
-              <MetricTile tone="sessions" label="Active sessions" value={stats.sessions?.active || 0} />
-              <MetricTile tone="total" label="Total sessions" value={stats.sessions?.total || 0} />
-              <MetricTile tone="resources" label="Resources" value={stats.resources?.total || 0} />
-              <MetricTile tone="users" label="Users" value={stats.users?.total || 0} />
-              <MetricTile tone="recordings" label="Recordings" value={stats.recordings?.total || 0} />
-              <MetricTile tone="tokens" label="Active tokens" value={stats.auth?.activeTokens || 0} />
+              <MetricTile tone="sessions" label={t('app.activeCount', { count: '' }).trim()} value={stats.sessions?.active || 0} />
+              <MetricTile tone="total" label={t('app.totalSessions')} value={stats.sessions?.total || 0} />
+              <MetricTile tone="resources" label={t('admin.resources')} value={stats.resources?.total || 0} />
+              <MetricTile tone="users" label={t('admin.users')} value={stats.users?.total || 0} />
+              <MetricTile tone="recordings" label={t('app.recordings')} value={stats.recordings?.total || 0} />
+              <MetricTile tone="tokens" label={t('app.activeTokens')} value={stats.auth?.activeTokens || 0} />
             </section>
           )}
 
@@ -3827,8 +4680,8 @@ export default function App() {
       )}
 
       {!canManagePlatform ? (
-        <SectionCard title="Platform admin access required">
-          <EmptyState title="Admin access only" message="Sign in with a platform admin account to manage users, resources, routing, and security." />
+        <SectionCard title={t('admin.requiredTitle')}>
+          <EmptyState title={t('admin.requiredTitle')} message={t('admin.requiredMessage')} />
         </SectionCard>
       ) : (
         <div className="admin-grid">
@@ -3836,7 +4689,7 @@ export default function App() {
           <div className="panel reveal access-scope-panel">
             <div className="panel-header">
               <div>
-                <h3>{editingResourceId ? 'Edit resource' : 'New resource'}</h3>
+                <h3>{editingResourceId ? t('admin.editResource') : t('admin.newResource')}</h3>
               </div>
             </div>
             <form className="resource-form" onSubmit={onSubmitResource}>
@@ -3863,6 +4716,15 @@ export default function App() {
                       value={resourceForm.description}
                       onChange={onResourceFieldChange}
                       placeholder="Short usage note"
+                    />
+                  </label>
+                  <label>
+                    Tags
+                    <input
+                      name="tagsCsv"
+                      value={resourceForm.tagsCsv}
+                      onChange={onResourceFieldChange}
+                      placeholder="prod, linux, db"
                     />
                   </label>
                   <label className="full">
@@ -3943,7 +4805,7 @@ export default function App() {
                       onChange={onResourceFieldChange}
                     />
                   </label>
-                  {(resourceForm.protocol === 'agent' || resourceForm.protocol === 'rdp' || resourceForm.protocol === 'vnc') && (
+                  {(resourceForm.protocol === 'agent' || resourceForm.protocol === 'rdp') && (
                     <label>
                       Tunnel ticket limit / min
                       <input
@@ -3985,6 +4847,18 @@ export default function App() {
                   )}
                   {resourceForm.protocol === 'ssh' && (
                     <>
+                      <label>
+                        Credential flow
+                        <select
+                          name="credentialSource"
+                          value={resourceForm.credentialSource}
+                          onChange={onResourceFieldChange}
+                        >
+                          <option value="vaulted">vaulted lease</option>
+                          <option value="brokered">brokered (secret stays server-side)</option>
+                          <option value="ephemeral_account">ephemeral account (brokered fallback)</option>
+                        </select>
+                      </label>
                       <label>
                         SSH Username (vault)
                         <input
@@ -4092,7 +4966,7 @@ export default function App() {
                   </select>
                 </label>
                 <div className="policy-preview">
-                  {describeResourcePolicy(resourceForm).map((item) => (
+                  {describeResourcePolicy(resourceForm, t).map((item) => (
                     <span className="policy-chip" key={`preview-${item}`}>{item}</span>
                   ))}
                 </div>
@@ -4140,6 +5014,9 @@ export default function App() {
                         tunnelTicketRateLimitMaxAttempts: '0',
                         description: '',
                         imageUrl: '',
+                        imageData: '',
+                        tagsCsv: '',
+                        credentialSource: 'vaulted',
                         httpUsername: '',
                         httpPassword: '',
                         sshUsername: '',
@@ -4152,7 +5029,7 @@ export default function App() {
                       });
                     }}
                   >
-                    Cancel
+                    {t('common.cancel')}
                   </button>
                 )}
               </div>
@@ -4165,10 +5042,10 @@ export default function App() {
           <div className="panel reveal">
             <div className="panel-header">
               <div>
-                <h3>Resources</h3>
-                <p>{resources.length} configured tiles</p>
+                <h3>{t('admin.resources')}</h3>
+                <p>{t('admin.configuredTiles', { count: resources.length })}</p>
               </div>
-              {loadingResources && <span className="pill loading">loading</span>}
+              {loadingResources && <span className="pill loading">{t('common.loading')}</span>}
             </div>
             <div className="resource-list">
               {resources.length ? (
@@ -4182,8 +5059,14 @@ export default function App() {
                       {resource.description && (
                         <p className="muted">{resource.description}</p>
                       )}
+                      {resource.tagsCsv && (
+                        <p className="muted">Tags: {resource.tagsCsv}</p>
+                      )}
+                      {resource.protocol === 'ssh' && (
+                        <p className="muted">Credential flow: {resource.credentialSource || 'vaulted'}</p>
+                      )}
                       <div className="policy-chip-row">
-                        {describeResourcePolicy(resource).map((item) => (
+                        {describeResourcePolicy(resource, t).map((item) => (
                           <span className="policy-chip" key={`${resource.id}-${item}`}>{item}</span>
                         ))}
                       </div>
@@ -4194,20 +5077,20 @@ export default function App() {
                         className="secondary"
                         onClick={() => onEditResource(resource)}
                       >
-                        Edit
+                        {t('common.edit')}
                       </button>
                       <button
                         type="button"
                         className="ghost"
                         onClick={() => onDeleteResource(resource.id)}
                       >
-                        Delete
+                        {t('common.delete')}
                       </button>
                     </div>
                   </article>
                 ))
               ) : (
-                <p className="muted">No resources created yet.</p>
+                <p className="muted">{t('admin.noResources')}</p>
               )}
             </div>
           </div>
@@ -4219,7 +5102,7 @@ export default function App() {
               <div>
                 <h3>Relay Fabric</h3>
               </div>
-              {loadingRelays && <span className="pill loading">syncing</span>}
+              {loadingRelays && <span className="pill loading">{t('common.syncing')}</span>}
             </div>
 
             <div className="relay-kpi-grid">
@@ -4388,7 +5271,7 @@ export default function App() {
                   );
                 })
               ) : (
-                <p className="muted">Create resources before assigning relay routes.</p>
+                <p className="muted">{t('admin.createResourcesBeforeAssigning')}</p>
               )}
             </div>
           </div>
@@ -4400,7 +5283,7 @@ export default function App() {
               <div>
                 <h3>Access Requests</h3>
               </div>
-              {loadingAccessRequests && <span className="pill loading">loading</span>}
+              {loadingAccessRequests && <span className="pill loading">{t('common.loading')}</span>}
             </div>
             {accessRequestError && <p className="error">{accessRequestError}</p>}
             <div className="resource-list">
@@ -4428,14 +5311,14 @@ export default function App() {
                           className="secondary"
                           onClick={() => onApproveAccessRequest(request.id)}
                         >
-                          Approve
+                          {t('admin.approve')}
                         </button>
                         <button
                           type="button"
                           className="ghost"
                           onClick={() => onDenyAccessRequest(request.id)}
                         >
-                          Deny
+                          {t('admin.deny')}
                         </button>
                       </div>
                     )}
@@ -4452,9 +5335,9 @@ export default function App() {
           <div className="panel reveal">
             <div className="panel-header">
               <div>
-                <h3>{editingUserId ? 'Edit user' : 'New user'}</h3>
+                <h3>{editingUserId ? t('admin.editUser') : t('admin.newUser')}</h3>
               </div>
-              {loadingUsers && <span className="pill loading">loading</span>}
+              {loadingUsers && <span className="pill loading">{t('common.loading')}</span>}
             </div>
             <form className="resource-form" onSubmit={onSubmitUser}>
               <label>
@@ -4474,7 +5357,7 @@ export default function App() {
                   type="password"
                   value={userForm.password}
                   onChange={onUserFieldChange}
-                  placeholder={editingUserId ? 'New password' : 'Password'}
+                  placeholder={editingUserId ? t('auth.newPassword') : t('auth.password')}
                 />
               </label>
               <label>
@@ -4516,7 +5399,7 @@ export default function App() {
                       });
                     }}
                   >
-                    Cancel
+                    {t('common.cancel')}
                   </button>
                 )}
               </div>
@@ -4528,7 +5411,7 @@ export default function App() {
                   <article className="resource-row" key={user.id}>
                     <div>
                       <h4>{user.username}</h4>
-                      <p className="muted">Role: {roleLabel(user.role)}</p>
+                      <p className="muted">{t('admin.roleLabel', { role: roleLabel(user.role, t) })}</p>
                       {user.bootstrapPasswordChangeRequired && (
                         <p className="muted">Password rotation required at next sign-in.</p>
                       )}
@@ -4544,7 +5427,7 @@ export default function App() {
                         className="secondary"
                         onClick={() => onEditUser(user)}
                       >
-                        Edit
+                        {t('common.edit')}
                       </button>
                       <button
                         type="button"
@@ -4558,13 +5441,13 @@ export default function App() {
                         className="ghost"
                         onClick={() => onDeleteUser(user.id)}
                       >
-                        Delete
+                        {t('common.delete')}
                       </button>
                     </div>
                   </article>
                 ))
               ) : (
-                <p className="muted">No users created yet.</p>
+                <p className="muted">{t('admin.noUsers')}</p>
               )}
             </div>
           </div>
@@ -4583,10 +5466,11 @@ export default function App() {
                   onClick={() => {
                     setSelectedUserForAccessScope(null);
                     setUserResourceScope([]);
+                    setUserAccessProfiles([]);
                     setAccessScopeError('');
                   }}
                 >
-                  Close
+                  {t('common.close')}
                 </button>
               )}
             </div>
@@ -4595,7 +5479,7 @@ export default function App() {
               <p className="muted">No user selected yet.</p>
             ) : (
               <>
-                {loadingAccessScope && <p>Loading access scope...</p>}
+                {loadingAccessScope && <p>{t('admin.loadingAccessScope')}</p>}
                 {accessScopeError && <p className="error">{accessScopeError}</p>}
                 <div className="panel-header" style={{ marginTop: '0.5rem' }}>
                   <div>
@@ -4631,7 +5515,45 @@ export default function App() {
                       </article>
                     ))
                   ) : (
-                    <p className="muted">No resources yet.</p>
+                    <p className="muted">{t('admin.noResourcesYet')}</p>
+                  )}
+                </div>
+
+                <div className="panel-header" style={{ marginTop: '1rem' }}>
+                  <div>
+                    <h3>Access Profiles</h3>
+                  </div>
+                </div>
+                <div className="resource-list permissions-resources-list">
+                  {accessProfiles.length ? (
+                    accessProfiles.map((profile) => (
+                      <article className="resource-row compact-perm-row" key={`profile-${profile.id}`}>
+                        <div>
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '12px'
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={userAccessProfiles.includes(profile.id)}
+                              onChange={() => onToggleAccessProfile(profile.id)}
+                              style={{ cursor: 'pointer' }}
+                            />
+                            <div>
+                              <h4>{profile.name}</h4>
+                              <p className="muted">
+                                Policy #{profile.policyId || 0} • {profile.resourceTagsCsv || profile.resourceIdsCsv || 'all assigned resources'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </article>
+                    ))
+                  ) : (
+                    <p className="muted">No access profiles yet.</p>
                   )}
                 </div>
 
@@ -4641,19 +5563,834 @@ export default function App() {
                   </div>
                 </div>
                 <div className="resource-list permissions-grid">
-                  {(ROLE_BLUEPRINTS.find((role) => role.id === normalizeRole(selectedUserForAccessScope.role))?.permissions || [])
+                  {(roleBlueprints.find((role) => role.id === normalizeRole(selectedUserForAccessScope.role))?.permissions || [])
                     .map((permission) => (
                       <article className="resource-row compact-perm-row" key={permission}>
                         <div>
                           <h4>{permission}</h4>
                           <p className="muted">
-                            Granted by role: {roleLabel(selectedUserForAccessScope.role)}
+                            {t('admin.grantedByRole', { role: roleLabel(selectedUserForAccessScope.role, t) })}
                           </p>
                         </div>
                       </article>
                     ))}
                 </div>
               </>
+            )}
+          </div>
+          )}
+
+          {adminSection === 'jit' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>{editingAccessPolicyId ? 'Edit access policy' : 'New access policy'}</h3>
+              </div>
+              {loadingAccessPolicies && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitAccessPolicy}>
+              <label>
+                Name
+                <input name="name" value={accessPolicyForm.name} onChange={onAccessPolicyFieldChange} />
+              </label>
+              <label>
+                Identity
+                <input name="identityPattern" value={accessPolicyForm.identityPattern} onChange={onAccessPolicyFieldChange} placeholder="user or *" />
+              </label>
+              <label>
+                Role
+                <input name="role" value={accessPolicyForm.role} onChange={onAccessPolicyFieldChange} placeholder="operator/admin" />
+              </label>
+              <label>
+                Group
+                <input name="groupName" value={accessPolicyForm.groupName} onChange={onAccessPolicyFieldChange} placeholder="optional local group alias" />
+              </label>
+              <label className="full">
+                Resource tags
+                <input name="resourceTagsCsv" value={accessPolicyForm.resourceTagsCsv} onChange={onAccessPolicyFieldChange} placeholder="prod, db, linux" />
+              </label>
+              <label className="full">
+                Description
+                <input name="description" value={accessPolicyForm.description} onChange={onAccessPolicyFieldChange} />
+              </label>
+              <label>
+                Risk
+                <select name="riskLevel" value={accessPolicyForm.riskLevel} onChange={onAccessPolicyFieldChange}>
+                  <option value="any">any</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="critical">critical</option>
+                </select>
+              </label>
+              <label>
+                Approval mode
+                <select name="approvalMode" value={accessPolicyForm.approvalMode} onChange={onAccessPolicyFieldChange}>
+                  <option value="inherit">inherit</option>
+                  <option value="none">none</option>
+                  <option value="required">required</option>
+                </select>
+              </label>
+              <label>
+                MFA
+                <select name="mfaRequirement" value={accessPolicyForm.mfaRequirement} onChange={onAccessPolicyFieldChange}>
+                  <option value="any">any</option>
+                  <option value="required">required</option>
+                  <option value="totp">totp</option>
+                  <option value="webauthn">webauthn</option>
+                </select>
+              </label>
+              <label>
+                Routing
+                <select name="routingConstraint" value={accessPolicyForm.routingConstraint} onChange={onAccessPolicyFieldChange}>
+                  <option value="any">any</option>
+                  <option value="direct">direct</option>
+                  <option value="relay">relay</option>
+                </select>
+              </label>
+              <label>
+                Time window (UTC)
+                <input name="timeWindow" value={accessPolicyForm.timeWindow} onChange={onAccessPolicyFieldChange} placeholder="any or 08:00-18:00" />
+              </label>
+              <label>
+                Max duration (s)
+                <input name="maxDurationSeconds" type="number" min="300" step="60" value={accessPolicyForm.maxDurationSeconds} onChange={onAccessPolicyFieldChange} />
+              </label>
+              <label className="checkbox-row">
+                <input name="ticketRequired" type="checkbox" checked={!!accessPolicyForm.ticketRequired} onChange={onAccessPolicyFieldChange} />
+                <span>Ticket required</span>
+              </label>
+              <label className="checkbox-row">
+                <input name="requireJustification" type="checkbox" checked={!!accessPolicyForm.requireJustification} onChange={onAccessPolicyFieldChange} />
+                <span>Justification required</span>
+              </label>
+              <label className="checkbox-row">
+                <input name="enabled" type="checkbox" checked={!!accessPolicyForm.enabled} onChange={onAccessPolicyFieldChange} />
+                <span>Enabled</span>
+              </label>
+              <div className="resource-actions">
+                <button type="submit">{editingAccessPolicyId ? 'Update' : 'Create'} policy</button>
+                {editingAccessPolicyId && (
+                  <button type="button" className="ghost" onClick={resetAccessPolicyForm}>
+                    {t('common.cancel')}
+                  </button>
+                )}
+              </div>
+            </form>
+            {accessPolicyError && <p className="error">{accessPolicyError}</p>}
+            <div className="resource-list">
+              {accessPolicies.length ? accessPolicies.map((policy) => (
+                <article className="resource-row" key={`policy-${policy.id}`}>
+                  <div>
+                    <h4>{policy.name}</h4>
+                    <p className="muted">
+                      {policy.resourceTagsCsv || 'all resources'} • {policy.approvalMode} • {policy.mfaRequirement} • TTL {policy.maxDurationSeconds}s
+                    </p>
+                  </div>
+                  <div className="resource-actions">
+                    <button type="button" className="secondary" onClick={() => onEditAccessPolicy(policy)}>Edit</button>
+                    <button type="button" className="ghost" onClick={() => onDeleteAccessPolicy(policy.id)}>Delete</button>
+                  </div>
+                </article>
+              )) : <p className="muted">No access policies yet.</p>}
+            </div>
+          </div>
+          )}
+
+          {adminSection === 'jit' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>{editingAccessProfileId ? 'Edit access profile' : 'New access profile'}</h3>
+              </div>
+              {loadingAccessProfiles && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitAccessProfile}>
+              <label>
+                Name
+                <input name="name" value={accessProfileForm.name} onChange={onAccessProfileFieldChange} />
+              </label>
+              <label>
+                Policy
+                <select name="policyId" value={accessProfileForm.policyId} onChange={onAccessProfileFieldChange}>
+                  <option value="0">none</option>
+                  {accessPolicies.map((policy) => (
+                    <option key={`profile-policy-${policy.id}`} value={policy.id}>{policy.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="full">
+                Resource IDs
+                <input name="resourceIdsCsv" value={accessProfileForm.resourceIdsCsv} onChange={onAccessProfileFieldChange} placeholder="1,2,3" />
+              </label>
+              <label className="full">
+                Resource tags
+                <input name="resourceTagsCsv" value={accessProfileForm.resourceTagsCsv} onChange={onAccessProfileFieldChange} placeholder="prod,windows" />
+              </label>
+              <label className="full">
+                Description
+                <input name="description" value={accessProfileForm.description} onChange={onAccessProfileFieldChange} />
+              </label>
+              <div className="resource-actions">
+                <button type="submit">{editingAccessProfileId ? 'Update' : 'Create'} profile</button>
+                {editingAccessProfileId && (
+                  <button type="button" className="ghost" onClick={resetAccessProfileForm}>
+                    {t('common.cancel')}
+                  </button>
+                )}
+              </div>
+            </form>
+            {accessProfileError && <p className="error">{accessProfileError}</p>}
+            <div className="resource-list">
+              {accessProfiles.length ? accessProfiles.map((profile) => (
+                <article className="resource-row" key={`profile-row-${profile.id}`}>
+                  <div>
+                    <h4>{profile.name}</h4>
+                    <p className="muted">
+                      Policy #{profile.policyId || 0} • {profile.resourceTagsCsv || profile.resourceIdsCsv || 'all assigned resources'}
+                    </p>
+                  </div>
+                  <div className="resource-actions">
+                    <button type="button" className="secondary" onClick={() => onEditAccessProfile(profile)}>Edit</button>
+                    <button type="button" className="ghost" onClick={() => onDeleteAccessProfile(profile.id)}>Delete</button>
+                  </div>
+                </article>
+              )) : <p className="muted">No access profiles yet.</p>}
+            </div>
+          </div>
+          )}
+
+          {adminSection === 'jit' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>Access Grants</h3>
+                <p>Issued JIT grants and their current TTL/status.</p>
+              </div>
+              {loadingAccessGrants && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            {accessGrantError && <p className="error">{accessGrantError}</p>}
+            <div className="resource-list">
+              {accessGrants.length ? accessGrants.map((grant) => (
+                <article className="resource-row" key={`grant-${grant.id}`}>
+                  <div>
+                    <h4>Grant #{grant.id}</h4>
+                    <p className="muted">
+                      {grant.subject} • resource #{grant.resourceId} • {grant.status}
+                    </p>
+                    <p className="muted">
+                      Expires {grant.expiresAt} • {grant.credentialSource} • {grant.routingConstraint}
+                    </p>
+                  </div>
+                </article>
+              )) : <p className="muted">No JIT grant issued yet.</p>}
+            </div>
+          </div>
+          )}
+
+          {adminSection === 'enterprise' && (
+          <div className="panel reveal relay-panel">
+            <div className="panel-header">
+              <div>
+                <h3>Enterprise IAM</h3>
+                <p>
+                  {locale === 'fr'
+                    ? 'Fédération d’identité, provisioning SCIM et validations d’intégrations.'
+                    : 'Identity federation, SCIM provisioning and integration validation workspace.'}
+                </p>
+              </div>
+              {enterpriseLoading && <span className="pill loading">{t('common.syncing')}</span>}
+            </div>
+            {enterpriseError && <p className="error">{enterpriseError}</p>}
+
+            <div className="relay-kpi-grid">
+              <article className="relay-kpi-card">
+                <span>Directory providers</span>
+                <strong>{enterpriseDirectoryProviders.length}</strong>
+              </article>
+              <article className={`relay-kpi-card ${enterpriseLdapConfig?.enabled ? 'ok' : ''}`}>
+                <span>LDAP/AD</span>
+                <strong>{enterpriseLdapConfig?.enabled ? 'enabled' : 'disabled'}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>SSO providers</span>
+                <strong>{enterpriseSsoProviders.length}</strong>
+              </article>
+              <article className="relay-kpi-card ok">
+                <span>SCIM PATCH</span>
+                <strong>{enterpriseScimConfig?.patch?.supported ? 'enabled' : 'disabled'}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>ITSM providers</span>
+                <strong>{enterpriseItsmProviders.length}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>SIEM channels</span>
+                <strong>{enterpriseSiemChannels.length}</strong>
+              </article>
+              <article className={`relay-kpi-card ${enterpriseClusterStatus?.enabled ? 'ok' : 'warning'}`}>
+                <span>Cluster mode</span>
+                <strong>{enterpriseClusterStatus?.enabled ? 'enabled' : 'disabled'}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Cluster nodes</span>
+                <strong>{Number(enterpriseClusterStatus?.summary?.nodesTotal) || 1}</strong>
+              </article>
+            </div>
+
+            <form className="resource-form" onSubmit={(event) => {
+              event.preventDefault();
+              onStartEnterpriseSso();
+            }}>
+              <label>
+                SSO provider
+                <select
+                  value={enterpriseSsoProvider}
+                  onChange={(event) => setEnterpriseSsoProvider(event.target.value)}
+                >
+                  {enterpriseSsoProviders.length ? enterpriseSsoProviders.map((provider) => (
+                    <option key={`sso-provider-${provider.id}`} value={provider.id}>
+                      {provider.name || provider.id} ({provider.protocol || 'oidc'})
+                    </option>
+                  )) : (
+                    <option value="">n/a</option>
+                  )}
+                </select>
+              </label>
+              <div className="resource-actions">
+                <button type="submit" className="secondary" disabled={!enterpriseSsoProviders.length}>
+                  {locale === 'fr' ? 'Tester la connexion OIDC' : 'Test OIDC sign-in'}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    refreshEnterpriseWorkspace().catch(() => {});
+                  }}
+                  disabled={enterpriseLoading || enterpriseScimLoading}
+                >
+                  {locale === 'fr' ? 'Rafraichir les fondations IAM' : 'Refresh IAM foundations'}
+                </button>
+              </div>
+            </form>
+
+            <div className="relay-enroll-token-box">
+              <p>
+                <strong>Default provider</strong>: {enterpriseSsoConfig?.defaultProvider || 'n/a'}
+              </p>
+              <p>
+                <strong>LDAP host</strong>: {enterpriseLdapConfig?.host || 'n/a'}
+              </p>
+              <p>
+                <strong>LDAP base DN</strong>: {enterpriseLdapConfig?.baseDn || 'n/a'}
+              </p>
+              <p>
+                <strong>LDAP auth mode</strong>: {enterpriseLdapConfig?.authMode || 'n/a'}
+              </p>
+              <p>
+                <strong>LDAP default role</strong>: {enterpriseLdapConfig?.defaultRole || 'operator'}
+              </p>
+              <p>
+                <strong>LDAP role mapping</strong>: {enterpriseLdapConfig?.roleMappingEnabled
+                  ? `${locale === 'fr' ? 'active' : 'enabled'} (${enterpriseLdapConfig?.roleMapEntries || 0} ${locale === 'fr' ? 'regles' : 'rules'})`
+                  : (locale === 'fr' ? 'desactive' : 'disabled')}
+              </p>
+              <p>
+                <strong>Single tenant</strong>: {enterpriseSsoConfig?.singleTenant ? 'yes' : 'no'}
+              </p>
+              <p>
+                <strong>OIDC start</strong>: {enterpriseSsoConfig?.oidcStartPath || '/api/auth/sso/oidc/start'}
+              </p>
+              <p>
+                <strong>OIDC callback</strong>: {enterpriseSsoConfig?.oidcCallbackPath || '/api/auth/sso/oidc/callback'}
+              </p>
+              <p className="muted">
+                {locale === 'fr'
+                  ? 'Endpoints OIDC en HTTPS pris en charge avec validation de certificat système.'
+                  : 'OIDC endpoints support HTTPS with system trust-store certificate validation.'}
+              </p>
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.2rem' }}>
+              <div>
+                <h3>Cluster / HA Control Plane</h3>
+                <p>
+                  {locale === 'fr'
+                    ? 'Etat local, heartbeat inter-noeuds et inventaire des pairs.'
+                    : 'Local node posture, inter-node heartbeat health, and peer inventory.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="relay-enroll-token-box">
+              <p>
+                <strong>Node ID</strong>: {enterpriseClusterConfig?.nodeId || enterpriseClusterStatus?.localNode?.nodeId || 'node-local'}
+              </p>
+              <p>
+                <strong>Node label</strong>: {enterpriseClusterConfig?.nodeLabel || enterpriseClusterStatus?.localNode?.label || 'Primary Node'}
+              </p>
+              <p>
+                <strong>Role</strong>: {enterpriseClusterConfig?.role || enterpriseClusterStatus?.localNode?.role || 'standalone'}
+              </p>
+              <p>
+                <strong>Advertise address</strong>: {enterpriseClusterConfig?.advertiseAddr || enterpriseClusterStatus?.localNode?.endpoint || 'n/a'}
+              </p>
+              <p>
+                <strong>Peer auth</strong>: {enterpriseClusterConfig?.peerAuthRequired ? 'required' : 'disabled'}
+              </p>
+              <p>
+                <strong>Heartbeat stale threshold</strong>: {enterpriseClusterConfig?.heartbeatStaleSeconds || enterpriseClusterStatus?.heartbeatStaleSeconds || 45}s
+              </p>
+              <p>
+                <strong>Summary</strong>: {(Number(enterpriseClusterStatus?.summary?.nodesOnline) || 1)} online / {(Number(enterpriseClusterStatus?.summary?.nodesOffline) || 0)} offline
+              </p>
+            </div>
+
+            {enterpriseClusterPeerMessage && <p className="muted">{enterpriseClusterPeerMessage}</p>}
+
+            <div className="resource-list relay-fleet-list">
+              {Array.isArray(enterpriseClusterStatus?.peers) && enterpriseClusterStatus.peers.length ? enterpriseClusterStatus.peers.map((peer) => {
+                const peerStatus = String(peer?.status || '').toLowerCase() === 'online' ? 'online' : 'offline';
+                return (
+                  <article className="resource-row relay-row" key={`cluster-peer-${peer.nodeId}`}>
+                    <div>
+                      <h4>{peer.label || peer.nodeId}</h4>
+                      <p className="muted">
+                        {peer.nodeId} • {peer.role || 'follower'} • {peer.endpoint || peer.sourceIp || 'n/a'}
+                      </p>
+                      <p className="muted">
+                        version {peer.version || 'n/a'} • relays {Number(peer.managedRelays) || 0} • sessions {Number(peer.managedSessions) || 0}
+                      </p>
+                    </div>
+                    <div className="resource-actions">
+                      <span className={`pill ${peerStatus === 'online' ? 'ok' : 'offline'}`}>{peerStatus}</span>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => onRemoveEnterpriseClusterPeer(peer.nodeId)}
+                        disabled={enterpriseClusterPeerBusy === peer.nodeId}
+                      >
+                        {enterpriseClusterPeerBusy === peer.nodeId
+                          ? (locale === 'fr' ? 'Suppression...' : 'Removing...')
+                          : (locale === 'fr' ? 'Retirer' : 'Remove')}
+                      </button>
+                    </div>
+                  </article>
+                );
+              }) : (
+                <p className="muted">
+                  {locale === 'fr' ? 'Aucun pair cluster recu pour le moment.' : 'No cluster peer heartbeat received yet.'}
+                </p>
+              )}
+            </div>
+          </div>
+          )}
+
+          {adminSection === 'enterprise' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>Directory Integrations</h3>
+                <p>
+                  {locale === 'fr'
+                    ? 'Inventaire des annuaires et test de bind LDAP/Active Directory.'
+                    : 'Directory inventory and LDAP/Active Directory bind-test workspace.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="resource-list">
+              {enterpriseDirectoryProviders.length ? enterpriseDirectoryProviders.map((provider) => (
+                <article className="resource-row" key={`directory-provider-${provider.id}`}>
+                  <div>
+                    <h4>{provider.name || provider.id}</h4>
+                    <p className="muted">
+                      id: {provider.id || 'n/a'} • jitProvisioning: {provider.jitProvisioning ? 'yes' : 'no'}
+                    </p>
+                  </div>
+                  <span className={`pill ${provider.enabled ? 'ok' : 'offline'}`}>
+                    {provider.enabled ? 'enabled' : 'disabled'}
+                  </span>
+                </article>
+              )) : (
+                <p className="muted">
+                  {locale === 'fr' ? 'Aucun provider annuaire déclaré.' : 'No directory provider available.'}
+                </p>
+              )}
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.8rem' }}>
+              <div>
+                <h3>LDAP bind test</h3>
+              </div>
+              {enterpriseLdapTesting && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitEnterpriseLdapTest}>
+              <label>
+                username
+                <input
+                  value={enterpriseLdapTestUsername}
+                  onChange={(event) => setEnterpriseLdapTestUsername(event.target.value)}
+                  placeholder={enterpriseLdapConfig?.userTemplate || 'uid={username},ou=People,dc=example,dc=org'}
+                />
+              </label>
+              <label>
+                password
+                <input
+                  type="password"
+                  value={enterpriseLdapTestPassword}
+                  onChange={(event) => setEnterpriseLdapTestPassword(event.target.value)}
+                  autoComplete="current-password"
+                  placeholder="••••••••"
+                />
+              </label>
+              <div className="resource-actions">
+                <button
+                  type="submit"
+                  className="secondary"
+                  disabled={enterpriseLdapTesting || !enterpriseLdapConfig?.enabled}
+                >
+                  {enterpriseLdapTesting
+                    ? (locale === 'fr' ? 'Test en cours...' : 'Testing...')
+                    : (locale === 'fr' ? 'Tester le bind LDAP' : 'Run LDAP bind test')}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    setEnterpriseLdapTestUsername('');
+                    setEnterpriseLdapTestPassword('');
+                    setEnterpriseLdapTestResult(null);
+                  }}
+                >
+                  {locale === 'fr' ? 'Effacer' : 'Clear'}
+                </button>
+              </div>
+            </form>
+            {enterpriseLdapTestResult && (
+              <div className="relay-enroll-token-box">
+                <p>
+                  <strong>LDAP bind result</strong>
+                </p>
+                <code className="relay-enroll-command">{JSON.stringify(enterpriseLdapTestResult, null, 2)}</code>
+              </div>
+            )}
+          </div>
+          )}
+
+          {adminSection === 'enterprise' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>SCIM Directory Explorer</h3>
+                <p>
+                  {locale === 'fr'
+                    ? 'Interrogez Users/Groups avec startIndex, count et filter (eq/co/sw).'
+                    : 'Query Users/Groups with startIndex, count and filter (eq/co/sw).'}
+                </p>
+              </div>
+              {enterpriseScimLoading && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+
+            <form className="resource-form" onSubmit={onSubmitEnterpriseScimFilter}>
+              <label className="full">
+                SCIM filter
+                <input
+                  value={enterpriseScimFilter}
+                  onChange={(event) => setEnterpriseScimFilter(event.target.value)}
+                  placeholder={'userName co "admin"'}
+                />
+              </label>
+              <label>
+                startIndex
+                <input
+                  type="number"
+                  min="1"
+                  value={enterpriseScimStartIndex}
+                  onChange={(event) => setEnterpriseScimStartIndex(event.target.value)}
+                />
+              </label>
+              <label>
+                count
+                <input
+                  type="number"
+                  min="0"
+                  max="200"
+                  value={enterpriseScimCount}
+                  onChange={(event) => setEnterpriseScimCount(event.target.value)}
+                />
+              </label>
+              <div className="resource-actions">
+                <button type="submit" className="secondary">
+                  {locale === 'fr' ? 'Rechercher SCIM' : 'Query SCIM'}
+                </button>
+              </div>
+            </form>
+
+            {enterpriseScimError && <p className="error">{enterpriseScimError}</p>}
+
+            <div className="relay-kpi-grid">
+              <article className="relay-kpi-card">
+                <span>Users total</span>
+                <strong>{enterpriseScimMeta.users.totalResults}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Users page</span>
+                <strong>{enterpriseScimMeta.users.itemsPerPage}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Groups total</span>
+                <strong>{enterpriseScimMeta.groups.totalResults}</strong>
+              </article>
+              <article className="relay-kpi-card">
+                <span>Groups page</span>
+                <strong>{enterpriseScimMeta.groups.itemsPerPage}</strong>
+              </article>
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.9rem' }}>
+              <div>
+                <h3>SCIM Users</h3>
+              </div>
+            </div>
+            <div className="resource-list">
+              {enterpriseScimUsers.length ? enterpriseScimUsers.map((user) => {
+                const scimRole = Array.isArray(user?.roles) && user.roles.length
+                  ? String(user.roles[0]?.value || user.roles[0]?.display || '')
+                  : '';
+                return (
+                  <article className="resource-row" key={`scim-user-${user.id || user.userName}`}>
+                    <div>
+                      <h4>{user.userName || user.id}</h4>
+                      <p className="muted">id: {user.id || 'n/a'} • role: {scimRole || 'n/a'}</p>
+                    </div>
+                    <span className={`pill ${user.active ? 'ok' : 'offline'}`}>{user.active ? 'active' : 'inactive'}</span>
+                  </article>
+                );
+              }) : (
+                <p className="muted">
+                  {locale === 'fr' ? 'Aucun utilisateur SCIM trouvé pour ce filtre.' : 'No SCIM user matched this filter.'}
+                </p>
+              )}
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.9rem' }}>
+              <div>
+                <h3>SCIM Groups</h3>
+              </div>
+            </div>
+            <div className="resource-list">
+              {enterpriseScimGroups.length ? enterpriseScimGroups.map((group) => (
+                <article className="resource-row" key={`scim-group-${group.id || group.displayName}`}>
+                  <div>
+                    <h4>{group.displayName || group.id}</h4>
+                    <p className="muted">
+                      id: {group.id || 'n/a'} • members: {Array.isArray(group.members) ? group.members.length : 0}
+                    </p>
+                  </div>
+                </article>
+              )) : (
+                <p className="muted">
+                  {locale === 'fr' ? 'Aucun groupe SCIM trouvé pour ce filtre.' : 'No SCIM group matched this filter.'}
+                </p>
+              )}
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.9rem' }}>
+              <div>
+                <h3>SCIM PATCH Workspace</h3>
+              </div>
+              {enterpriseScimPatchLoading && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitEnterpriseScimPatch}>
+              <label>
+                user id / userName
+                <input
+                  value={enterpriseScimPatchId}
+                  onChange={(event) => setEnterpriseScimPatchId(event.target.value)}
+                  placeholder="admin"
+                />
+              </label>
+              <label>
+                new userName
+                <input
+                  value={enterpriseScimPatchUsername}
+                  onChange={(event) => setEnterpriseScimPatchUsername(event.target.value)}
+                  placeholder={locale === 'fr' ? 'optionnel' : 'optional'}
+                />
+              </label>
+              <label>
+                role
+                <select
+                  value={enterpriseScimPatchRole}
+                  onChange={(event) => setEnterpriseScimPatchRole(event.target.value)}
+                >
+                  <option value="">{locale === 'fr' ? 'inchangé' : 'unchanged'}</option>
+                  <option value="operator">operator</option>
+                  <option value="admin">admin</option>
+                  <option value="auditor">auditor</option>
+                </select>
+              </label>
+              <label>
+                active
+                <select
+                  value={enterpriseScimPatchActive}
+                  onChange={(event) => setEnterpriseScimPatchActive(event.target.value)}
+                >
+                  <option value="unchanged">{locale === 'fr' ? 'inchangé' : 'unchanged'}</option>
+                  <option value="active">true</option>
+                  <option value="inactive">false</option>
+                </select>
+              </label>
+              <div className="resource-actions">
+                <button type="submit" className="secondary" disabled={enterpriseScimPatchLoading}>
+                  {enterpriseScimPatchLoading
+                    ? (locale === 'fr' ? 'Patch en cours...' : 'Patching...')
+                    : 'Apply SCIM patch'}
+                </button>
+              </div>
+            </form>
+            {enterpriseScimPatchResult && <p className="muted">{enterpriseScimPatchResult}</p>}
+          </div>
+          )}
+
+          {adminSection === 'enterprise' && (
+          <div className="panel reveal">
+            <div className="panel-header">
+              <div>
+                <h3>Integration Drills</h3>
+                <p>
+                  {locale === 'fr'
+                    ? 'Validez les chemins ITSM fail-open/fail-closed et le forwarding SIEM.'
+                    : 'Validate ITSM fail-open/fail-closed and SIEM forwarding behavior.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="panel-header" style={{ marginTop: '0.4rem' }}>
+              <div>
+                <h3>ITSM ticket verification</h3>
+              </div>
+              {enterpriseItsmLoading && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitEnterpriseItsmVerification}>
+              <label>
+                provider
+                <select
+                  value={enterpriseItsmProvider}
+                  onChange={(event) => setEnterpriseItsmProvider(event.target.value)}
+                >
+                  {enterpriseItsmProviders.length ? enterpriseItsmProviders.map((provider) => (
+                    <option key={`itsm-provider-${provider.id}`} value={provider.id}>
+                      {provider.name || provider.id}
+                    </option>
+                  )) : (
+                    <option value="servicenow">servicenow</option>
+                  )}
+                </select>
+              </label>
+              <label>
+                ticketId
+                <input
+                  value={enterpriseItsmTicketId}
+                  onChange={(event) => setEnterpriseItsmTicketId(event.target.value)}
+                  placeholder="INC-2026-0042"
+                />
+              </label>
+              <label>
+                failMode
+                <select
+                  value={enterpriseItsmFailMode}
+                  onChange={(event) => setEnterpriseItsmFailMode(event.target.value)}
+                >
+                  <option value="fail-closed">fail-closed</option>
+                  <option value="fail-open">fail-open</option>
+                </select>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={enterpriseItsmUnavailable}
+                  onChange={(event) => setEnterpriseItsmUnavailable(event.target.checked)}
+                />
+                <span>simulateUnavailable</span>
+              </label>
+              <div className="resource-actions">
+                <button type="submit" className="secondary" disabled={enterpriseItsmLoading}>
+                  {enterpriseItsmLoading
+                    ? (locale === 'fr' ? 'Vérification...' : 'Verifying...')
+                    : (locale === 'fr' ? 'Vérifier le ticket' : 'Verify ticket')}
+                </button>
+              </div>
+            </form>
+            {enterpriseItsmResult && (
+              <div className="relay-enroll-token-box">
+                <p><strong>ITSM result</strong></p>
+                <code className="relay-enroll-command">{JSON.stringify(enterpriseItsmResult, null, 2)}</code>
+              </div>
+            )}
+
+            <div className="panel-header" style={{ marginTop: '0.7rem' }}>
+              <div>
+                <h3>SIEM event forwarding</h3>
+              </div>
+              {enterpriseSiemLoading && <span className="pill loading">{t('common.loading')}</span>}
+            </div>
+            <form className="resource-form" onSubmit={onSubmitEnterpriseSiemDispatch}>
+              <label>
+                channel
+                <select
+                  value={enterpriseSiemChannel}
+                  onChange={(event) => setEnterpriseSiemChannel(event.target.value)}
+                >
+                  {enterpriseSiemChannels.length ? enterpriseSiemChannels.map((channel) => (
+                    <option key={`siem-channel-${channel.id}`} value={channel.id}>
+                      {channel.name || channel.id}
+                    </option>
+                  )) : (
+                    <option value="json_webhook">json_webhook</option>
+                  )}
+                </select>
+              </label>
+              <label>
+                eventType
+                <input
+                  value={enterpriseSiemEventType}
+                  onChange={(event) => setEnterpriseSiemEventType(event.target.value)}
+                  placeholder="security.incident.escalated"
+                />
+              </label>
+              <label>
+                deliveryMode
+                <select
+                  value={enterpriseSiemDeliveryMode}
+                  onChange={(event) => setEnterpriseSiemDeliveryMode(event.target.value)}
+                >
+                  <option value="fail-open">fail-open</option>
+                  <option value="fail-closed">fail-closed</option>
+                </select>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={enterpriseSiemSimulateFailure}
+                  onChange={(event) => setEnterpriseSiemSimulateFailure(event.target.checked)}
+                />
+                <span>simulateFailure</span>
+              </label>
+              <div className="resource-actions">
+                <button type="submit" className="secondary" disabled={enterpriseSiemLoading}>
+                  {enterpriseSiemLoading
+                    ? (locale === 'fr' ? 'Envoi...' : 'Forwarding...')
+                    : (locale === 'fr' ? 'Transmettre l’événement' : 'Forward event')}
+                </button>
+              </div>
+            </form>
+            {enterpriseSiemResult && (
+              <div className="relay-enroll-token-box">
+                <p><strong>SIEM result</strong></p>
+                <code className="relay-enroll-command">{JSON.stringify(enterpriseSiemResult, null, 2)}</code>
+              </div>
             )}
           </div>
           )}
@@ -4739,7 +6476,7 @@ export default function App() {
                     onClick={() => onUpdateMfaPreference('webauthn')}
                     disabled={!webauthnEnabled}
                   >
-                    Prefer Passkey
+                    {t('admin.preferPasskey')}
                   </button>
                 </div>
               </div>
@@ -4792,14 +6529,14 @@ export default function App() {
                     className="ghost"
                     onClick={() => { setTotpSetupData(null); setTotpSetupCode(''); }}
                   >
-                    Cancel
+                    {t('common.cancel')}
                   </button>
                 </div>
               </div>
             )}
             <div className="mfa-panel-block">
               <label>
-                Passkey label
+                {t('admin.passkeyLabel')}
                 <input
                   className="mfa-code-input"
                   type="text"
@@ -4825,7 +6562,7 @@ export default function App() {
                   {webauthnCredentials.map((credential) => (
                     <article key={credential.id} className="mfa-passkey-item">
                       <div>
-                        <strong>{credential.label || 'Passkey'}</strong>
+                        <strong>{credential.label || t('admin.passkey')}</strong>
                         <p className="muted">
                           Added {formatRelativeDate(credential.createdAt)}
                           {credential.lastUsedAt ? ` · used ${formatRelativeDate(credential.lastUsedAt)}` : ''}
@@ -4939,7 +6676,7 @@ export default function App() {
             )}
             {canManagePlatform && activeSecurityIncident?.active && (
               <button type="button" className="ghost" onClick={closeIncidentCase} disabled={incidentCaseBusy}>
-                {incidentCaseBusy ? 'Closing incident...' : 'Close incident case'}
+                {incidentCaseBusy ? t('app.closingIncident') : t('app.closeIncidentCase')}
               </button>
             )}
             {canManagePlatform && !containmentEnabled && (
@@ -4954,7 +6691,7 @@ export default function App() {
             )}
             {canOperateSessions && activeIncidentSuspectSessions.length > 0 && (
               <button type="button" className="ghost" onClick={requestTerminateIncidentSuspects}>
-                Terminate active suspects ({activeIncidentSuspectSessions.length})
+                {t('app.terminateActiveSuspects', { count: activeIncidentSuspectSessions.length })}
               </button>
             )}
             <button type="button" className="ghost" onClick={dismissLiveSecurityIncident}>
@@ -4969,8 +6706,7 @@ export default function App() {
           <div className="modal-content" onClick={(event) => event.stopPropagation()}>
             <h3>Confirm Session Termination</h3>
             <p>
-              You are about to terminate {activeIncidentSuspectSessions.length} active correlated suspect session(s).
-              This action is immediate.
+              {t('app.confirmTerminateBody', { count: activeIncidentSuspectSessions.length })}
             </p>
             <div className="resource-actions" style={{ marginTop: '0.9rem' }}>
               <button type="button" onClick={confirmTerminateIncidentSuspects} disabled={incidentTerminateBusy}>
@@ -4982,7 +6718,7 @@ export default function App() {
                 onClick={() => setIncidentTerminateConfirmOpen(false)}
                 disabled={incidentTerminateBusy}
               >
-                Cancel
+                {t('common.cancel')}
               </button>
             </div>
           </div>
@@ -5017,8 +6753,8 @@ export default function App() {
         <div className="brand">
           <img src="/assets/logo-icon-dark.png" alt="EndoriumFort" className="brand-logo" />
           <div>
-            <h1>WebBastion Console</h1>
-            <p>Minimal access console for SSH sessions and live supervision.</p>
+            <h1>{t('app.title')}</h1>
+            <p>{t('app.subtitle')}</p>
           </div>
         </div>
         <div className="top-actions">
@@ -5028,38 +6764,42 @@ export default function App() {
             <span className="pill monitor">{roleName}</span>
           </div>
           <div className="nav-actions">
+            <select aria-label={t('common.language')} value={locale} onChange={(event) => setLocale(event.target.value)}>
+              <option value="fr">{t('common.french')}</option>
+              <option value="en">{t('common.english')}</option>
+            </select>
             {canManagePlatform && (
               <button
                 type="button"
                 className="secondary"
                 onClick={() => navigate('/admin')}
               >
-                Admin
+                {t('app.admin')}
               </button>
             )}
             <button type="button" className="ghost" onClick={() => setChangePwOpen(true)}>
-              Change password
+              {t('auth.changePassword')}
             </button>
-            <button type="button" className="ghost icon-btn" title={darkMode ? 'Light mode' : 'Dark mode'} onClick={toggleDarkMode}>
+            <button type="button" className="ghost icon-btn" title={darkMode ? t('auth.lightMode') : t('auth.darkMode')} onClick={toggleDarkMode}>
               {darkMode ? '☀️' : '🌙'}
             </button>
             <button type="button" className="ghost" onClick={onLogout}>
-              Sign out
+              {t('auth.signOut')}
             </button>
           </div>
         </div>
       </header>
 
-      <section className="mission-board reveal" aria-label="Mission board navigation">
+      <section className="mission-board reveal" aria-label={t('nav.missionBoard')}>
         <div className="mission-headline">
           <div>
-            <p className="workflow-kicker">Access Workspace</p>
-            <h3>Choose a resource and act</h3>
-            <p>Risk, requirements, and launch path are visible before you connect.</p>
+            <p className="workflow-kicker">{t('app.accessWorkspace')}</p>
+            <h3>{t('app.chooseResource')}</h3>
+            <p>{t('app.chooseResourceHint')}</p>
           </div>
           <div className="mission-headline-actions">
             <button type="button" className="ghost" onClick={onQuickRefresh} disabled={quickRefreshing}>
-              {quickRefreshing ? 'Refreshing...' : 'Refresh data'}
+              {quickRefreshing ? t('app.refreshing') : t('app.refreshData')}
             </button>
           </div>
         </div>
@@ -5084,12 +6824,12 @@ export default function App() {
       </section>
 
       {canViewAudit && (
-        <section className="live-alert-settings reveal" aria-label="Alert noise filter">
+        <section className="live-alert-settings reveal" aria-label={t('nav.alertNoiseFilter')}>
           <div className="live-alert-settings-copy">
-            <strong>Alert Noise Filter</strong>
-            <span>Adjust how aggressively live alerts are surfaced while you work.</span>
+            <strong>{t('app.alertNoiseFilter')}</strong>
+            <span>{t('app.alertNoiseHint')}</span>
           </div>
-          <div className="live-alert-profile-tabs" role="group" aria-label="Live alert filter mode">
+          <div className="live-alert-profile-tabs" role="group" aria-label={t('nav.liveAlertFilterMode')}>
             {Object.keys(LIVE_ALERT_PROFILES).map((profileKey) => (
               <button
                 type="button"
@@ -5125,7 +6865,7 @@ export default function App() {
             <div className="stat-icon stat-resources">🖥️</div>
             <div>
               <h4>{stats.resources?.total || 0}</h4>
-              <p className="muted">Resources</p>
+              <p className="muted">{t('app.resources')}</p>
             </div>
           </div>
           <div className="stat-card">
@@ -5200,7 +6940,7 @@ export default function App() {
               <h3>Recent sessions</h3>
               <p>Last opened sessions, prioritized for fast intervention.</p>
             </div>
-            <span className="pill ok">{recentSessions.length} shown</span>
+            <span className="pill ok">{t('app.shownCount', { count: recentSessions.length })}</span>
           </div>
           <div className="recent-session-list">
             {recentSessions.length ? (
@@ -5231,71 +6971,89 @@ export default function App() {
       <section className="panel resources-panel reveal">
         <div className="panel-header">
           <div>
-            <h3>Resources</h3>
-            <p>Open a tile to see what the session will require.</p>
+            <h3>{t('app.resources')}</h3>
+            <p>{t('app.resourcesHint')}</p>
           </div>
           <div className="status-row">
             {loadingResources ? (
-              <span className="pill loading">loading</span>
+              <span className="pill loading">{t('common.loading')}</span>
             ) : (
-              <span className="pill ok">{resources.length} tiles</span>
+              <span className="pill ok">{t('app.tilesCount', { count: resources.length })}</span>
             )}
           </div>
         </div>
         {resourceError && <InlineAlert tone="error">{resourceError}</InlineAlert>}
         <div className="resource-tiles">
           {resources.length ? (
-            resources.map((resource) => (
-              <button
-                type="button"
-                className="resource-tile"
-                key={resource.id}
-                onClick={() => onConnectResource(resource)}
-              >
-                <div
-                  className="resource-thumb"
-                  style={
-                    resource.imageData
-                      ? { backgroundImage: `url(${resource.imageData})` }
-                      : resource.imageUrl
-                        ? { backgroundImage: `url(${resource.imageUrl})` }
-                        : undefined
-                  }
+            resources.map((resource) => {
+              const protocol = String(resource?.protocol || 'ssh').toLowerCase();
+              const resourceName = resource?.name || `${t('app.resource')} #${resource.id}`;
+              const endpointPort = resource?.port ?? '-';
+              const endpoint = `${resource?.target || t('common.notAvailable')}:${endpointPort}`;
+              const policyTags = Array.from(new Set([
+                ...describeAccessOutcome(resource, t),
+                ...describeResourcePolicy(resource, t)
+              ]));
+
+              return (
+                <button
+                  type="button"
+                  className="resource-tile"
+                  key={resource.id}
+                  onClick={() => onConnectResource(resource)}
                 >
-                  {!(resource.imageData || resource.imageUrl) && (
-                    <span className="resource-letter">
-                      {resource.name ? resource.name[0] : 'R'}
+                  <div className="resource-tile-header">
+                    <div
+                      className="resource-thumb"
+                      style={
+                        resource.imageData
+                          ? { backgroundImage: `url(${resource.imageData})` }
+                          : resource.imageUrl
+                            ? { backgroundImage: `url(${resource.imageUrl})` }
+                            : undefined
+                      }
+                    >
+                      {!(resource.imageData || resource.imageUrl) && (
+                        <span className="resource-letter">
+                          {resourceName[0] || 'R'}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="resource-info">
+                      <h4 title={resourceName}>{resourceName}</h4>
+                      <p className="resource-endpoint">
+                        <span className="resource-protocol-chip">{protocol.toUpperCase()}</span>
+                        <span className="resource-endpoint-value">{endpoint}</span>
+                      </p>
+                    </div>
+
+                    <span className={`resource-launch-pill ${protocol === 'agent' ? 'agent' : 'direct'}`}>
+                      {protocol === 'agent' ? t('app.launch') : t('app.connectLower')}
                     </span>
-                  )}
-                </div>
-                <div className="resource-info">
-                  <h4>{resource.name}</h4>
-                  <p className="muted">
-                    {resource.protocol} {resource.target}:{resource.port}
-                  </p>
+                  </div>
+
                   {resource.description && (
-                    <p className="muted">{resource.description}</p>
+                    <p className="resource-description">{resource.description}</p>
                   )}
-                  <div className="policy-chip-row">
-                    {describeAccessOutcome(resource).map((item) => (
-                      <span className="policy-chip" key={`outcome-${resource.id}-${item}`}>{item}</span>
+
+                  <div className="resource-tag-row">
+                    {resource.hasCredentials && (
+                      <span className="resource-tag resource-tag-vault" title={t('app.vaultStored')}>
+                        {t('app.vault')}
+                      </span>
+                    )}
+                    {policyTags.map((item) => (
+                      <span className="resource-tag resource-tag-policy" key={`policy-${resource.id}-${item}`}>
+                        {item}
+                      </span>
                     ))}
                   </div>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  {resource.hasCredentials && (
-                    <span className="pill ok" title="Credentials stored in vault" style={{ fontSize: '0.65rem' }}>🔐 vault</span>
-                  )}
-                  {resource.protocol === 'agent' ? (
-                    <span className="pill loading" style={{ fontSize: '0.65rem' }}>🚀 launch</span>
-                  ) : (
-                    <span className="pill ready">connect</span>
-                  )}
-                </div>
-              </button>
-            ))
+                </button>
+              );
+            })
           ) : (
-            <EmptyState title="No resources yet" message="Ask an admin to add a target or assign a resource to your scope." />
+            <EmptyState title={t('app.noResourcesYet')} message={t('app.noResourcesMessage')} />
           )}
         </div>
       </section>
@@ -5306,14 +7064,14 @@ export default function App() {
         <div className="panel reveal">
           <div className="panel-header">
             <div>
-              <h3>Sessions</h3>
-              <p>Start, supervise, and terminate SSH access.</p>
+              <h3>{t('app.sessionPanelTitle')}</h3>
+              <p>{t('app.sessionPanelHint')}</p>
             </div>
             <div className="status-row">
               {loadingSessions ? (
-                <span className="pill loading">loading</span>
+                <span className="pill loading">{t('common.loading')}</span>
               ) : (
-                <span className="pill ok">{activeSessions.length} active</span>
+                <span className="pill ok">{t('app.activeCount', { count: activeSessions.length })}</span>
               )}
             </div>
           </div>
@@ -5323,11 +7081,11 @@ export default function App() {
             <div style={{ marginBottom: '1rem' }}>
               <div className="panel-header" style={{ marginBottom: '0.7rem' }}>
                 <div>
-                  <h3 style={{ fontSize: '1rem' }}>Pending Approvals</h3>
-                  <p>Latest dual-control requests awaiting admin action.</p>
+                  <h3 style={{ fontSize: '1rem' }}>{t('app.pendingApprovals')}</h3>
+                  <p>{t('app.pendingApprovalsHint')}</p>
                 </div>
                 <span className={`pill ${pendingAccessApprovals.length ? 'loading' : 'ok'}`}>
-                  {pendingAccessApprovals.length} pending
+                  {t('admin.pendingCount', { count: pendingAccessApprovals.length })}
                 </span>
               </div>
               {accessRequestError && <p className="error">{accessRequestError}</p>}
@@ -5350,20 +7108,20 @@ export default function App() {
                           className="secondary"
                           onClick={() => onApproveAccessRequest(request.id)}
                         >
-                          Approve
+                          {t('admin.approve')}
                         </button>
                         <button
                           type="button"
                           className="ghost"
                           onClick={() => onDenyAccessRequest(request.id)}
                         >
-                          Deny
+                          {t('admin.deny')}
                         </button>
                       </div>
                     </article>
                   ))
                 ) : (
-                  <p className="muted">No pending approvals.</p>
+                  <p className="muted">{t('app.noPendingApprovals')}</p>
                 )}
               </div>
             </div>
@@ -5372,28 +7130,28 @@ export default function App() {
           <div className="watchlist-panel">
             <div className="slo-grid">
               <article className="slo-card">
-                <span>Completion rate</span>
+                <span>{t('app.completionRate')}</span>
                 <strong>{sessionSlo.completionRate}%</strong>
-                <p className="muted">Terminated sessions / total sessions</p>
+                <p className="muted">{t('app.terminatedSessionsTotal')}</p>
               </article>
               <article className="slo-card">
-                <span>Average duration</span>
+                <span>{t('app.averageDuration')}</span>
                 <strong>{sessionSlo.avgDurationMin} min</strong>
-                <p className="muted">Based on closed session history</p>
+                <p className="muted">{t('app.basedOnClosedHistory')}</p>
               </article>
               <article className="slo-card">
-                <span>Stale active sessions</span>
+                <span>{t('app.staleActiveSessions')}</span>
                 <strong>{sessionSlo.staleActive}</strong>
-                <p className="muted">Active over 4 hours</p>
+                <p className="muted">{t('app.activeOverHours')}</p>
               </article>
             </div>
             <div className="panel-header" style={{ marginBottom: '0.35rem' }}>
               <div>
-                <h3 style={{ fontSize: '1rem' }}>Critical Session Watchlist</h3>
-                <p>Pin sessions to monitor status changes faster.</p>
+                <h3 style={{ fontSize: '1rem' }}>{t('app.criticalSessionWatchlist')}</h3>
+                <p>{t('app.watchlistHint')}</p>
               </div>
               <span className={`pill ${watchedSessions.length ? 'loading' : 'ok'}`}>
-                {watchedSessions.length} watched
+                {t('app.watchedCount', { count: watchedSessions.length })}
               </span>
             </div>
             {watchlistAlerts.length > 0 && (
@@ -5402,7 +7160,7 @@ export default function App() {
                   <article key={alert.key} className="watch-alert-item">
                     <p>{alert.message}</p>
                     <button type="button" className="ghost" onClick={() => dismissWatchAlert(alert.key)}>
-                      Dismiss
+                      {t('app.dismiss')}
                     </button>
                   </article>
                 ))}
@@ -5419,9 +7177,40 @@ export default function App() {
                 ))}
               </div>
             ) : (
-              <p className="muted">No watched sessions yet. Use Pin on any session card.</p>
+              <p className="muted">{t('app.noWatchedSessions')}</p>
             )}
           </div>
+
+          {(sessionEvidenceLoading || sessionEvidencePack || sessionEvidenceError) && (
+            <div className="watchlist-panel">
+              <div className="panel-header" style={{ marginBottom: '0.5rem' }}>
+                <div>
+                  <h3 style={{ fontSize: '1rem' }}>Evidence Pack</h3>
+                  <p>Signed JIT access proof for the selected session.</p>
+                </div>
+              </div>
+              {sessionEvidenceLoading && <p className="muted">Loading evidence pack...</p>}
+              {sessionEvidenceError && <p className="error">{sessionEvidenceError}</p>}
+              {sessionEvidencePack && (
+                <div className="resource-list">
+                  <article className="resource-row">
+                    <div>
+                      <h4>Session #{sessionEvidencePack.session?.id}</h4>
+                      <p className="muted">
+                        Digest: <code>{sessionEvidencePack.digest}</code>
+                      </p>
+                      <p className="muted">
+                        Signature: <code>{sessionEvidencePack.signature}</code>
+                      </p>
+                      <p className="muted">
+                        Grant #{sessionEvidencePack.accessGrant?.id || 'n/a'} • Policy #{sessionEvidencePack.accessGrant?.policyId || 0}
+                      </p>
+                    </div>
+                  </article>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="session-grid">
             {sessions.map((session) => (
@@ -5439,7 +7228,7 @@ export default function App() {
                       className={watchedSessionIds.includes(Number(session.id)) ? 'secondary' : 'ghost'}
                       onClick={() => toggleWatchSession(session.id)}
                     >
-                      {watchedSessionIds.includes(Number(session.id)) ? 'Pinned' : 'Pin'}
+                      {watchedSessionIds.includes(Number(session.id)) ? t('app.pinned') : t('app.pin')}
                     </button>
                     <span className={`pill ${session.status}`}>
                       {session.status}
@@ -5448,12 +7237,12 @@ export default function App() {
                 </header>
                 <p className="session-route">
                   <strong>{session.user}</strong>
-                  <span className="arrow">to</span>
+                  <span className="arrow">{t('app.to')}</span>
                   <strong>{session.target}</strong>
                 </p>
                 <div className="session-route-hints">
                   <span className={`pill ${sessionRelayHints[session.id]?.route === 'relay' ? 'loading' : 'ready'}`}>
-                    {sessionRelayHints[session.id]?.route === 'relay' ? 'via relay' : 'direct route'}
+                    {sessionRelayHints[session.id]?.route === 'relay' ? t('app.viaRelay') : t('app.directRoute')}
                   </span>
                   {sessionRelayHints[session.id]?.route === 'relay' && sessionRelayHints[session.id]?.relayLabel && (
                     <span className="muted session-relay-label">
@@ -5462,9 +7251,15 @@ export default function App() {
                   )}
                 </div>
                 <div className="session-meta">
-                  <span>Opened: {session.createdAt}</span>
+                  <span>{t('app.openedAt', { value: session.createdAt })}</span>
+                  {session.accessGrantId ? (
+                    <span>Grant #{session.accessGrantId}</span>
+                  ) : null}
+                  {session.credentialSource ? (
+                    <span>{session.credentialSource}</span>
+                  ) : null}
                   {session.terminatedAt && (
-                    <span>Closed: {session.terminatedAt}</span>
+                    <span>{t('app.closedAt', { value: session.terminatedAt })}</span>
                   )}
                 </div>
                 <div className="session-actions">
@@ -5474,14 +7269,14 @@ export default function App() {
                     onClick={() => onTerminate(session.id)}
                     disabled={session.status !== 'active' || !canOperateSessions}
                   >
-                    Terminate
+                    {t('app.terminate')}
                   </button>
                   <button
                     type="button"
                     className="ghost"
                     onClick={() => openAudit(session.id)}
                   >
-                    Open audit
+                    {t('app.openAudit')}
                   </button>
                   {canViewAudit && (
                     <button
@@ -5489,7 +7284,16 @@ export default function App() {
                       className="ghost"
                       onClick={() => onOpenSessionDna(session.id)}
                     >
-                      Session DNA
+                      {t('app.sessionDna')}
+                    </button>
+                  )}
+                  {canViewAudit && (
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => onOpenSessionEvidence(session.id)}
+                    >
+                      Evidence pack
                     </button>
                   )}
                   {canViewAudit && (
@@ -5498,16 +7302,16 @@ export default function App() {
                       className="ghost"
                       onClick={() => openRecordings(session.id)}
                     >
-                      Recordings
+                      {t('app.recordings')}
                     </button>
                   )}
                   <button
                     type="button"
                     className="ghost"
-                    onClick={() => openTerminal(session)}
+                    onClick={() => openLiveSession(session)}
                     disabled={session.status !== 'active' || !canOperateSessions}
                   >
-                    Open live
+                    {t('app.openLive')}
                   </button>
                   {canViewAudit &&
                     session.status === 'active' && (
@@ -5515,9 +7319,9 @@ export default function App() {
                         type="button"
                         className="ghost shadow-btn"
                         onClick={() => openShadow(session)}
-                        title="Observe this session in real-time (read-only)"
+                        title={t('app.shadowObserve')}
                       >
-                        👁 Shadow
+                        👁 {t('app.shadowTitle')}
                       </button>
                     )}
                 </div>
@@ -5530,14 +7334,14 @@ export default function App() {
           <div className="panel audit-panel reveal">
             <div className="panel-header">
               <div>
-                <h3>Audit log</h3>
-                <p>Recent audit events and session actions.</p>
+                <h3>{t('app.auditLog')}</h3>
+                <p>{t('app.auditLogHint')}</p>
               </div>
               <div className="status-row">
                 {loadingAudit ? (
-                  <span className="pill loading">loading</span>
+                  <span className="pill loading">{t('common.loading')}</span>
                 ) : (
-                  <span className="pill ok">{filteredAuditItems.length} events</span>
+                  <span className="pill ok">{t('app.eventsCount', { count: filteredAuditItems.length })}</span>
                 )}
               </div>
             </div>
@@ -5548,7 +7352,7 @@ export default function App() {
                 onClick={loadAudit}
                 disabled={loadingAudit}
               >
-                Refresh
+                {t('common.refresh')}
               </button>
               <button
                 type="button"
@@ -5556,7 +7360,7 @@ export default function App() {
                 onClick={exportFilteredAuditCsv}
                 disabled={!filteredAuditItems.length}
               >
-                Export CSV
+                {t('app.exportCsv')}
               </button>
               {auditFilter && (
                 <button
@@ -5564,17 +7368,17 @@ export default function App() {
                   className="ghost"
                   onClick={() => setAuditFilter(null)}
                 >
-                  Clear filter
+                  {t('app.clearFilter')}
                 </button>
               )}
               <button type="button" className="ghost" onClick={() => setAuditFilter(null)}>
-                Clear view
+                {t('app.clearView')}
               </button>
             </div>
             <div className="audit-search-row">
               <input
                 type="text"
-                placeholder="Search events..."
+                placeholder={t('app.searchEvents')}
                 value={auditSearchQuery}
                 onChange={(e) => setAuditSearchQuery(e.target.value)}
                 style={{ flex: 1, maxWidth: '280px' }}
@@ -5584,22 +7388,22 @@ export default function App() {
                 onChange={(e) => setAuditTypeFilter(e.target.value)}
                 style={{ maxWidth: '200px' }}
               >
-                <option value="">All types</option>
-                <option value="auth.login">Login</option>
-                <option value="auth.logout">Logout</option>
-                <option value="auth.login.failure">Login Failure</option>
-                <option value="session.create">Session Create</option>
-                <option value="session.terminate">Session Terminate</option>
-                <option value="session.close">Session Close</option>
-                <option value="resource">Resource</option>
-                <option value="user">User</option>
-                <option value="credential">Credential</option>
-                <option value="tunnel">Tunnel</option>
+                <option value="">{t('app.allTypes')}</option>
+                <option value="auth.login">{t('app.login')}</option>
+                <option value="auth.logout">{t('app.logout')}</option>
+                <option value="auth.login.failure">{t('app.loginFailure')}</option>
+                <option value="session.create">{t('app.sessionCreate')}</option>
+                <option value="session.terminate">{t('app.sessionTerminate')}</option>
+                <option value="session.close">{t('app.sessionClose')}</option>
+                <option value="resource">{t('app.resource')}</option>
+                <option value="user">{t('admin.users')}</option>
+                <option value="credential">{t('app.credential')}</option>
+                <option value="tunnel">{t('app.tunnel')}</option>
               </select>
             </div>
             {auditError && <p className="error">{auditError}</p>}
             {!canViewAudit && (
-              <p className="muted">Sign in with Security Auditor or Platform Admin role.</p>
+              <p className="muted">{t('app.auditorRoleHint')}</p>
             )}
             {canViewAudit && (
               <div className="audit-list">
@@ -5609,7 +7413,7 @@ export default function App() {
                       <div>
                         <h4>{item.type}</h4>
                         <p className="muted">
-                          {renderAuditDetail(item) || 'No session data'}
+                          {renderAuditDetail(item) || t('app.noSessionData')}
                         </p>
                       </div>
                       <div className="audit-meta">
@@ -5619,7 +7423,7 @@ export default function App() {
                     </article>
                   ))
                 ) : (
-                  <p className="muted">No audit events available.</p>
+                  <p className="muted">{t('app.noAuditEvents')}</p>
                 )}
               </div>
             )}
@@ -5632,8 +7436,8 @@ export default function App() {
       {mainTab === 'recordings' && canViewRecordings && (
         <Suspense
           fallback={(
-            <SectionCard title="Session Recordings" subtitle="Loading recordings view...">
-              <EmptyState title="Loading" message="Preparing the replay workspace." />
+            <SectionCard title={t('recordings.title')} subtitle={t('app.loadingRecordingsView')}>
+              <EmptyState title={t('common.loading')} message={t('app.preparingReplayWorkspace')} />
             </SectionCard>
           )}
         >
@@ -5660,8 +7464,8 @@ export default function App() {
       <section className="panel terminal-panel reveal">
         <div className="panel-header">
           <div>
-            <h3>Live SSH console</h3>
-            <p>Connect to the selected session with on-demand credentials.</p>
+            <h3>{t('app.liveSshConsole')}</h3>
+            <p>{t('app.liveSshConsoleHint')}</p>
           </div>
           <span className={`pill ${terminalStatus === 'live' ? 'ok' : 'loading'}`}>
             {terminalStatus}
@@ -5669,30 +7473,30 @@ export default function App() {
         </div>
         <div className="terminal-controls">
           <div>
-            <span className="muted">Session</span>
+            <span className="muted">{t('app.sessions')}</span>
             <h4>
               {activeTerminalSession
                 ? `#${activeTerminalSession.id} ${activeTerminalSession.target}`
-                : 'No session selected'}
+                : t('auth.noSessionSelected')}
             </h4>
           </div>
           <label>
-            SSH password
+            {t('app.sshPassword')}
             <input
               type="password"
               value={sshPassword}
               onChange={(event) => setSshPassword(event.target.value)}
-              placeholder="Enter SSH password"
+              placeholder={t('auth.enterSshPassword')}
             />
           </label>
           <button type="button" onClick={connectTerminal}>
-            Connect
+            {t('auth.connect')}
           </button>
         </div>
         <div className="snippet-studio">
           <div className="snippet-studio-head">
-            <h4>SSH Snippets Studio</h4>
-            <p>Inject or execute repeatable operational commands without retyping.</p>
+            <h4>{t('app.sshSnippetsStudio')}</h4>
+            <p>{t('app.sshSnippetsHint')}</p>
           </div>
           <div className="snippet-grid">
             {sshSnippetLibrary.map((snippet) => (
@@ -5701,10 +7505,10 @@ export default function App() {
                 <code>{snippet.command}</code>
                 <div className="snippet-actions">
                   <button type="button" className="ghost" onClick={() => sendSnippetToTerminal(snippet, false)}>
-                    Inject
+                    {t('app.inject')}
                   </button>
                   <button type="button" onClick={() => sendSnippetToTerminal(snippet, true)}>
-                    Run
+                    {t('app.run')}
                   </button>
                   {snippet.custom && (
                     <button
@@ -5721,7 +7525,7 @@ export default function App() {
           </div>
           <div className="snippet-builder">
             <label>
-              Snippet label
+              {t('app.snippetLabel')}
               <input
                 type="text"
                 value={snippetLabel}
@@ -5730,7 +7534,7 @@ export default function App() {
               />
             </label>
             <label>
-              Command
+              {t('app.command')}
               <input
                 type="text"
                 value={snippetCommand}
@@ -5739,7 +7543,7 @@ export default function App() {
               />
             </label>
             <button type="button" className="secondary" onClick={addCustomSnippet}>
-              Save snippet
+              {t('app.saveSnippet')}
             </button>
           </div>
         </div>
@@ -5751,12 +7555,12 @@ export default function App() {
 
       {mainTab === 'sessions' && inlineWebResource && (
       <section className="panel reveal" style={{ marginBottom: '24px' }}>
-        <div className="panel-header">
-          <div>
-            <h3>Embedded Web Access</h3>
-            <p>
-              {inlineWebResource.name} - {inlineWebResource.protocol} {inlineWebResource.target}:{inlineWebResource.port}
-            </p>
+          <div className="panel-header">
+            <div>
+              <h3>{t('app.embeddedWebAccess')}</h3>
+              <p>
+                {inlineWebResource.name} - {inlineWebResource.protocol} {inlineWebResource.target}:{inlineWebResource.port}
+              </p>
           </div>
           <div className="resource-actions">
             <button
@@ -5764,7 +7568,7 @@ export default function App() {
               className="ghost"
               onClick={() => setInlineWebResource(null)}
             >
-              Close
+              {t('common.close')}
             </button>
           </div>
         </div>
@@ -5778,14 +7582,21 @@ export default function App() {
       </section>
       )}
 
+      {vncViewerSession && (
+        <VncViewerModal
+          session={vncViewerSession}
+          onClose={() => setVncViewerSession(null)}
+        />
+      )}
+
       {/* Shadow session panel */}
       {mainTab === 'sessions' && shadowSession && (
         <section className="panel terminal-panel shadow-panel reveal">
-          <div className="panel-header">
-            <div>
-              <h3>👁 Shadow — Session #{shadowSession.id}</h3>
+            <div className="panel-header">
+              <div>
+              <h3>👁 {t('app.shadowTitle')} - Session #{shadowSession.id}</h3>
               <p>
-                Read-only observation of{' '}
+                {t('app.readOnlyObservation')}{' '}
                 <strong>{shadowSession.user}</strong> → <strong>{shadowSession.target}</strong>
               </p>
             </div>
@@ -5794,7 +7605,7 @@ export default function App() {
                 {shadowStatus}
               </span>
               <button type="button" className="secondary" onClick={closeShadow}>
-                Close
+                {t('common.close')}
               </button>
             </div>
           </div>
@@ -5810,96 +7621,110 @@ export default function App() {
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <h3>
               {accessPromptMode === 'request'
-                ? 'Approval Request Required'
-                : 'Connection Justification Required'}
+                ? t('app.approvalRequestRequired')
+                : t('app.connectionJustificationRequired')}
             </h3>
             <p className="muted" style={{ marginTop: 0 }}>
               {accessPromptMode === 'request'
-                ? `${accessPromptResource.name} requires an approval workflow before session start.`
+                ? t('app.approvalWorkflowRequired', { name: accessPromptResource.name })
                 : containmentEnabled
-                  ? `${accessPromptResource.name} requires an access reason because containment mode is active.`
-                  : `${accessPromptResource.name} requires an access reason before opening the session.`}
+                  ? t('app.containmentReasonRequired', { name: accessPromptResource.name })
+                  : t('app.accessReasonRequired', { name: accessPromptResource.name })}
             </p>
             <div className="policy-chip-row" style={{ marginBottom: '0.8rem' }}>
-              {describeAccessOutcome(accessPromptResource).map((item) => (
+              {describeAccessOutcome(accessPromptResource, t).map((item) => (
                 <span className="policy-chip" key={`access-prompt-${item}`}>{item}</span>
               ))}
             </div>
             {containmentEnabled && accessPromptMode === 'connect' && containmentStatus.reason && (
               <p className="muted" style={{ marginTop: 0 }}>
-                Containment context: {containmentStatus.reason}
+                {t('app.containmentContext', { value: containmentStatus.reason })}
               </p>
             )}
             <form onSubmit={onSubmitAccessPrompt}>
               <div className="risk-preview-box">
-                <strong>Risk Preview</strong>
-                {riskPreviewLoading && <p className="muted">Calculating risk score...</p>}
+                <strong>{t('app.riskPreview')}</strong>
+                {riskPreviewLoading && <p className="muted">{t('app.calculatingRiskScore')}</p>}
                 {riskPreviewError && <p className="error">{riskPreviewError}</p>}
                 {riskPreview && (
                   <>
                     <p className="muted" style={{ marginBottom: '0.35rem' }}>
-                      Score: <strong>{riskPreview.score}/100</strong> ({riskPreview.effectiveRiskLevel})
+                      {t('app.score', { value: riskPreview.score, risk: riskPreview.effectiveRiskLevel })}
+                    </p>
+                    <p className="muted" style={{ marginBottom: '0.35rem' }}>
+                      {[
+                        riskPreview.justificationRequired ? 'justification' : null,
+                        riskPreview.ticketRequired ? 'ticket' : null,
+                        riskPreview.approvalRequired ? 'approval' : null,
+                        riskPreview.mfaRequirement && riskPreview.mfaRequirement !== 'any'
+                          ? `mfa:${riskPreview.mfaRequirement}`
+                          : null,
+                        riskPreview.routingConstraint && riskPreview.routingConstraint !== 'any'
+                          ? `route:${riskPreview.routingConstraint}`
+                          : null,
+                        riskPreview.maxDurationSeconds ? `ttl:${riskPreview.maxDurationSeconds}s` : null
+                      ].filter(Boolean).join(' • ')}
                     </p>
                     <p className="muted" style={{ margin: 0 }}>
                       {Array.isArray(riskPreview.factors)
                         ? riskPreview.factors.join(' - ')
-                        : 'No factors'}
+                        : t('app.noFactors')}
                     </p>
                   </>
                 )}
               </div>
               <div className="playbook-strip">
                 <div>
-                  <strong>Access Playbook</strong>
+                  <strong>{t('app.accessPlaybook')}</strong>
                   <p className="muted">
                     {currentAccessPlaybook
-                      ? `Saved for this resource (${new Date(currentAccessPlaybook.updatedAt || Date.now()).toLocaleString()}).`
-                      : 'No playbook yet for this resource.'}
+                      ? t('app.playbookSavedAt', { value: new Date(currentAccessPlaybook.updatedAt || Date.now()).toLocaleString(locale) })
+                      : t('app.noPlaybookYet')}
                   </p>
                 </div>
                 <div className="playbook-actions">
                   <button type="button" className="ghost" onClick={applyCurrentAccessPlaybook}>
-                    Apply
+                    {t('app.apply')}
                   </button>
                   <button type="button" className="secondary" onClick={saveCurrentAccessPlaybook}>
-                    Save
+                    {t('common.save')}
                   </button>
                   {currentAccessPlaybook && (
                     <button type="button" className="danger" onClick={deleteCurrentAccessPlaybook}>
-                      Delete
+                      {t('common.delete')}
                     </button>
                   )}
                 </div>
               </div>
               <label>
-                Access reason
+                {t('app.accessReason')}
                 <input
                   type="text"
                   value={accessPromptReason}
                   onChange={(event) => setAccessPromptReason(event.target.value)}
-                  placeholder="Describe why you need this access"
+                  placeholder={t('app.accessReasonPlaceholder')}
                   required
                 />
               </label>
               <label>
-                Ticket / Change ID (optional)
+                {t('app.ticketChangeId')}
                 <input
                   type="text"
                   value={accessPromptTicketId}
                   onChange={(event) => setAccessPromptTicketId(event.target.value)}
-                  placeholder="INC-1234 / CHG-5678"
+                  placeholder={t('app.ticketChangePlaceholder')}
                 />
               </label>
               <label>
-                Session purpose {(String(accessPromptResource.riskLevel || '').toLowerCase() === 'high' ||
+                {t('app.sessionPurpose')} {(String(accessPromptResource.riskLevel || '').toLowerCase() === 'high' ||
                 String(accessPromptResource.riskLevel || '').toLowerCase() === 'critical')
-                  ? '(required for high-risk)'
-                  : '(optional)'}
+                  ? t('app.requiredForHighRisk')
+                  : t('app.optionalLabel')}
                 <input
                   type="text"
                   value={accessPromptPurpose}
                   onChange={(event) => setAccessPromptPurpose(event.target.value)}
-                  placeholder="Maintenance, incident response, onboarding..."
+                  placeholder={t('app.sessionPurposePlaceholder')}
                   required={
                     String(accessPromptResource.riskLevel || '').toLowerCase() === 'high' ||
                     String(accessPromptResource.riskLevel || '').toLowerCase() === 'critical'
@@ -5907,24 +7732,24 @@ export default function App() {
                 />
               </label>
               <label>
-                Purpose evidence (optional)
+                {t('app.purposeEvidence')}
                 <input
                   type="text"
                   value={accessPromptPurposeEvidence}
                   onChange={(event) => setAccessPromptPurposeEvidence(event.target.value)}
-                  placeholder="Change request, SOP ref, ticket notes"
+                  placeholder={t('app.purposeEvidencePlaceholder')}
                 />
               </label>
               <div style={{ display: 'flex', gap: '0.8rem', marginTop: '0.8rem' }}>
                 <button type="submit">
-                  {accessPromptMode === 'request' ? 'Submit request' : 'Continue'}
+                  {accessPromptMode === 'request' ? t('app.submitRequest') : t('app.continue')}
                 </button>
                 <button
                   type="button"
                   className="ghost"
                   onClick={closeAccessPrompt}
                 >
-                  Cancel
+                  {t('common.cancel')}
                 </button>
               </div>
             </form>
@@ -5935,8 +7760,8 @@ export default function App() {
       {sessionDnaLoading && (
         <div className="modal-overlay" onClick={() => setSessionDnaLoading(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3>Session DNA</h3>
-            <p className="muted">Loading chain...</p>
+            <h3>{t('app.sessionDna')}</h3>
+            <p className="muted">{t('app.loadingChain')}</p>
           </div>
         </div>
       )}
@@ -5950,12 +7775,12 @@ export default function App() {
           }}
         >
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3>Session DNA {sessionDna?.sessionId ? `#${sessionDna.sessionId}` : ''}</h3>
+            <h3>{t('app.sessionDna')} {sessionDna?.sessionId ? `#${sessionDna.sessionId}` : ''}</h3>
             {sessionDnaError && <p className="error">{sessionDnaError}</p>}
             {sessionDna && (
               <>
                 <p className="muted" style={{ marginTop: 0 }}>
-                  Integrity: {sessionDna.verified ? 'verified' : 'mismatch detected'}
+                  {t('app.integrity', { value: sessionDna.verified ? t('app.verified') : t('app.mismatchDetected') })}
                 </p>
                 <div className="audit-timeline" style={{ maxHeight: '320px', overflowY: 'auto' }}>
                   {(sessionDna.entries || []).length ? (
@@ -5967,7 +7792,7 @@ export default function App() {
                       </article>
                     ))
                   ) : (
-                    <p className="muted">No DNA entries for this session.</p>
+                    <p className="muted">{t('app.noDnaEntries')}</p>
                   )}
                 </div>
               </>
@@ -5981,7 +7806,7 @@ export default function App() {
                   setSessionDnaError('');
                 }}
               >
-                Close
+                {t('common.close')}
               </button>
             </div>
           </div>
@@ -5998,26 +7823,26 @@ export default function App() {
             <div className="agent-modal-header">
               <span className="agent-icon">🚀</span>
               <div>
-                <h3>Agent Tunnel</h3>
-                <p className="muted">Connexion via l'agent local EndoriumFort</p>
+                <h3>{t('app.agentTunnel')}</h3>
+                <p className="muted">{t('app.agentLocalConnection')}</p>
               </div>
             </div>
             <div className="agent-modal-info">
               <div className="agent-info-row">
-                <span className="agent-label">Ressource</span>
+                <span className="agent-label">{t('app.resourceLabel')}</span>
                 <span className="agent-value">{agentModal.resource.name}</span>
               </div>
               <div className="agent-info-row">
-                <span className="agent-label">Cible</span>
+                <span className="agent-label">{t('app.targetLabel')}</span>
                 <span className="agent-value">{agentModal.resource.target}:{agentModal.resource.port}</span>
               </div>
               <div className="agent-info-row">
-                <span className="agent-label">Port local</span>
+                <span className="agent-label">{t('app.localPort')}</span>
                 <span className="agent-value">127.0.0.1:{agentModal.port}</span>
               </div>
             </div>
             <div className="agent-command-block">
-              <label className="agent-label">Commande de secours (si le protocole n'est pas enregistré) :</label>
+              <label className="agent-label">{t('app.fallbackCommand')}</label>
               <div className="agent-command-row">
                 <code className="agent-command">{agentModal.command}</code>
                 <button
@@ -6033,12 +7858,12 @@ export default function App() {
                     setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, copied: 'idle' }) : null), 2000);
                   }}
                 >
-                  {agentModal.copied === 'ok' ? '✓ Copié' : agentModal.copied === 'fail' ? '❌ Échec' : '📋 Copier'}
+                  {agentModal.copied === 'ok' ? `✓ ${t('app.copied')}` : agentModal.copied === 'fail' ? `❌ ${t('app.copyFailed')}` : `📋 ${t('app.copy')}`}
                 </button>
               </div>
             </div>
             <div className="agent-command-block">
-              <label className="agent-label">Lien deep-link :</label>
+              <label className="agent-label">{t('app.deepLink')}</label>
               <div className="agent-command-row">
                 <code className="agent-command">{agentModal.deepLink}</code>
                 <button
@@ -6054,26 +7879,26 @@ export default function App() {
                     setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, linkCopied: 'idle' }) : null), 2000);
                   }}
                 >
-                  {agentModal.linkCopied === 'ok' ? '✓ Copié' : agentModal.linkCopied === 'fail' ? '❌ Échec' : '📋 Copier lien'}
+                  {agentModal.linkCopied === 'ok' ? `✓ ${t('app.copied')}` : agentModal.linkCopied === 'fail' ? `❌ ${t('app.copyFailed')}` : `📋 ${t('app.copyLink')}`}
                 </button>
               </div>
             </div>
             <div className="agent-modal-tip">
               {agentModal.openInBrowser ? (
-                <p>💡 Une fois le tunnel actif, l'agent redirige automatiquement vers <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
+                <p>💡 {t('app.agentOpenBrowserTip', { value: agentModal.localUrl })} <a href={agentModal.localUrl} target="_blank" rel="noreferrer">{agentModal.localUrl}</a>.</p>
               ) : (
-                <p>💡 Une fois le tunnel actif, connecte ton client {String(agentModal.resource?.protocol || '').toUpperCase()} sur <strong>{agentModal.localEndpoint}</strong>.</p>
+                <p>💡 {t('app.agentClientTip', { protocol: String(agentModal.resource?.protocol || '').toUpperCase(), value: agentModal.localEndpoint })}</p>
               )}
               {agentModal.launchState === 'opening' && (
-                <p className="muted">Ouverture de l'application agent en cours...</p>
+                <p className="muted">{t('app.openingAgentApp')}</p>
               )}
               {agentModal.launchState === 'fallback' && (
                 <>
                   <p className="error" style={{ marginBottom: '0.45rem' }}>
-                    L'application agent ne semble pas enregistrée comme handler du protocole.
+                    {t('app.missingProtocolHandler')}
                   </p>
                   <p className="muted" style={{ marginBottom: '0.45rem' }}>
-                    Installation rapide ({agentModal.installGuide?.platform || 'OS'}) :
+                    {t('app.quickInstall', { platform: agentModal.installGuide?.platform || 'OS' })}
                   </p>
                   <div className="agent-command-row">
                     <code className="agent-command">{agentModal.installGuide?.command}</code>
@@ -6090,7 +7915,7 @@ export default function App() {
                         setTimeout(() => setAgentModal((prev) => prev ? ({ ...prev, installCopied: 'idle' }) : null), 2000);
                       }}
                     >
-                      {agentModal.installCopied === 'ok' ? '✓ Copié' : agentModal.installCopied === 'fail' ? '❌ Échec' : '📋 Copier install'}
+                      {agentModal.installCopied === 'ok' ? `✓ ${t('app.copied')}` : agentModal.installCopied === 'fail' ? `❌ ${t('app.copyFailed')}` : `📋 ${t('app.copyInstall')}`}
                     </button>
                   </div>
                 </>
@@ -6102,7 +7927,7 @@ export default function App() {
                 className="secondary"
                 onClick={() => launchAgentDeepLink(agentModal.deepLink)}
               >
-                🚀 Ouvrir avec l'agent
+                🚀 {t('app.openWithAgent')}
               </button>
               <button
                 type="button"
@@ -6113,12 +7938,12 @@ export default function App() {
                 }}
                 className="ghost"
               >
-                🔄 Nouveau port
+                🔄 {t('app.newPort')}
               </button>
               <button type="button" className="ghost" onClick={() => {
                 clearAgentLaunchWatcher();
                 setAgentModal(null);
-              }}>Fermer</button>
+              }}>{t('app.closeLabel')}</button>
             </div>
           </div>
         </div>
@@ -6128,32 +7953,32 @@ export default function App() {
       {changePwOpen && (
         <div className="modal-overlay" onClick={() => setChangePwOpen(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3>Change Password</h3>
+            <h3>{t('auth.changePassword')}</h3>
             <form onSubmit={onChangePassword}>
               <label>
-                Current password
+                {t('auth.currentPassword')}
                 <input type="password" value={changePwCurrent}
                   onChange={(e) => setChangePwCurrent(e.target.value)} required />
               </label>
               <label>
-                New password
+                {t('auth.newPassword')}
                 <input type="password" value={changePwNew}
                   onChange={(e) => setChangePwNew(e.target.value)} required
-                  placeholder="Min 8 chars, upper + lower + digit" />
+                  placeholder={t('auth.passwordPlaceholder')} />
               </label>
               <label>
-                Confirm new password
+                {t('auth.confirmNewPassword')}
                 <input type="password" value={changePwConfirm}
                   onChange={(e) => setChangePwConfirm(e.target.value)} required />
               </label>
               {changePwError && <p className="error">{changePwError}</p>}
               {changePwSuccess && <p className="success">{changePwSuccess}</p>}
               <div style={{display:'flex',gap:'0.8rem',marginTop:'0.8rem'}}>
-                <button type="submit">Change</button>
+                <button type="submit">{t('auth.change')}</button>
                 <button type="button" className="ghost" onClick={() => {
                   setChangePwOpen(false); setChangePwError(''); setChangePwSuccess('');
                   setChangePwCurrent(''); setChangePwNew(''); setChangePwConfirm('');
-                }}>Cancel</button>
+                }}>{t('common.cancel')}</button>
               </div>
             </form>
           </div>

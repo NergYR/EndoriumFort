@@ -8,6 +8,7 @@ VERSION="${VERSION:-}"
 BINARY="${BINARY:-}"
 ARCH="${ARCH:-}"
 ICON_SOURCE="${ICON_SOURCE:-}"
+LAUNCHER_SOURCE="${LAUNCHER_SOURCE:-$ROOT_DIR/agent/packaging/macos/EndoriumFortAgentLauncher.swift}"
 
 if [[ -z "$VERSION" ]]; then
   if [[ -f "$ROOT_DIR/agent/VERSION" ]]; then
@@ -38,6 +39,11 @@ if ! command -v pkgbuild >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v swiftc >/dev/null 2>&1; then
+  echo "swiftc is required (run on macOS with Xcode command line tools)." >&2
+  exit 1
+fi
+
 if ! command -v iconutil >/dev/null 2>&1; then
   echo "iconutil is required (run on macOS with Xcode command line tools)." >&2
   exit 1
@@ -64,6 +70,11 @@ if [[ -z "$ICON_SOURCE" || ! -f "$ICON_SOURCE" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$LAUNCHER_SOURCE" ]]; then
+  echo "Launcher source not found: $LAUNCHER_SOURCE" >&2
+  exit 1
+fi
+
 mkdir -p "$OUT_DIR"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -78,6 +89,8 @@ mkdir -p "$MACOS_DIR"
 mkdir -p "$RESOURCES_DIR"
 cp "$BINARY" "$MACOS_DIR/endoriumfort-agent-bin"
 chmod +x "$MACOS_DIR/endoriumfort-agent-bin"
+swiftc "$LAUNCHER_SOURCE" -o "$MACOS_DIR/EndoriumFortAgentLauncher"
+chmod +x "$MACOS_DIR/EndoriumFortAgentLauncher"
 
 ICONSET_DIR="$WORK_DIR/EndoriumFortAgent.iconset"
 mkdir -p "$ICONSET_DIR"
@@ -94,14 +107,6 @@ sips -z 1024 1024 "$ICON_SOURCE" --out "$ICONSET_DIR/icon_512x512@2x.png" >/dev/
 
 iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/EndoriumFortAgent.icns"
 
-cat > "$MACOS_DIR/endoriumfort-agent-launcher" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-DIR="$(cd "$(dirname "$0")" && pwd)"
-exec "$DIR/endoriumfort-agent-bin" open-link "$1"
-EOF
-chmod +x "$MACOS_DIR/endoriumfort-agent-launcher"
-
 cat > "$CONTENTS_DIR/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -115,10 +120,12 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
   <string>space.endorium.agent</string>
   <key>CFBundleVersion</key>
   <string>${VERSION}</string>
+  <key>CFBundleShortVersionString</key>
+  <string>${VERSION}</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
-  <string>endoriumfort-agent-launcher</string>
+  <string>EndoriumFortAgentLauncher</string>
   <key>CFBundleIconFile</key>
   <string>EndoriumFortAgent.icns</string>
   <key>CFBundleURLTypes</key>
