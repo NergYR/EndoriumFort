@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string>
 
@@ -15,11 +16,19 @@ struct ScimFilterExpression {
   std::string value;
 };
 
+struct ScimPageWindow {
+  std::size_t start = 0;
+  std::size_t end = 0;
+};
+
 bool parse_scim_list_query_params(const char *start_index_param,
                                   const char *count_param,
                                   const char *filter_param,
                                   ScimListQuery &query,
                                   std::string &error_message);
+
+ScimPageWindow scim_page_window(const ScimListQuery &query,
+                                std::size_t total_results);
 
 std::optional<ScimFilterExpression> parse_scim_filter_expression(
     const std::string &raw_filter, std::string &error_message);

@@ -12,6 +12,7 @@
 #include <cctype>
 #include <ctime>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -51,6 +52,23 @@ inline std::optional<int64_t> parse_utc_epoch_seconds(
 
 inline int64_t now_epoch_seconds() {
   return static_cast<int64_t>(std::time(nullptr));
+}
+
+inline std::optional<int64_t> checked_epoch_seconds_after(
+    int64_t epoch_seconds, int64_t delta_seconds) {
+  if (delta_seconds < 0) return std::nullopt;
+  if (epoch_seconds >
+      std::numeric_limits<int64_t>::max() - delta_seconds) {
+    return std::nullopt;
+  }
+  return epoch_seconds + delta_seconds;
+}
+
+inline uint64_t absolute_epoch_second_delta(int64_t left, int64_t right) {
+  if (left >= right) {
+    return static_cast<uint64_t>(left) - static_cast<uint64_t>(right);
+  }
+  return static_cast<uint64_t>(right) - static_cast<uint64_t>(left);
 }
 
 inline std::string utc_from_epoch_seconds(int64_t epoch_seconds) {
@@ -383,6 +401,8 @@ inline const std::vector<std::string> &permission_catalog() {
       "ssh.shadow.watch",
       "rdp.connect",
       "vnc.connect",
+      "cluster.read",
+      "cluster.manage",
       "web.proxy.access",
       "tunnel.connect"};
   return catalog;
@@ -404,7 +424,8 @@ inline std::unordered_set<std::string> default_permissions_for_role(
   }
   if (normalized == "auditor") {
     return {"resources.read", "sessions.read", "audit.read", "recordings.read",
-            "stats.read", "access_requests.read", "ssh.shadow.watch"};
+            "stats.read", "access_requests.read", "ssh.shadow.watch",
+            "cluster.read"};
   }
   return {"resources.read", "sessions.read", "sessions.create",
           "sessions.terminate", "stats.read", "access_requests.read",

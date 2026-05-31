@@ -81,6 +81,13 @@ int main() {
       "ENDORIUMFORT_RELAY_ENROLL_TOKEN_TTL_SECONDS",
       "ENDORIUMFORT_RELAY_TOKEN_TTL_SECONDS",
       "ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS",
+        "ENDORIUMFORT_CLUSTER_ENABLED",
+        "ENDORIUMFORT_CLUSTER_NODE_ID",
+        "ENDORIUMFORT_CLUSTER_NODE_LABEL",
+        "ENDORIUMFORT_CLUSTER_ADVERTISE_ADDR",
+        "ENDORIUMFORT_CLUSTER_ROLE",
+        "ENDORIUMFORT_CLUSTER_SHARED_SECRET",
+        "ENDORIUMFORT_CLUSTER_HEARTBEAT_STALE_SECONDS",
   });
 
   unset_env_value("ENDORIUMFORT_PORT");
@@ -114,6 +121,13 @@ int main() {
   set_env_value("ENDORIUMFORT_RELAY_ENROLL_TOKEN_TTL_SECONDS", "200");
   set_env_value("ENDORIUMFORT_RELAY_TOKEN_TTL_SECONDS", "300");
   set_env_value("ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS", "400");
+  set_env_value("ENDORIUMFORT_CLUSTER_ENABLED", "true");
+  set_env_value("ENDORIUMFORT_CLUSTER_NODE_ID", "node-lon-01");
+  set_env_value("ENDORIUMFORT_CLUSTER_NODE_LABEL", "London Core");
+  set_env_value("ENDORIUMFORT_CLUSTER_ADVERTISE_ADDR", "10.2.0.10:8080");
+  set_env_value("ENDORIUMFORT_CLUSTER_ROLE", "leader");
+  set_env_value("ENDORIUMFORT_CLUSTER_SHARED_SECRET", "cluster-secret");
+  set_env_value("ENDORIUMFORT_CLUSTER_HEARTBEAT_STALE_SECONDS", "55");
 
   AppContext ctx;
   const RuntimeConfig loaded = load_runtime_config(ctx);
@@ -138,6 +152,20 @@ int main() {
                "load_runtime_config should read relay auth token TTL");
   ok &= expect(loaded.relayHeartbeatStaleSeconds == 400,
                "load_runtime_config should read relay heartbeat stale threshold");
+  ok &= expect(loaded.clusterEnabled,
+               "load_runtime_config should read cluster enabled flag");
+  ok &= expect(loaded.clusterNodeId == "node-lon-01",
+               "load_runtime_config should read cluster node id");
+  ok &= expect(loaded.clusterNodeLabel == "London Core",
+               "load_runtime_config should read cluster node label");
+  ok &= expect(loaded.clusterAdvertiseAddr == "10.2.0.10:8080",
+               "load_runtime_config should read cluster advertise address");
+  ok &= expect(loaded.clusterRole == "leader",
+               "load_runtime_config should normalize cluster role");
+  ok &= expect(loaded.clusterSharedSecretConfigured,
+               "load_runtime_config should detect configured cluster secret");
+  ok &= expect(loaded.clusterHeartbeatStaleSeconds == 55,
+               "load_runtime_config should read cluster heartbeat stale threshold");
 
   apply_runtime_config(ctx, loaded);
   ok &= expect(ctx.token_ttl_seconds == 7200,
@@ -152,11 +180,27 @@ int main() {
                "apply_runtime_config should apply relay enrollment secret");
   ok &= expect(!ctx.relay_certificate_required,
                "apply_runtime_config should apply relay certificate policy");
+  ok &= expect(ctx.cluster_enabled,
+               "apply_runtime_config should apply cluster enabled flag");
+  ok &= expect(ctx.cluster_node_id == "node-lon-01",
+               "apply_runtime_config should apply cluster node id");
+  ok &= expect(ctx.cluster_node_label == "London Core",
+               "apply_runtime_config should apply cluster node label");
+  ok &= expect(ctx.cluster_advertise_addr == "10.2.0.10:8080",
+               "apply_runtime_config should apply cluster advertise address");
+  ok &= expect(ctx.cluster_role == "leader",
+               "apply_runtime_config should apply cluster role");
+  ok &= expect(ctx.cluster_shared_secret == "cluster-secret",
+               "apply_runtime_config should apply cluster shared secret");
+  ok &= expect(ctx.cluster_heartbeat_stale_seconds == 55,
+               "apply_runtime_config should apply cluster heartbeat stale threshold");
 
   RuntimeConfig invalid_webauthn = loaded;
   invalid_webauthn.webauthnRpIdOverride = "bad_domain";
   invalid_webauthn.webauthnOriginOverride = "http://bad_domain:8080";
   invalid_webauthn.relayEnrollmentEnabled = false;
+  invalid_webauthn.clusterEnabled = true;
+  invalid_webauthn.clusterSharedSecretConfigured = false;
   std::ostringstream captured_err;
   auto *old_buffer = std::cerr.rdbuf(captured_err.rdbuf());
   log_runtime_config(invalid_webauthn);
@@ -168,8 +212,12 @@ int main() {
                "log_runtime_config should warn on invalid RP ID");
   ok &= expect(logged.find("not a valid WebAuthn origin") != std::string::npos,
                "log_runtime_config should warn on invalid origin");
+  ok &= expect(logged.find("peer heartbeat auth is disabled") != std::string::npos,
+               "log_runtime_config should warn when cluster secret is missing");
   ok &= expect(logged.find("super-secret") == std::string::npos,
                "log_runtime_config should never print relay secrets");
+  ok &= expect(logged.find("cluster-secret") == std::string::npos,
+               "log_runtime_config should never print cluster secret");
 
   if (!ok) {
     return 1;

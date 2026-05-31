@@ -23,6 +23,13 @@ struct RuntimeConfig {
   int relayEnrollmentTokenTtlSeconds = 600;
   int relayTokenTtlSeconds = 86400;
   int relayHeartbeatStaleSeconds = 90;
+  bool clusterEnabled = false;
+  std::string clusterNodeId;
+  std::string clusterNodeLabel;
+  std::string clusterAdvertiseAddr;
+  std::string clusterRole = "standalone";
+  int clusterHeartbeatStaleSeconds = 45;
+  bool clusterSharedSecretConfigured = false;
 };
 
 inline int parse_positive_int_env(const char *name, int default_value) {
@@ -57,6 +64,16 @@ inline std::string parse_string_env(const char *name) {
   return (raw && *raw != '\0') ? std::string(raw) : std::string();
 }
 
+inline std::string normalize_cluster_role(std::string role) {
+  for (char &ch : role) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  if (role == "leader" || role == "follower" || role == "standalone") {
+    return role;
+  }
+  return "standalone";
+}
+
 inline RuntimeConfig load_runtime_config(const AppContext &ctx) {
   RuntimeConfig config;
   config.port = parse_positive_int_env("ENDORIUMFORT_PORT", config.port);
@@ -85,6 +102,24 @@ inline RuntimeConfig load_runtime_config(const AppContext &ctx) {
   config.relayHeartbeatStaleSeconds = parse_positive_int_env(
       "ENDORIUMFORT_RELAY_HEARTBEAT_STALE_SECONDS",
       ctx.relay_heartbeat_stale_seconds);
+    config.clusterEnabled = parse_bool_env(
+      "ENDORIUMFORT_CLUSTER_ENABLED", ctx.cluster_enabled);
+    config.clusterNodeId = parse_string_env("ENDORIUMFORT_CLUSTER_NODE_ID");
+    config.clusterNodeLabel = parse_string_env("ENDORIUMFORT_CLUSTER_NODE_LABEL");
+    config.clusterAdvertiseAddr =
+      parse_string_env("ENDORIUMFORT_CLUSTER_ADVERTISE_ADDR");
+    config.clusterRole = normalize_cluster_role(
+      parse_string_env("ENDORIUMFORT_CLUSTER_ROLE"));
+    if (config.clusterRole == "standalone" &&
+      parse_string_env("ENDORIUMFORT_CLUSTER_ROLE").empty()) {
+    config.clusterRole = normalize_cluster_role(ctx.cluster_role);
+    }
+    config.clusterHeartbeatStaleSeconds = parse_positive_int_env(
+      "ENDORIUMFORT_CLUSTER_HEARTBEAT_STALE_SECONDS",
+      ctx.cluster_heartbeat_stale_seconds);
+    const std::string cluster_secret =
+      parse_string_env("ENDORIUMFORT_CLUSTER_SHARED_SECRET");
+    config.clusterSharedSecretConfigured = !cluster_secret.empty();
   const std::string relay_secret = parse_string_env("ENDORIUMFORT_RELAY_ENROLL_SECRET");
   config.relayEnrollmentEnabled = !relay_secret.empty();
   return config;
@@ -104,10 +139,28 @@ inline void apply_runtime_config(AppContext &ctx, const RuntimeConfig &config) {
   ctx.relay_token_ttl_seconds = config.relayTokenTtlSeconds;
   ctx.relay_enrollment_token_ttl_seconds = config.relayEnrollmentTokenTtlSeconds;
   ctx.relay_heartbeat_stale_seconds = config.relayHeartbeatStaleSeconds;
+  ctx.cluster_enabled = config.clusterEnabled;
+  ctx.cluster_role = normalize_cluster_role(config.clusterRole);
+  ctx.cluster_heartbeat_stale_seconds = config.clusterHeartbeatStaleSeconds;
+
+  if (!config.clusterNodeId.empty()) {
+    ctx.cluster_node_id = config.clusterNodeId;
+  }
+  if (!config.clusterNodeLabel.empty()) {
+    ctx.cluster_node_label = config.clusterNodeLabel;
+  }
+  if (!config.clusterAdvertiseAddr.empty()) {
+    ctx.cluster_advertise_addr = config.clusterAdvertiseAddr;
+  }
 
   const std::string relay_secret = parse_string_env("ENDORIUMFORT_RELAY_ENROLL_SECRET");
   if (!relay_secret.empty()) {
     ctx.relay_enroll_secret = relay_secret;
+  }
+  const std::string cluster_secret =
+      parse_string_env("ENDORIUMFORT_CLUSTER_SHARED_SECRET");
+  if (!cluster_secret.empty()) {
+    ctx.cluster_shared_secret = cluster_secret;
   }
 }
 
@@ -125,18 +178,38 @@ inline void log_runtime_config(const RuntimeConfig &config) {
           << " relay_cert_ttl_seconds=" << config.relayCertificateTtlSeconds
           << " relay_token_ttl_seconds=" << config.relayTokenTtlSeconds
           << " relay_enroll_token_ttl_seconds=" << config.relayEnrollmentTokenTtlSeconds
-          << " relay_heartbeat_stale_seconds=" << config.relayHeartbeatStaleSeconds;
+          << " relay_heartbeat_stale_seconds=" << config.relayHeartbeatStaleSeconds
+          << " cluster_enabled=" << (config.clusterEnabled ? "true" : "false")
+          << " cluster_role=" << normalize_cluster_role(config.clusterRole)
+          << " cluster_heartbeat_stale_seconds="
+          << config.clusterHeartbeatStaleSeconds
+          << " cluster_peer_auth="
+          << (config.clusterSharedSecretConfigured ? "required" : "disabled");
   if (!config.webauthnRpIdOverride.empty()) {
     summary << " webauthn_rp_id=" << config.webauthnRpIdOverride;
   }
   if (!config.webauthnOriginOverride.empty()) {
     summary << " webauthn_origin=" << config.webauthnOriginOverride;
   }
+  if (!config.clusterNodeId.empty()) {
+    summary << " cluster_node_id=" << config.clusterNodeId;
+  }
+  if (!config.clusterNodeLabel.empty()) {
+    summary << " cluster_node_label=" << config.clusterNodeLabel;
+  }
+  if (!config.clusterAdvertiseAddr.empty()) {
+    summary << " cluster_advertise_addr=" << config.clusterAdvertiseAddr;
+  }
   std::cerr << summary.str() << '\n';
 
   if (!config.relayEnrollmentEnabled) {
     std::cerr
         << "[relay] ENDORIUMFORT_RELAY_ENROLL_SECRET is not set; relay enrollment is disabled"
+        << '\n';
+  }
+  if (config.clusterEnabled && !config.clusterSharedSecretConfigured) {
+    std::cerr
+        << "[cluster] ENDORIUMFORT_CLUSTER_SHARED_SECRET is not set; peer heartbeat auth is disabled"
         << '\n';
   }
   if (!config.webauthnRpIdOverride.empty() &&

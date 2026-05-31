@@ -2,6 +2,7 @@
 #include "crypto.h"
 
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace {
@@ -29,6 +30,18 @@ int main() {
 
   const auto invalid = parse_utc_epoch_seconds("2026/03/10 12:34:56");
   ok &= expect(!invalid.has_value(), "parse_utc_epoch_seconds should reject invalid format");
+
+  const auto future_epoch = checked_epoch_seconds_after(100, 30);
+  ok &= expect(future_epoch && *future_epoch == 130,
+               "checked_epoch_seconds_after should add safe positive deltas");
+  ok &= expect(!checked_epoch_seconds_after(
+                   std::numeric_limits<int64_t>::max(), 1),
+               "checked_epoch_seconds_after should reject overflowing deltas");
+  ok &= expect(absolute_epoch_second_delta(
+                   std::numeric_limits<int64_t>::max(),
+                   std::numeric_limits<int64_t>::min()) ==
+                   std::numeric_limits<uint64_t>::max(),
+               "absolute_epoch_second_delta should avoid signed subtraction overflow");
 
   const std::string escaped = json_escape("a\"b\\c\n");
   ok &= expect(escaped == "a\\\"b\\\\c\\n", "json_escape should escape quote, slash, newline");

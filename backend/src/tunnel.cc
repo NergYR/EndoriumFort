@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -212,7 +213,9 @@ std::optional<TunnelTicket> consume_tunnel_ticket(
   }
 
   const int64_t now_epoch = now_epoch_seconds();
-  if (std::llabs(now_epoch - timestamp) > ctx.tunnel_signature_max_skew_seconds) {
+  const uint64_t max_skew =
+      static_cast<uint64_t>(std::max(0, ctx.tunnel_signature_max_skew_seconds));
+  if (absolute_epoch_second_delta(now_epoch, timestamp) > max_skew) {
     return std::nullopt;
   }
   if (!is_allowed_tunnel_signing_key_id(ctx, signing_key_id, now_epoch)) {
@@ -360,8 +363,12 @@ void register_tunnel_routes(CrowApp &app, AppContext &ctx) {
         ticket.issuedForIp = source_ip;
         ticket.issuedForUserAgent = source_user_agent;
         ticket.issuedAt = now_utc();
-        ticket.expiresAt =
-          utc_from_epoch_seconds(now_epoch + ctx.tunnel_ticket_ttl_seconds);
+        const auto ticket_expires_at =
+            checked_epoch_seconds_after(now_epoch, ctx.tunnel_ticket_ttl_seconds);
+        if (!ticket_expires_at) {
+          return crow::response(500, "Invalid tunnel ticket TTL");
+        }
+        ticket.expiresAt = utc_from_epoch_seconds(*ticket_expires_at);
         auto signing_secret =
             tunnel_signing_secret_for_key_id(ctx, signing_key_id, now_epoch);
         if (!signing_secret) {

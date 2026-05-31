@@ -10,6 +10,26 @@
 - Default behavior under WSL now uses lower pressure settings (`BUILD_TESTING=OFF`, 2 build jobs, agent cross-compilation disabled).
 - Updated `run-dev.sh` backend bootstrap build to use the same configurable `BUILD_TESTING` and `BUILD_JOBS` controls.
 
+### Cluster / HA Foundations
+- Added dedicated backend cluster control-plane routes:
+  - `GET /api/cluster/status`
+  - `GET /api/cluster/config`
+  - `POST /api/cluster/heartbeat`
+  - `DELETE /api/cluster/peers/:nodeId`
+- Added in-memory cluster peer registry/runtime metadata in `AppContext` and `models` with stale heartbeat detection.
+- Added Cluster/HA runtime environment configuration support:
+  - `ENDORIUMFORT_CLUSTER_ENABLED`
+  - `ENDORIUMFORT_CLUSTER_NODE_ID`
+  - `ENDORIUMFORT_CLUSTER_NODE_LABEL`
+  - `ENDORIUMFORT_CLUSTER_ADVERTISE_ADDR`
+  - `ENDORIUMFORT_CLUSTER_ROLE`
+  - `ENDORIUMFORT_CLUSTER_SHARED_SECRET`
+  - `ENDORIUMFORT_CLUSTER_HEARTBEAT_STALE_SECONDS`
+- Added new RBAC permissions `cluster.read` and `cluster.manage` and wired them into backend permission catalog.
+- Extended backend route contract tests with cluster authn/authz, heartbeat acceptance/rejection, status summary, and peer eviction checks.
+- Extended frontend Enterprise IAM workspace with Cluster/HA observability cards and peer lifecycle action (remove peer).
+- Updated README feature matrix, runtime/API docs, and roadmap completion state for Cluster/HA mode.
+
 ## v1.1.0-dev - 2026-03-11
 ### Go Toolchain Security Patch
 - Upgraded Go toolchain baseline to `1.25.9` across agent and CI workflows to address `govulncheck` findings in Go standard library (`GO-2026-4947`, `GO-2026-4946`, `GO-2026-4870`).

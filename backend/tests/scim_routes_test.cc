@@ -1,4 +1,5 @@
 #include "app_context.h"
+#include "cluster.h"
 #include "routes.h"
 #include "utils.h"
 #include "vnc.h"
@@ -367,6 +368,13 @@ int main() {
   seed_user(ctx, 3, "bob", "operator");
   seed_user(ctx, 4, "charlie", "auditor");
   ctx.next_user_id.store(5);
+  ctx.cluster_enabled = true;
+  ctx.cluster_shared_secret = "cluster-test-secret";
+  ctx.cluster_node_id = "node-core-01";
+  ctx.cluster_node_label = "Core Node 01";
+  ctx.cluster_role = "leader";
+  ctx.cluster_advertise_addr = "10.10.0.10:8080";
+  ctx.cluster_heartbeat_stale_seconds = 120;
 
   const std::string admin_token = "scim-route-test-token";
   seed_auth_session(ctx, 1, "admin", "admin", admin_token);
@@ -375,6 +383,7 @@ int main() {
 
   CrowApp app;
   register_enterprise_routes(app, ctx);
+  register_cluster_routes(app, ctx);
   register_vnc_routes(app, ctx);
   app.validate();
 
@@ -496,6 +505,100 @@ int main() {
                    "VNC capabilities should expose websocket path when enabled");
     }
   }
+
+    {
+    auto response = dispatch_request(
+      app, crow::HTTPMethod::Get, "/api/cluster/status");
+    ok &= expect(response.code == 401,
+           "Cluster status should reject requests without auth token");
+    }
+
+    {
+    auto response = dispatch_request(
+      app, crow::HTTPMethod::Get, "/api/cluster/status", operator_token);
+    ok &= expect(response.code == 403,
+           "Cluster status should reject non-admin operators");
+    }
+
+    {
+    auto response = dispatch_request(
+      app, crow::HTTPMethod::Get, "/api/cluster/config", admin_token);
+    ok &= expect(response.code == 200,
+           "Cluster config should be available for admin users");
+    auto payload = crow::json::load(response.body);
+    ok &= expect(payload && payload.has("status") &&
+             std::string(payload["status"].s()) == "ok",
+           "Cluster config should return status=ok");
+    ok &= expect(payload && payload.has("enabled") && payload["enabled"].b(),
+           "Cluster config should expose enabled=true in deterministic tests");
+    ok &= expect(payload && payload.has("role") &&
+             std::string(payload["role"].s()) == "leader",
+           "Cluster config should expose local cluster role");
+    ok &= expect(payload && payload.has("heartbeatPath") &&
+             std::string(payload["heartbeatPath"].s()) ==
+               "/api/cluster/heartbeat",
+           "Cluster config should expose heartbeat route path");
+    ok &= expect(payload && payload.has("peerAuthRequired") &&
+             payload["peerAuthRequired"].b(),
+           "Cluster config should report peer auth requirement");
+    }
+
+    {
+    auto response = dispatch_request(
+      app, crow::HTTPMethod::Post, "/api/cluster/heartbeat", "",
+      R"({"nodeId":"node-edge-02","label":"Edge #2","endpoint":"10.10.0.22:8080","version":"1.1.1-dev","role":"follower","managedRelays":2,"managedSessions":7})",
+      {{"X-EndoriumFort-Cluster-Secret", "bad-secret"}});
+    ok &= expect(response.code == 401,
+           "Cluster heartbeat should reject invalid cluster secret");
+    }
+
+    {
+    auto response = dispatch_request(
+      app, crow::HTTPMethod::Post, "/api/cluster/heartbeat", "",
+      R"({"nodeId":"node-edge-02","label":"Edge #2","endpoint":"10.10.0.22:8080","version":"1.1.1-dev","role":"follower","managedRelays":2,"managedSessions":7})",
+      {{"X-EndoriumFort-Cluster-Secret", "cluster-test-secret"}});
+    ok &= expect(response.code == 200,
+           "Cluster heartbeat should accept valid peer payload");
+    auto payload = crow::json::load(response.body);
+    ok &= expect(payload && payload.has("status") &&
+             std::string(payload["status"].s()) == "ok",
+           "Cluster heartbeat should return status=ok");
+    ok &= expect(payload && payload.has("nodeId") &&
+             std::string(payload["nodeId"].s()) == "node-edge-02",
+           "Cluster heartbeat should echo peer node id");
+    }
+
+    {
+    auto response = dispatch_request(
+      app, crow::HTTPMethod::Get, "/api/cluster/status", admin_token);
+    ok &= expect(response.code == 200,
+           "Cluster status should be available for admin users");
+    auto payload = crow::json::load(response.body);
+    ok &= expect(payload && payload.has("summary"),
+           "Cluster status should include summary object");
+    ok &= expect(payload && payload.has("localNode") &&
+             payload["localNode"].has("nodeId") &&
+             std::string(payload["localNode"]["nodeId"].s()) ==
+               "node-core-01",
+           "Cluster status should expose deterministic local node id");
+    ok &= expect(payload && payload.has("peers") && payload["peers"].size() >= 1,
+           "Cluster status should include at least one peer after heartbeat");
+    ok &= expect(payload && payload.has("summary") &&
+             payload["summary"].has("nodesTotal") &&
+             payload["summary"]["nodesTotal"].i() == 2,
+           "Cluster status summary should include local node plus one peer");
+    }
+
+    {
+    auto response = dispatch_request(
+      app, crow::HTTPMethod::Delete, "/api/cluster/peers/node-edge-02",
+      admin_token);
+    ok &= expect(response.code == 200,
+           "Cluster peer delete should remove known peer for admins");
+    auto payload = crow::json::load(response.body);
+    ok &= expect(payload && payload.has("removed") && payload["removed"].b(),
+           "Cluster peer delete should return removed=true");
+    }
 
   {
     auto response =
