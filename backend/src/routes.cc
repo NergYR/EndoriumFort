@@ -5084,7 +5084,13 @@ void register_session_routes(CrowApp &app, AppContext &ctx) {
     int start_index = offset.value_or(0);
     if (start_index < 0) start_index = 0;
     int end_index = static_cast<int>(filtered.size());
-    if (limit && *limit > 0) end_index = std::min(end_index, start_index + *limit);
+    if (limit && *limit > 0) {
+      // Compute the upper bound in a wider type: start_index and *limit are
+      // both client-controlled and can each reach INT_MAX, so start_index +
+      // *limit would overflow a signed int (undefined behaviour).
+      long long bound = static_cast<long long>(start_index) + *limit;
+      end_index = static_cast<int>(std::min<long long>(end_index, bound));
+    }
     if (start_index > end_index) start_index = end_index;
 
     crow::json::wvalue payload;
