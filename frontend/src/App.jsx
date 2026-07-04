@@ -4332,7 +4332,11 @@ export default function App() {
 
   const toCsvCell = (value) => {
     const raw = String(value ?? '');
-    const escaped = raw.replace(/"/g, '""');
+    // Neutralize CSV formula injection: a cell starting with = + - @ (or a
+    // leading tab/CR) is interpreted as a formula by Excel/Sheets, even when
+    // quoted. Prefix such values with a single quote so they stay literal.
+    const guarded = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+    const escaped = guarded.replace(/"/g, '""');
     return `"${escaped}"`;
   };
 
